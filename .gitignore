@@ -1,0 +1,11 @@
+node_modules/
+dist/
+packages/*/dist/
+*.tsbuildinfo
+.agent-pigeon/
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.backup
+.DS_Store

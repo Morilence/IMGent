@@ -54,12 +54,12 @@ Agent Pigeon 是一个自托管的消息 Agent 框架。它把 QQ 官方机器�
 
 ## 2. 支持范围与平台能力
 
-| 平台 | 阶段 | 私聊 | 群聊 | v1 接入与记忆规则 |
-| --- | --- | --- | --- | --- |
-| QQ 官方机器人 | v1 | 支持 | 支持 | Gateway WebSocket；群聊默认仅处理触发消息，管理员可开启全量采集 |
-| 微信 iLink | v1 | 支持 | 当前官方插件路径不支持 | QR 授权、长轮询、依赖 `context_token` 回复，只创建私聊和个人记忆 |
-| 飞书应用机器人 | 待扩展 | 支持 | 支持 | 仅保留事实、数据模型和线程兼容性，不出现在 v1 配置与验收中 |
-| Telegram Bot | 待扩展 | 支持 | 支持 | 仅保留 privacy mode、supergroup 和 topic/thread 兼容性 |
+| 平台           | 阶段   | 私聊 | 群聊                   | v1 接入与记忆规则                                                |
+| -------------- | ------ | ---- | ---------------------- | ---------------------------------------------------------------- |
+| QQ 官方机器人  | v1     | 支持 | 支持                   | Gateway WebSocket；群聊默认仅处理触发消息，管理员可开启全量采集  |
+| 微信 iLink     | v1     | 支持 | 当前官方插件路径不支持 | QR 授权、长轮询、依赖 `context_token` 回复，只创建私聊和个人记忆 |
+| 飞书应用机器人 | 待扩展 | 支持 | 支持                   | 仅保留事实、数据模型和线程兼容性，不出现在 v1 配置与验收中       |
+| Telegram Bot   | 待扩展 | 支持 | 支持                   | 仅保留 privacy mode、supergroup 和 topic/thread 兼容性           |
 
 平台能力以 [IM 平台接口事实手册](references/im-platform-apis.md) 为依据。平台文档或权限发生变化时，先更新事实手册，再调整本指南和实现。
 
@@ -267,18 +267,18 @@ agent-pigeon restore <file>
 
 ### 5.1 技术选型
 
-| 项目 | 选择 | 原因 |
-| --- | --- | --- |
-| Runtime | Node.js 24.x | 原生 TypeScript 生态、子进程和 WebSocket 支持 |
-| 语言 | TypeScript | 约束平台事件、身份、记忆和驱动事件 |
-| 包管理 | npm workspaces | Node.js 自带能力，足以管理两个适配器子包 |
-| 管理服务 | Fastify 5 | 健康检查和本地管理端点 |
-| 数据库 | `node:sqlite` | 单机、无额外原生依赖、事务和 FTS5 |
-| 全文检索 | SQLite FTS5 | 本地、可备份、无需外部服务 |
-| QQ Transport | 官方 Gateway WebSocket | 本地和容器均无需公网回调 |
-| 微信 Transport | iLink HTTP long polling | 与当前腾讯官方插件协议一致 |
-| Codex | app-server stdio | 官方双向 JSON-RPC 控制面 |
-| Claude Code | TypeScript Agent SDK | 官方 streaming、session、审批和 defer 能力 |
+| 项目           | 选择                    | 原因                                              |
+| -------------- | ----------------------- | ------------------------------------------------- |
+| Runtime        | Node.js 24.x            | 原生 TypeScript 生态、子进程和 WebSocket 支持     |
+| 语言           | TypeScript              | 约束平台事件、身份、记忆和驱动事件                |
+| 包管理         | pnpm workspaces         | 统一锁文件，并清晰管理 IM 适配器与 Agent 驱动子包 |
+| 管理服务       | Fastify 5               | 健康检查和本地管理端点                            |
+| 数据库         | `node:sqlite`           | 单机、无额外原生依赖、事务和 FTS5                 |
+| 全文检索       | SQLite FTS5             | 本地、可备份、无需外部服务                        |
+| QQ Transport   | 官方 Gateway WebSocket  | 本地和容器均无需公网回调                          |
+| 微信 Transport | iLink HTTP long polling | 与当前腾讯官方插件协议一致                        |
+| Codex          | app-server stdio        | 官方双向 JSON-RPC 控制面                          |
+| Claude Code    | TypeScript Agent SDK    | 官方 streaming、session、审批和 defer 能力        |
 
 `node:sqlite` 在 Node.js 24 当前文档中仍为 release candidate。实现必须固定实际验证过的 24.x 最低补丁版本，并在 `doctor` / 启动时检查：
 
@@ -294,6 +294,7 @@ agent-pigeon restore <file>
 ```text
 agent-pigeon/
 ├─ package.json
+├─ pnpm-workspace.yaml
 ├─ src/
 │  ├─ cli/
 │  ├─ config/
@@ -302,22 +303,25 @@ agent-pigeon/
 │  ├─ storage/
 │  ├─ identity/
 │  ├─ memory/
-│  ├─ approvals/
-│  └─ agents/
+│  └─ approvals/
+├─ packages/
+│  ├─ contracts/
+│  ├─ im-adapters/
+│  │  ├─ qq/
+│  │  └─ wechat-ilink/
+│  └─ agent-drivers/
 │     ├─ codex/
 │     └─ claude-code/
-├─ packages/
-│  ├─ adapter-qq/
-│  └─ adapter-wechat-ilink/
 └─ docs/
 ```
 
 约束：
 
 - 根包是 `agent-pigeon` CLI 和运行时，主要实现始终位于 `src/`。
-- `package.json` 使用 `"workspaces": ["packages/*"]`。
-- v1 适配器位于 `packages/adapter-qq` 和 `packages/adapter-wechat-ilink`，包名分别为 `@agent-pigeon/adapter-qq` 和 `@agent-pigeon/adapter-wechat-ilink`。
-- Agent 驱动不是 IM 适配器，留在 `src/agents/`。
+- `pnpm-workspace.yaml` 分别声明 `packages/im-adapters/*` 与 `packages/agent-drivers/*`。
+- v1 适配器位于 `packages/im-adapters/qq` 和 `packages/im-adapters/wechat-ilink`。
+- Codex 与 Claude Code 驱动分别位于 `packages/agent-drivers/codex` 和 `packages/agent-drivers/claude-code`。
+- `packages/contracts` 只保存跨包协议，不承载运行时业务逻辑。
 - 不引入 Turborepo、Nx 或动态插件加载器。
 - Feishu、Telegram 等到进入实现阶段再创建包。
 - Monorepo 只解决边界和测试，不改变单进程、单数据库、单部署单元。
@@ -664,22 +668,22 @@ Principal 在某个群内的成员关系，保存平台成员 ID、群昵称、�
 
 ### 11.2 作用域
 
-| scope | 键 | 用途 |
-| --- | --- | --- |
-| `personal_private` | AgentProfile + Principal | 稳定个人偏好和资料 |
-| `private_episode` | AgentProfile + Principal + conversation | 私聊事件和阶段性上下文 |
-| `group_shared` | AgentProfile + ConversationSpace | 群约定、公开决定、共享事实 |
-| `group_member` | AgentProfile + ConversationSpace + Principal | 该成员在该群内公开的信息 |
-| `group_episode` | AgentProfile + ConversationSpace | 群事件摘要 |
+| scope              | 键                                           | 用途                       |
+| ------------------ | -------------------------------------------- | -------------------------- |
+| `personal_private` | AgentProfile + Principal                     | 稳定个人偏好和资料         |
+| `private_episode`  | AgentProfile + Principal + conversation      | 私聊事件和阶段性上下文     |
+| `group_shared`     | AgentProfile + ConversationSpace             | 群约定、公开决定、共享事实 |
+| `group_member`     | AgentProfile + ConversationSpace + Principal | 该成员在该群内公开的信息   |
+| `group_episode`    | AgentProfile + ConversationSpace             | 群事件摘要                 |
 
 召回矩阵：
 
-| 当前场景 | 可读取 | 禁止读取 |
-| --- | --- | --- |
-| 私聊 | 当前 Principal 的 personal/private memory | 任意群记忆，除非用户明确要求并有权限 |
-| QQ 群聊 | 当前群 shared/episode、当前发言者 group_member | 任意成员私聊、其他群记忆 |
-| 微信私聊 | 当前 Principal 的 personal/private memory | 所有群记忆 |
-| 跨平台私聊 | 人工绑定后的同一 Principal 个人记忆 | 仅凭昵称推断的身份记忆 |
+| 当前场景   | 可读取                                         | 禁止读取                             |
+| ---------- | ---------------------------------------------- | ------------------------------------ |
+| 私聊       | 当前 Principal 的 personal/private memory      | 任意群记忆，除非用户明确要求并有权限 |
+| QQ 群聊    | 当前群 shared/episode、当前发言者 group_member | 任意成员私聊、其他群记忆             |
+| 微信私聊   | 当前 Principal 的 personal/private memory      | 所有群记忆                           |
+| 跨平台私聊 | 人工绑定后的同一 Principal 个人记忆            | 仅凭昵称推断的身份记忆               |
 
 ### 11.3 `MemoryRecord`
 
@@ -688,11 +692,7 @@ interface MemoryRecord {
   id: string;
   agentProfileId: string;
   scopeType:
-    | "personal_private"
-    | "private_episode"
-    | "group_shared"
-    | "group_member"
-    | "group_episode";
+    "personal_private" | "private_episode" | "group_shared" | "group_member" | "group_episode";
   principalId?: string;
   conversationSpaceId?: string;
   sourceConversationKey: string;
@@ -969,19 +969,19 @@ Info 和 Debug 默认都不记录完整消息正文、记忆值、平台 token �
 
 ### 15.3 错误分类
 
-| 错误 | 行为 |
-| --- | --- |
-| 重复事件 | 返回成功，不重新入队 |
-| 标准化失败 | 进入脱敏 compatibility dead letter |
-| 平台权限缺失 | BotInstance 或对应能力 not ready，不循环重连 |
-| QQ Resume 失败 | 重新 Identify，依赖业务 dedupe 防重 |
-| 微信 session 失效 | 停止消费并要求重新 QR 授权 |
-| Agent 临时断开 | 尝试恢复 session/thread |
-| Agent 版本不兼容 | readiness 失败并给升级提示 |
-| Agent turn 失败 | 向原会话返回简短失败，不自动重放危险操作 |
-| 平台发送失败 | 按分类有限重试，最终进入 dead letter |
-| 记忆策展失败 | 不影响主回复，有限重试 |
-| 记忆权限失败 | 拒绝调用并写安全审计 |
+| 错误              | 行为                                         |
+| ----------------- | -------------------------------------------- |
+| 重复事件          | 返回成功，不重新入队                         |
+| 标准化失败        | 进入脱敏 compatibility dead letter           |
+| 平台权限缺失      | BotInstance 或对应能力 not ready，不循环重连 |
+| QQ Resume 失败    | 重新 Identify，依赖业务 dedupe 防重          |
+| 微信 session 失效 | 停止消费并要求重新 QR 授权                   |
+| Agent 临时断开    | 尝试恢复 session/thread                      |
+| Agent 版本不兼容  | readiness 失败并给升级提示                   |
+| Agent turn 失败   | 向原会话返回简短失败，不自动重放危险操作     |
+| 平台发送失败      | 按分类有限重试，最终进入 dead letter         |
+| 记忆策展失败      | 不影响主回复，有限重试                       |
+| 记忆权限失败      | 拒绝调用并写安全审计                         |
 
 ## 16. 产品交互
 
@@ -1039,7 +1039,7 @@ Info 和 Debug 默认都不记录完整消息正文、记忆值、平台 token �
 - 配置示例只包含 QQ 与微信 BotInstance。
 - Feishu、Telegram 始终标记待扩展。
 - 全文始终把 Codex app-server 与 Claude Agent SDK 描述为独立协议，只由内部 AgentDriver 统一产品语义。
-- 仓库结构始终描述 npm workspaces Monorepo，同时明确它仍是单部署单元。
+- 仓库结构始终描述 pnpm workspaces Monorepo，同时明确它仍是单部署单元。
 - 两份事实手册中的字段和能力都有官方来源与核验日期。
 
 ### 17.2 QQ
@@ -1102,7 +1102,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
 
 ### 阶段一：运行时骨架与 QQ 私聊
 
-- npm workspaces、根 `src/` 和 QQ adapter 包。
+- pnpm workspaces、根 `src/` 和 QQ adapter 包。
 - 严格配置、SQLite schema、去重和 FIFO。
 - Codex app-server driver。
 - QQ direct 收发、回复时效和重连。
@@ -1139,19 +1139,19 @@ v1 只有在 QQ、微信、Codex、Claude Code 四条主链路全部达到本指
 
 ## 19. 关键取舍
 
-| 取舍 | 选择 | 代价 |
-| --- | --- | --- |
-| 平台范围 | v1 只实现 QQ + 微信 | Feishu / Telegram 延后 |
-| 微信群聊 | 按 direct-only | 不根据保留字段提前承诺 |
-| QQ 群采集 | 默认 triggered，管理员可选 full | 需要权限、同意和清理治理 |
-| 群原文 | full 模式普通消息 7 天 | 长期回溯依赖确认记忆 |
-| 仓库 | npm workspaces，主实现留在 `src/` | 不提供运行时插件市场 |
-| 部署 | 单进程 + SQLite | 不面向水平扩展 |
-| Agent 协议 | 统一语义，不统一 wire | 维护两个驱动实现 |
-| Codex | app-server stdio | 不提供公网远程 app-server |
-| Claude Code | TypeScript Agent SDK + defer | 要求 CLI >= 2.1.89 |
-| 记忆检索 | SQLite FTS5 | 语义召回不如 embedding |
-| 身份绑定 | 只允许人工绑定 | 使用步骤更多，但避免误合并 |
+| 取舍        | 选择                                            | 代价                       |
+| ----------- | ----------------------------------------------- | -------------------------- |
+| 平台范围    | v1 只实现 QQ + 微信                             | Feishu / Telegram 延后     |
+| 微信群聊    | 按 direct-only                                  | 不根据保留字段提前承诺     |
+| QQ 群采集   | 默认 triggered，管理员可选 full                 | 需要权限、同意和清理治理   |
+| 群原文      | full 模式普通消息 7 天                          | 长期回溯依赖确认记忆       |
+| 仓库        | pnpm workspaces；IM 适配器与 Agent 驱动分别建包 | 不提供运行时插件市场       |
+| 部署        | 单进程 + SQLite                                 | 不面向水平扩展             |
+| Agent 协议  | 统一语义，不统一 wire                           | 维护两个驱动实现           |
+| Codex       | app-server stdio                                | 不提供公网远程 app-server  |
+| Claude Code | TypeScript Agent SDK + defer                    | 要求 CLI >= 2.1.89         |
+| 记忆检索    | SQLite FTS5                                     | 语义召回不如 embedding     |
+| 身份绑定    | 只允许人工绑定                                  | 使用步骤更多，但避免误合并 |
 
 只有真实使用证明 FTS5、单进程或固定内置适配器成为瓶颈时，才评估 embedding、分布式部署或第三方插件 API；这些扩展不得改变既有身份、权限和记忆隔离规则。
 

@@ -1,0 +1,23 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/contracts"
+    },
+    {
+      "path": "./packages/im-adapters/qq"
+    },
+    {
+      "path": "./packages/im-adapters/wechat-ilink"
+    },
+    {
+      "path": "./packages/agent-drivers/codex"
+    },
+    {
+      "path": "./packages/agent-drivers/claude-code"
+    },
+    {
+      "path": "./tsconfig.root.json"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "name": "agent-pigeon",
+  "version": "0.1.0",
+  "description": "Self-hosted bridge from QQ and WeChat iLink to local Codex and Claude Code agents",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@11.16.0",
+  "engines": {
+    "node": ">=24.18.0"
+  },
+  "bin": {
+    "agent-pigeon": "./dist/src/cli/main.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "prepare": "husky",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix --max-warnings=0",
+    "format": "prettier . --write",
+    "format:check": "prettier . --check",
+    "typecheck": "tsc -b --pretty false",
+    "test": "tsc -b && node --test --test-reporter=spec dist/tests/*.test.js",
+    "verify:codex": "tsc -b && node scripts/codex-real-smoke.mjs",
+    "start": "node dist/src/cli/main.js start",
+    "pigeon": "node dist/src/cli/main.js",
+    "dev": "tsx src/cli/main.ts"
+  },
+  "dependencies": {
+    "@agent-pigeon/adapter-qq": "workspace:*",
+    "@agent-pigeon/adapter-wechat-ilink": "workspace:*",
+    "@agent-pigeon/contracts": "workspace:*",
+    "@agent-pigeon/driver-claude-code": "workspace:*",
+    "@agent-pigeon/driver-codex": "workspace:*",
+    "commander": "^15.0.0",
+    "fastify": "^5.10.0",
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "21.2.1",
+    "@commitlint/config-conventional": "21.2.0",
+    "@commitlint/types": "21.2.0",
+    "@eslint/js": "10.0.1",
+    "@types/node": "^24.10.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "eslint": "10.7.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-import-x": "4.17.1",
+    "eslint-plugin-prettier": "5.5.6",
+    "globals": "17.7.0",
+    "husky": "9.1.7",
+    "lint-staged": "17.1.1",
+    "prettier": "3.9.6",
+    "tsx": "^4.20.6",
+    "typescript": "catalog:",
+    "typescript-eslint": "8.65.0"
+  }
+}

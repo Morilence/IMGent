@@ -1,0 +1,26 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "references": [
+    {
+      "path": "./packages/contracts"
+    },
+    {
+      "path": "./packages/im-adapters/qq"
+    },
+    {
+      "path": "./packages/im-adapters/wechat-ilink"
+    },
+    {
+      "path": "./packages/agent-drivers/codex"
+    },
+    {
+      "path": "./packages/agent-drivers/claude-code"
+    }
+  ]
+}

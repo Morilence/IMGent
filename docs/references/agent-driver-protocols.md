@@ -6,18 +6,18 @@
 
 ## 1. 支持矩阵
 
-| 能力 | Codex | Claude Code |
-| --- | --- | --- |
-| 集成入口 | `codex app-server` | `@anthropic-ai/claude-agent-sdk` TypeScript |
-| 底层进程 | 长生命周期 app-server | SDK 管理本地 `claude` 进程 |
-| 协议 | 双向 JSON-RPC，stdio 为默认 Transport | SDK message stream / hook callback |
-| 会话 ID | thread ID | session ID |
-| Turn | `turn/start` | 一次 `query()` / streaming input |
-| 流式输出 | `item/*`、`turn/*` notifications | SDK assistant / stream event / result messages |
-| 审批 | app-server 发起 JSON-RPC request | `canUseTool` 与 `PreToolUse` hook |
-| 长等待审批 | 保持请求或持久化后恢复 thread | TypeScript `permissionDecision: "defer"` 后按 session 恢复 |
-| 取消 | turn interrupt / cancel | AbortSignal / query interrupt |
-| 登录 | 本地 Codex 登录态 | 本地 Claude Code 登录态 |
+| 能力       | Codex                                 | Claude Code                                                |
+| ---------- | ------------------------------------- | ---------------------------------------------------------- |
+| 集成入口   | `codex app-server`                    | `@anthropic-ai/claude-agent-sdk` TypeScript                |
+| 底层进程   | 长生命周期 app-server                 | SDK 管理本地 `claude` 进程                                 |
+| 协议       | 双向 JSON-RPC，stdio 为默认 Transport | SDK message stream / hook callback                         |
+| 会话 ID    | thread ID                             | session ID                                                 |
+| Turn       | `turn/start`                          | 一次 `query()` / streaming input                           |
+| 流式输出   | `item/*`、`turn/*` notifications      | SDK assistant / stream event / result messages             |
+| 审批       | app-server 发起 JSON-RPC request      | `canUseTool` 与 `PreToolUse` hook                          |
+| 长等待审批 | 保持请求或持久化后恢复 thread         | TypeScript `permissionDecision: "defer"` 后按 session 恢复 |
+| 取消       | turn interrupt / cancel               | AbortSignal / query interrupt                              |
+| 登录       | 本地 Codex 登录态                     | 本地 Claude Code 登录态                                    |
 
 本机调研基线：
 

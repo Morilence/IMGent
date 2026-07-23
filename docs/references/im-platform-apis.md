@@ -6,12 +6,12 @@
 
 ## 1. 能力矩阵
 
-| 平台 | 产品阶段 | 私聊 | 群聊 | 线程 / 话题 | v1 默认 Transport | 关键限制 |
-| --- | --- | --- | --- | --- | --- | --- |
-| QQ 官方机器人 | v1 | 支持 | 支持 | v1 不处理频道线程 | Gateway WebSocket | 群聊默认只收触发消息；全量群消息需平台权限和群管理员显式开启 |
-| 微信 iLink | v1 | 支持 | 当前官方插件路径不支持 | 不支持 | HTTP 长轮询 | 回复依赖 `context_token`；不保证主动发送；协议随官方插件演进 |
-| 飞书应用机器人 | 待扩展 | 支持 | 支持 | `thread_id` | 官方 SDK 长连接优先 | 自定义 Webhook 机器人只适合群内单向发送，不作为本产品适配目标 |
-| Telegram Bot | 待扩展 | 支持 | 支持 | `message_thread_id` | 实现时在 long polling / webhook 中选择 | 默认 Privacy Mode 下只能收到命令、回复和其他与机器人相关的群消息 |
+| 平台           | 产品阶段 | 私聊 | 群聊                   | 线程 / 话题         | v1 默认 Transport                      | 关键限制                                                         |
+| -------------- | -------- | ---- | ---------------------- | ------------------- | -------------------------------------- | ---------------------------------------------------------------- |
+| QQ 官方机器人  | v1       | 支持 | 支持                   | v1 不处理频道线程   | Gateway WebSocket                      | 群聊默认只收触发消息；全量群消息需平台权限和群管理员显式开启     |
+| 微信 iLink     | v1       | 支持 | 当前官方插件路径不支持 | 不支持              | HTTP 长轮询                            | 回复依赖 `context_token`；不保证主动发送；协议随官方插件演进     |
+| 飞书应用机器人 | 待扩展   | 支持 | 支持                   | `thread_id`         | 官方 SDK 长连接优先                    | 自定义 Webhook 机器人只适合群内单向发送，不作为本产品适配目标    |
+| Telegram Bot   | 待扩展   | 支持 | 支持                   | `message_thread_id` | 实现时在 long polling / webhook 中选择 | 默认 Privacy Mode 下只能收到命令、回复和其他与机器人相关的群消息 |
 
 核心建模结论：
 
@@ -24,21 +24,21 @@
 
 ## 2. 统一字段映射
 
-| Agent Pigeon 字段 | QQ | 微信 iLink | 飞书 | Telegram |
-| --- | --- | --- | --- | --- |
-| `botInstanceId` | 本地配置的 QQ 机器人实例 ID | 本地配置的 iLink 机器人实例 ID | 未来本地应用机器人实例 ID | 未来本地 Bot 实例 ID |
-| `platformBotId` | QQ 开放平台 AppID | QR 授权返回的 `ilink_bot_id` | 未来使用应用 / 机器人稳定标识 | 未来使用 Bot API 返回的 bot user ID |
-| `authorizingPlatformUserId` | 无 | QR 授权返回的 `ilink_user_id` | 无 | 无 |
-| `eventId` | Gateway payload `id` | 无独立稳定事件 ID，可省略 | event header `event_id` | 可省略 |
-| `messageId` | message `id` / `msg_id` | `message_id` | `message.message_id` | `message.message_id`，仅在 chat 内唯一 |
-| `dedupeKey` | 适配器根据 `msg_id` 与接收序号 / 分片索引生成 | `seq + message_id` | `message_id` | `update_id` |
-| `sequence` | Gateway `s` 或消息 `msg_seq` | `seq` | 无 | `update_id` |
-| `conversation.id` | `user_openid` 或 `group_openid` | 对端 `from_user_id` | `chat_id` | `chat.id` |
-| `conversation.kind` | `direct` / `group` | 固定 `direct` | `chat_type: p2p/group` | `chat.type` 映射为 `direct/group` |
-| `conversation.threadId` | v1 无 | 无 | `thread_id` | `message_thread_id` |
-| `actor.platformUserId` | `user_openid` | `from_user_id` | `sender_id.open_id` 等 | `from.id` |
-| `actor.platformMemberId` | 群聊 `member_openid` | 无 | 群内仍使用发送者 ID | `from.id`，匿名管理员另看 `sender_chat` |
-| `replyContext` | 原消息 ID、回复序号和场景信息 | `context_token` | 原消息 / thread 信息 | chat、message 与 thread 信息 |
+| Agent Pigeon 字段           | QQ                                            | 微信 iLink                     | 飞书                          | Telegram                                |
+| --------------------------- | --------------------------------------------- | ------------------------------ | ----------------------------- | --------------------------------------- |
+| `botInstanceId`             | 本地配置的 QQ 机器人实例 ID                   | 本地配置的 iLink 机器人实例 ID | 未来本地应用机器人实例 ID     | 未来本地 Bot 实例 ID                    |
+| `platformBotId`             | QQ 开放平台 AppID                             | QR 授权返回的 `ilink_bot_id`   | 未来使用应用 / 机器人稳定标识 | 未来使用 Bot API 返回的 bot user ID     |
+| `authorizingPlatformUserId` | 无                                            | QR 授权返回的 `ilink_user_id`  | 无                            | 无                                      |
+| `eventId`                   | Gateway payload `id`                          | 无独立稳定事件 ID，可省略      | event header `event_id`       | 可省略                                  |
+| `messageId`                 | message `id` / `msg_id`                       | `message_id`                   | `message.message_id`          | `message.message_id`，仅在 chat 内唯一  |
+| `dedupeKey`                 | 适配器根据 `msg_id` 与接收序号 / 分片索引生成 | `seq + message_id`             | `message_id`                  | `update_id`                             |
+| `sequence`                  | Gateway `s` 或消息 `msg_seq`                  | `seq`                          | 无                            | `update_id`                             |
+| `conversation.id`           | `user_openid` 或 `group_openid`               | 对端 `from_user_id`            | `chat_id`                     | `chat.id`                               |
+| `conversation.kind`         | `direct` / `group`                            | 固定 `direct`                  | `chat_type: p2p/group`        | `chat.type` 映射为 `direct/group`       |
+| `conversation.threadId`     | v1 无                                         | 无                             | `thread_id`                   | `message_thread_id`                     |
+| `actor.platformUserId`      | `user_openid`                                 | `from_user_id`                 | `sender_id.open_id` 等        | `from.id`                               |
+| `actor.platformMemberId`    | 群聊 `member_openid`                          | 无                             | 群内仍使用发送者 ID           | `from.id`，匿名管理员另看 `sender_chat` |
+| `replyContext`              | 原消息 ID、回复序号和场景信息                 | `context_token`                | 原消息 / thread 信息          | chat、message 与 thread 信息            |
 
 所有 ID 入库时使用字符串，避免 QQ、微信或 Telegram 的大整数越过 JavaScript 安全整数范围。
 
@@ -74,9 +74,9 @@
 ### 3.4 回复时效
 
 | 场景 | 被动回复有效期 | 每条消息最多回复 |
-| --- | --- | --- |
-| 单聊 | 60 分钟 | 4 次 |
-| 群聊 | 5 分钟 | 5 次 |
+| ---- | -------------- | ---------------- |
+| 单聊 | 60 分钟        | 4 次             |
+| 群聊 | 5 分钟         | 5 次             |
 
 超出被动回复窗口时，只能在用户或群允许主动消息且当前配额允许时降级为主动发送；否则任务进入可诊断的发送失败状态，不能伪装成功。
 
