@@ -6,6 +6,15 @@ const id = z
   .max(64)
   .regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/, "必须是稳定的本地标识");
 
+const skillName = z.union([
+  z.literal("*"),
+  z
+    .string()
+    .min(1)
+    .max(63)
+    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "skill 名称格式无效"),
+]);
+
 export const agentProfileSchema = z
   .object({
     id,
@@ -13,6 +22,7 @@ export const agentProfileSchema = z
     command: z.string().min(1),
     workspace: z.string().min(1),
     prompt: z.string().max(20_000).optional(),
+    skills: z.array(skillName).default(["*"]),
     permissions: z
       .object({
         maxMode: z.enum(["deny", "ask", "allow"]).default("ask"),
@@ -26,7 +36,23 @@ export const agentProfileSchema = z
       .strict()
       .default({ enabled: true }),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.skills).size !== value.skills.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["skills"],
+        message: "skills 不能包含重复名称",
+      });
+    }
+    if (value.skills.includes("*") && value.skills.length !== 1) {
+      context.addIssue({
+        code: "custom",
+        path: ["skills"],
+        message: '"*" 必须单独配置',
+      });
+    }
+  });
 
 const qqBotSchema = z
   .object({

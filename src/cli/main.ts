@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { once } from "node:events";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -11,6 +11,8 @@ import { createBackup, restoreBackup } from "../backup/service.js";
 import { defaultConfig } from "../config/index.js";
 import { readRawConfig, updateConfig, writeConfig } from "../config/write.js";
 import { IMGentApplication } from "../runtime/application.js";
+import { builtInSkillsDirectory } from "../skills/paths.js";
+import { CURATION_SKILL, SkillRegistry } from "../skills/registry.js";
 import { openAdminContext } from "./context.js";
 import type { AgentProfile, BotInstance } from "@imgent/contracts";
 
@@ -81,6 +83,7 @@ profile
         driver: options.driver,
         command: options.command ?? (options.driver === "codex" ? "codex" : "claude"),
         workspace: relative(dirname(configPath), resolve(options.workspace)) || ".",
+        skills: ["*"],
         permissions: { maxMode: options.maxMode },
         memory: { enabled: options.memory },
       };
@@ -99,6 +102,83 @@ profile
       print({ result: "profile-added", profile: entry });
     },
   );
+
+const skillsCommand = program.command("skills").description("管理 IMGent 托管的本地 skills");
+
+skillsCommand
+  .command("list")
+  .description("列出内置 skill 与本机覆盖后的启动快照")
+  .action(async () => {
+    const { registry } = await configuredSkills();
+    print(
+      registry.all().map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        source: skill.source,
+        internal: skill.name === CURATION_SKILL,
+        files: skill.files,
+        bytes: skill.bytes,
+      })),
+    );
+  });
+
+skillsCommand
+  .command("validate")
+  .description("校验所有 skill 包和 AgentProfile 引用")
+  .action(async () => {
+    const { config, registry } = await configuredSkills();
+    const profiles = config.agentProfiles.map((entry) => ({
+      profileId: entry.id,
+      skills: registry.visible(entry.skills, entry.memory.enabled).map((skill) => skill.name),
+    }));
+    print({
+      result: "valid",
+      skills: registry.all().length,
+      profiles,
+      restartRequiredAfterChanges: true,
+    });
+  });
+
+skillsCommand
+  .command("init <name>")
+  .description("在 dataDir/skills 下创建一个本机 skill")
+  .option("--description <text>", "skill 用途描述")
+  .action(async (name: string, options: { description?: string }) => {
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || name.length > 63) {
+      throw new Error("skill 名称必须是最长 63 字符的小写 kebab-case");
+    }
+    const configPath = configPathOf();
+    const config = await readRawConfig(configPath);
+    const userSkillsRoot = resolve(dirname(configPath), config.dataDir, "skills");
+    const skillRoot = resolve(userSkillsRoot, name);
+    const description = options.description ?? `Describe when the ${name} skill should be used.`;
+    if (description.length < 1 || description.length > 1_000) {
+      throw new Error("skill description 长度必须为 1 到 1000 字符");
+    }
+    await mkdir(userSkillsRoot, { recursive: true, mode: 0o700 });
+    await mkdir(skillRoot, { recursive: false, mode: 0o700 });
+    await writeFile(
+      resolve(skillRoot, "SKILL.md"),
+      [
+        "---",
+        `name: ${name}`,
+        `description: ${JSON.stringify(description)}`,
+        "---",
+        "",
+        `# ${name}`,
+        "",
+        "Describe the workflow, constraints, and expected outputs for this IMGent skill.",
+        "",
+      ].join("\n"),
+      { mode: 0o600, flag: "wx" },
+    );
+    print({
+      result: "skill-initialized",
+      name,
+      path: skillRoot,
+      restartRequired: true,
+    });
+  });
 
 const bot = program.command("bot").description("管理 BotInstance");
 bot
@@ -445,6 +525,20 @@ if (!nodeSupported()) {
 
 function configPathOf(): string {
   return resolve(program.opts<{ config: string }>().config);
+}
+
+async function configuredSkills(): Promise<{
+  config: Awaited<ReturnType<typeof readRawConfig>>;
+  registry: SkillRegistry;
+}> {
+  const configPath = configPathOf();
+  const config = await readRawConfig(configPath);
+  const registry = await SkillRegistry.load(
+    await builtInSkillsDirectory(),
+    resolve(dirname(configPath), config.dataDir, "skills"),
+  );
+  for (const profile of config.agentProfiles) registry.visible(profile.skills);
+  return { config, registry };
 }
 
 function nodeSupported(): boolean {

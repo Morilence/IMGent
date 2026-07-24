@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
-import { MIGRATION_1, SCHEMA_VERSION } from "./migrations.js";
+import { memorySearchText } from "../memory/search-text.js";
+import { MIGRATION_1, MIGRATION_2, SCHEMA_VERSION } from "./migrations.js";
 import type { SecretBox } from "../security/secret-box.js";
 import type { InboundMessage, ReplyContext } from "@imgent/contracts";
 
@@ -33,6 +34,7 @@ export interface StoredTask {
   status: TaskStatus;
   attempt: number;
   message: InboundMessage;
+  finalText?: string;
   createdAt: string;
 }
 
@@ -79,11 +81,13 @@ export class IMGentStore {
         "SELECT count(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
       )
       .get() as unknown as CountRow;
+    let rebuildMemoryIndex = false;
     if (tables.count === 0) {
       database.exec("BEGIN IMMEDIATE");
       try {
         database.exec(MIGRATION_1);
         database.exec("COMMIT");
+        rebuildMemoryIndex = true;
       } catch (error) {
         database.exec("ROLLBACK");
         database.close();
@@ -92,9 +96,29 @@ export class IMGentStore {
     } else {
       const version = database.prepare("SELECT version FROM schema_meta").get() as
         { version: number } | undefined;
-      if (!version || version.version !== SCHEMA_VERSION) {
+      if (version?.version === 1) {
         const backupPath = `${path}.pre-migrate-${Date.now()}.backup`;
         await backup(database, backupPath);
+        await chmod(backupPath, 0o600);
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          database.exec(MIGRATION_2);
+          database.exec("COMMIT");
+          rebuildMemoryIndex = true;
+        } catch (error) {
+          database.exec("ROLLBACK");
+          database.close();
+          throw new Error(
+            `数据库 schema v2 迁移失败；已备份到 ${backupPath}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            { cause: error },
+          );
+        }
+      } else if (!version || version.version !== SCHEMA_VERSION) {
+        const backupPath = `${path}.pre-migrate-${Date.now()}.backup`;
+        await backup(database, backupPath);
+        await chmod(backupPath, 0o600);
         database.close();
         throw new Error(
           `数据库 schema version ${version?.version ?? "unknown"} 不受支持；已备份到 ${backupPath}`,
@@ -109,8 +133,17 @@ export class IMGentStore {
       database.close();
       throw new Error("当前 SQLite 未启用 FTS5");
     }
-    database.prepare("INSERT INTO memory_fts(value) VALUES (?)").run("tokenizer-check");
-    database.prepare("DELETE FROM memory_fts WHERE value = ?").run("tokenizer-check");
+    database.prepare("INSERT INTO memory_fts(search_text) VALUES (?)").run("tokenizer-check");
+    database.prepare("DELETE FROM memory_fts WHERE search_text = ?").run("tokenizer-check");
+    if (rebuildMemoryIndex) {
+      const records = database
+        .prepare("SELECT id, value FROM memory_records WHERE status = 'active'")
+        .all() as unknown as Array<{ id: string; value: string }>;
+      const insert = database.prepare(
+        "INSERT INTO memory_fts(memory_id, search_text) VALUES (?, ?)",
+      );
+      for (const record of records) insert.run(record.id, memorySearchText(record.value));
+    }
 
     return new IMGentStore(database, secretBox, path);
   }
@@ -596,6 +629,7 @@ export class IMGentStore {
       attempt: number;
       message_json: string;
       reply_context_cipher: Uint8Array | null;
+      final_text: string | null;
       created_at: string;
     }>(
       `SELECT t.*, e.message_json, e.reply_context_cipher
@@ -618,6 +652,7 @@ export class IMGentStore {
       status: row.status,
       attempt: row.attempt,
       message,
+      ...(row.final_text ? { finalText: row.final_text } : {}),
       createdAt: row.created_at,
     };
   }

@@ -65,6 +65,7 @@ export async function loadConfig(path: string): Promise<IMGentConfig> {
         command: profile.command,
         workspace,
         ...(profile.prompt ? { prompt: profile.prompt } : {}),
+        skills: profile.skills,
         permissions: profile.permissions,
         memory: profile.memory,
       };

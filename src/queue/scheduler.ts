@@ -1,9 +1,14 @@
 import { textOf } from "@imgent/contracts";
+import {
+  MEMORY_HOST_TOOL_IDS,
+  SKILL_HOST_TOOL_IDS,
+  type IMGentHostTools,
+} from "../runtime/host-tools.js";
 import { Logger } from "../runtime/logger.js";
 import type { ApprovalService } from "../approvals/service.js";
-import type { MemoryHostTools } from "../memory/host-tools.js";
 import type { MemoryContext, MemoryService } from "../memory/service.js";
 import type { OutboundDispatcher } from "../runtime/outbound.js";
+import type { SkillRegistry } from "../skills/registry.js";
 import type { IMGentStore, StoredTask } from "../storage/store.js";
 import type {
   AgentDriver,
@@ -20,7 +25,8 @@ export interface SchedulerOptions {
   adapters: ReadonlyMap<string, ImAdapter>;
   approvals: ApprovalService;
   memory: MemoryService;
-  memoryTools: MemoryHostTools;
+  hostTools: IMGentHostTools;
+  skills: SkillRegistry;
   outbound: OutboundDispatcher;
   maxConcurrency?: number;
   logger?: Logger;
@@ -61,10 +67,17 @@ export class ConversationScheduler {
             message: errorMessage(error),
           });
         })
-        .finally(() => {
+        .finally(async () => {
           this.running.delete(task.id);
           this.taskDrivers.delete(task.id);
-          this.options.memoryTools.unregister(task.id);
+          try {
+            await this.options.hostTools.unregister(task.id);
+          } catch (error) {
+            this.logger.error("host-tools.cleanup-failed", {
+              taskId: task.id,
+              message: errorMessage(error),
+            });
+          }
           queueMicrotask(() => this.pump());
         });
       this.running.set(task.id, promise);
@@ -83,9 +96,17 @@ export class ConversationScheduler {
     }
     this.taskDrivers.set(task.id, driver);
     const memoryContext = this.memoryContext(task);
-    if (profile.memory.enabled) {
-      this.options.memoryTools.register(task.id, memoryContext);
-    }
+    const allowedHostTools = [
+      ...SKILL_HOST_TOOL_IDS,
+      ...(profile.memory.enabled ? MEMORY_HOST_TOOL_IDS : []),
+    ];
+    this.options.hostTools.register(task.id, {
+      allowedTools: allowedHostTools,
+      ...(profile.memory.enabled ? { memory: memoryContext } : {}),
+      skills: this.options.skills
+        .visible(profile.skills, profile.memory.enabled)
+        .map((skill) => skill.name),
+    });
     let memories: string[] = [];
     if (profile.memory.enabled) {
       const query = textOf(task.message.parts);
@@ -124,6 +145,11 @@ export class ConversationScheduler {
         prompt: textOf(task.message.parts),
         parts: task.message.parts,
         memoryContext: memories,
+        developerInstructions: this.options.skills.developerInstructions(
+          profile.skills,
+          profile.memory.enabled,
+        ),
+        hostTools: allowedHostTools,
       })) {
         switch (event.type) {
           case "session":
@@ -274,6 +300,8 @@ export class ConversationScheduler {
       conversationKey: task.conversationKey,
       conversationKind: task.message.conversation.kind,
       sourceMessageIds: [task.message.messageId],
+      sourceTaskId: task.id,
+      origin: "explicit",
       actorIsGroupAdmin: task.message.actor.role === "owner" || task.message.actor.role === "admin",
     };
   }

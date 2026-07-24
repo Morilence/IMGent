@@ -1,6 +1,6 @@
 # Agent 驱动协议事实手册
 
-> `last_verified: 2026-07-23`
+> `last_verified: 2026-07-24`
 >
 > IMGent v1 正式支持 Codex 与 Claude Code，但只统一产品语义，不假设二者共享 wire protocol。
 
@@ -21,10 +21,11 @@
 
 本机调研基线：
 
-- `codex-cli 0.142.3`
-- `claude 2.1.72`
+- `codex-cli 0.145.0`
+- 当前验证机未安装 `claude`；Claude Code 由 SDK mock/contract 测试验证。
 
-Claude Code v1 驱动要求 `>= 2.1.89`，因为异步聊天审批依赖非交互模式的 `defer`。当前本机版本低于要求，`imgent doctor` 应报 readiness 失败并给出升级提示，而不是静默退化为永久挂起的审批。
+Claude Code v1 驱动要求 `>= 2.1.89`。命令缺失或版本低于要求时，
+`imgent doctor` 报 readiness 失败，而不是静默退化。
 
 ## 2. 统一 `AgentDriver` 语义
 
@@ -47,14 +48,24 @@ interface AgentDriver {
   answerRequest(requestId: string, answer: AgentRequestAnswer): Promise<void>;
   interrupt(turnId: string): Promise<void>;
 }
+
+interface AgentTurnInput {
+  developerInstructions?: string;
+  ephemeral?: boolean;
+  hostTools?: string[];
+  builtInTools?: "default" | "none";
+}
 ```
 
-这不是第三方插件 API。v1 只有两个内置实现，因此不增加工厂、动态加载器或驱动子包；实现留在根包 `src/agents/`。
+这不是第三方插件 API。v1 只有两个内置实现，分别位于
+`packages/agent-drivers/codex` 与 `packages/agent-drivers/claude-code`。
 
 统一层负责：
 
 - 将包含 `botInstanceId` 命名空间的会话键映射到厂商 session/thread ID；AgentDriver 不接收平台凭据，也不把不同机器人实例的会话合并。
 - 将文本、图片和记忆上下文转换为厂商输入。
+- 把同一份 IMGent skill catalog、developer instructions 与 Host Tool 白名单
+  映射到厂商接口。
 - 将输出、审批、问题、完成和错误转换为 `AgentEvent`。
 - 在 SQLite 中保存 session/thread ID、当前 turn、待审批请求和恢复所需状态。
 - 保证一个 conversationKey 同时只有一个 active turn。
@@ -94,6 +105,12 @@ interface AgentDriver {
 8. 用户决定后回写同一 JSON-RPC request；重复答复必须幂等。
 9. 取消 active turn 时调用 app-server 的 interrupt/cancel 能力，不通过杀进程模拟正常取消。
 
+IMGent 在 `thread/start` 和 `thread/resume` 传入相同语义的
+`developerInstructions`。新 thread 通过 `dynamicTools` 只注册当前 turn
+允许的 IMGent Host Tools；后台 Curator 使用 `ephemeral: true`、read-only
+sandbox、`approvalPolicy: never`，并通过 thread config 关闭 Shell、统一执行器、
+浏览器、应用、插件与其他厂商内置能力，只保留受控 memory dynamic tools。
+
 ### 3.4 恢复与故障
 
 - thread ID 与 conversationKey 一一映射；不同 BotInstance 或不同平台的私聊即使共享个人记忆，也不自动共享 thread。
@@ -129,6 +146,11 @@ interface AgentDriver {
 - 工作目录必须与创建 session 时一致。目录变化或 session 文件丢失时 readiness / resume 明确失败，再按新 session + 摘要策略恢复。
 - 从 init system message 或 result message 尽早捕获 session ID，并在可能出现审批前持久化。
 - output stream 只将用户可读文本和状态转换为 `AgentEvent`；工具参数、内部思考和 token 不直接回发 IM。
+- IMGent developer instructions 使用 preset system prompt 的 `append`，不替换
+  Claude Code 基础提示；IMGent Host Tools 通过单 turn MCP server 暴露并由
+  `allowedTools` 过滤。
+- `ephemeral` turn 设置 `persistSession: false`；Curator 还把 SDK `tools`
+  设为空数组，只允许 `memory.search` 与 `memory.remember`。
 
 ### 4.4 审批
 
@@ -178,5 +200,9 @@ Codex 与 Claude Code 都必须通过：
 - Agent 进程异常退出后的明确状态和可控恢复。
 - 登录失效、CLI 版本不兼容、工作目录丢失的 readiness 提示。
 - 记忆工具失败时不得回复“已记住”。
+- 新建与恢复 turn 得到相同 IMGent skills 指令；两个 Driver 都不能看到超出
+  `hostTools` 白名单的 IMGent 工具。
+- Curator turn 不持久化 session、不产生聊天输出，且不能使用 Shell、
+  `memory.update` 或 `memory.forget`。
 
 某一驱动未通过这些验收时，只能标记为 experimental，不能在文档或 CLI 中称为正式支持。

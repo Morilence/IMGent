@@ -9,11 +9,15 @@ import { ApprovalService } from "../approvals/service.js";
 import { loadConfig } from "../config/index.js";
 import { IdentityService } from "../identity/service.js";
 import { MemoryCurator } from "../memory/curator.js";
-import { MEMORY_HOST_TOOLS, MemoryHostTools } from "../memory/host-tools.js";
+import { MemoryHostTools } from "../memory/host-tools.js";
 import { MemoryService } from "../memory/service.js";
 import { ConversationScheduler } from "../queue/scheduler.js";
 import { CredentialStore } from "../security/credential-store.js";
+import { SkillHostTools } from "../skills/host-tools.js";
+import { builtInSkillsDirectory } from "../skills/paths.js";
+import { SkillRegistry } from "../skills/registry.js";
 import { IMGentStore } from "../storage/store.js";
+import { IMGENT_HOST_TOOLS, IMGentHostTools } from "./host-tools.js";
 import { Logger } from "./logger.js";
 import { OutboundDispatcher } from "./outbound.js";
 import type {
@@ -42,9 +46,10 @@ export class IMGentApplication {
   readonly adapters = new Map<string, ImAdapter>();
   readonly drivers = new Map<string, AgentDriver>();
   readonly profiles: ReadonlyMap<string, AgentProfile>;
+  readonly skills: SkillRegistry;
 
   private readonly logger = new Logger("application");
-  private readonly memoryTools: MemoryHostTools;
+  private readonly hostTools: IMGentHostTools;
   private readonly scheduler: ConversationScheduler;
   private readonly curator: MemoryCurator;
   private readonly routes: ReadonlyMap<string, string>;
@@ -57,6 +62,7 @@ export class IMGentApplication {
     readonly configPath: string,
     readonly config: IMGentConfig,
     readonly store: IMGentStore,
+    skills: SkillRegistry,
     private readonly credentials: CredentialStore,
   ) {
     this.profiles = new Map(config.agentProfiles.map((profile) => [profile.id, profile]));
@@ -67,8 +73,19 @@ export class IMGentApplication {
     this.memory = new MemoryService(store);
     this.approvals = new ApprovalService(store);
     this.outbound = new OutboundDispatcher(store);
-    this.memoryTools = new MemoryHostTools(this.memory);
-    this.curator = new MemoryCurator(store, this.memory);
+    this.skills = skills;
+    this.hostTools = new IMGentHostTools(
+      new MemoryHostTools(this.memory),
+      new SkillHostTools(this.skills),
+    );
+    this.curator = new MemoryCurator({
+      store,
+      memory: this.memory,
+      profiles: this.profiles,
+      drivers: this.drivers,
+      hostTools: this.hostTools,
+      skills: this.skills,
+    });
     this.scheduler = new ConversationScheduler({
       store,
       profiles: this.profiles,
@@ -76,7 +93,8 @@ export class IMGentApplication {
       adapters: this.adapters,
       approvals: this.approvals,
       memory: this.memory,
-      memoryTools: this.memoryTools,
+      hostTools: this.hostTools,
+      skills: this.skills,
       outbound: this.outbound,
     });
   }
@@ -88,8 +106,12 @@ export class IMGentApplication {
       join(config.dataDir, "imgent.sqlite"),
       await credentials.secretBox(),
     );
-    const application = new IMGentApplication(configPath, config, store, credentials);
     try {
+      const skills = await SkillRegistry.load(
+        await builtInSkillsDirectory(),
+        join(config.dataDir, "skills"),
+      );
+      const application = new IMGentApplication(configPath, config, store, skills, credentials);
       await application.assemble();
       return application;
     } catch (error) {
@@ -100,9 +122,10 @@ export class IMGentApplication {
 
   private async assemble(): Promise<void> {
     for (const profile of this.config.agentProfiles) {
+      this.skills.visible(profile.skills);
       const options = {
-        hostTools: MEMORY_HOST_TOOLS,
-        hostToolHandler: this.memoryTools.handle.bind(this.memoryTools),
+        hostTools: IMGENT_HOST_TOOLS,
+        hostToolHandler: this.hostTools.handle.bind(this.hostTools),
       };
       this.drivers.set(
         profile.id,

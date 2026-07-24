@@ -9,6 +9,7 @@ COPY packages ./packages
 RUN HUSKY=0 pnpm install --frozen-lockfile
 
 COPY src ./src
+COPY skills ./skills
 COPY tests ./tests
 RUN pnpm build
 

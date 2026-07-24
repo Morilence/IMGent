@@ -1,10 +1,10 @@
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const MIGRATION_1 = `
 CREATE TABLE schema_meta (
   version INTEGER NOT NULL
 ) STRICT;
-INSERT INTO schema_meta(version) VALUES (1);
+INSERT INTO schema_meta(version) VALUES (2);
 
 CREATE TABLE principals (
   id TEXT PRIMARY KEY,
@@ -151,6 +151,8 @@ CREATE TABLE memory_records (
   conversation_space_id TEXT REFERENCES conversation_spaces(id),
   source_conversation_key TEXT NOT NULL,
   source_message_ids TEXT NOT NULL,
+  source_task_id TEXT REFERENCES tasks(id),
+  origin TEXT NOT NULL CHECK(origin IN ('explicit', 'curated')),
   kind TEXT NOT NULL CHECK(kind IN ('fact', 'preference', 'decision', 'plan', 'episode')),
   fact_key TEXT,
   value TEXT NOT NULL,
@@ -167,6 +169,7 @@ CREATE UNIQUE INDEX memory_active_fact_idx
     scope_type,
     COALESCE(principal_id, ''),
     COALESCE(conversation_space_id, ''),
+    CASE WHEN scope_type = 'private_episode' THEN source_conversation_key ELSE '' END,
     fact_key
   )
   WHERE status = 'active' AND fact_key IS NOT NULL;
@@ -175,9 +178,31 @@ CREATE INDEX memory_scope_idx ON memory_records(
   agent_profile_id, scope_type, principal_id, conversation_space_id, status
 );
 
+CREATE UNIQUE INDEX memory_active_value_idx
+  ON memory_records(
+    agent_profile_id,
+    scope_type,
+    COALESCE(principal_id, ''),
+    COALESCE(conversation_space_id, ''),
+    CASE WHEN scope_type = 'private_episode' THEN source_conversation_key ELSE '' END,
+    value
+  )
+  WHERE status = 'active';
+
+CREATE UNIQUE INDEX memory_source_task_fact_idx
+  ON memory_records(
+    source_task_id,
+    scope_type,
+    COALESCE(principal_id, ''),
+    COALESCE(conversation_space_id, ''),
+    CASE WHEN scope_type = 'private_episode' THEN source_conversation_key ELSE '' END,
+    fact_key
+  )
+  WHERE source_task_id IS NOT NULL AND fact_key IS NOT NULL;
+
 CREATE VIRTUAL TABLE memory_fts USING fts5(
   memory_id UNINDEXED,
-  value,
+  search_text,
   tokenize = 'unicode61 remove_diacritics 2'
 );
 
@@ -245,4 +270,78 @@ CREATE TABLE audit_events (
 ) STRICT;
 
 CREATE INDEX audit_created_idx ON audit_events(created_at);
+`;
+
+export const MIGRATION_2 = `
+ALTER TABLE memory_records
+  ADD COLUMN source_task_id TEXT REFERENCES tasks(id);
+ALTER TABLE memory_records
+  ADD COLUMN origin TEXT NOT NULL DEFAULT 'explicit'
+    CHECK(origin IN ('explicit', 'curated'));
+
+UPDATE memory_records AS current
+SET status = 'superseded'
+WHERE current.status = 'active'
+  AND EXISTS (
+    SELECT 1
+    FROM memory_records AS newer
+    WHERE newer.status = 'active'
+      AND newer.agent_profile_id = current.agent_profile_id
+      AND newer.scope_type = current.scope_type
+      AND COALESCE(newer.principal_id, '') = COALESCE(current.principal_id, '')
+      AND COALESCE(newer.conversation_space_id, '') =
+          COALESCE(current.conversation_space_id, '')
+      AND (
+        current.scope_type <> 'private_episode'
+        OR newer.source_conversation_key = current.source_conversation_key
+      )
+      AND newer.value = current.value
+      AND (
+        newer.updated_at > current.updated_at
+        OR (newer.updated_at = current.updated_at AND newer.id > current.id)
+      )
+  );
+
+DROP INDEX memory_active_fact_idx;
+CREATE UNIQUE INDEX memory_active_fact_idx
+  ON memory_records(
+    agent_profile_id,
+    scope_type,
+    COALESCE(principal_id, ''),
+    COALESCE(conversation_space_id, ''),
+    CASE WHEN scope_type = 'private_episode' THEN source_conversation_key ELSE '' END,
+    fact_key
+  )
+  WHERE status = 'active' AND fact_key IS NOT NULL;
+
+CREATE UNIQUE INDEX memory_active_value_idx
+  ON memory_records(
+    agent_profile_id,
+    scope_type,
+    COALESCE(principal_id, ''),
+    COALESCE(conversation_space_id, ''),
+    CASE WHEN scope_type = 'private_episode' THEN source_conversation_key ELSE '' END,
+    value
+  )
+  WHERE status = 'active';
+
+CREATE UNIQUE INDEX memory_source_task_fact_idx
+  ON memory_records(
+    source_task_id,
+    scope_type,
+    COALESCE(principal_id, ''),
+    COALESCE(conversation_space_id, ''),
+    CASE WHEN scope_type = 'private_episode' THEN source_conversation_key ELSE '' END,
+    fact_key
+  )
+  WHERE source_task_id IS NOT NULL AND fact_key IS NOT NULL;
+
+DROP TABLE memory_fts;
+CREATE VIRTUAL TABLE memory_fts USING fts5(
+  memory_id UNINDEXED,
+  search_text,
+  tokenize = 'unicode61 remove_diacritics 2'
+);
+
+UPDATE schema_meta SET version = 2;
 `;

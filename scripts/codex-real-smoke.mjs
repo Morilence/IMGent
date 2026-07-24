@@ -8,6 +8,7 @@ const profile = {
   driver: "codex",
   command,
   workspace,
+  skills: ["*"],
   permissions: { maxMode: "deny" },
   memory: { enabled: false },
 };

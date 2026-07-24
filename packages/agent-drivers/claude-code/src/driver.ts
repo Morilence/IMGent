@@ -192,7 +192,14 @@ export class ClaudeCodeDriver implements AgentDriver {
       once: true,
     });
 
+    const hostTools = selectedHostTools(this.options.hostTools ?? [], input.hostTools);
+    const allowedHostToolNames = new Set(
+      hostTools.map((spec) => `mcp__imgent__${spec.namespace}_${spec.name}`),
+    );
     const canUseTool: CanUseTool = async (toolName, toolInput, options) => {
+      if (allowedHostToolNames.has(toolName)) {
+        return { behavior: "allow", updatedInput: toolInput };
+      }
       if (input.profile.permissions.maxMode === "deny") {
         return {
           behavior: "deny",
@@ -254,26 +261,36 @@ export class ClaudeCodeDriver implements AgentDriver {
       });
     };
 
+    const appendedInstructions = [input.profile.prompt, input.developerInstructions]
+      .filter((value): value is string => Boolean(value))
+      .join("\n\n");
     const options: Options = {
       cwd: input.profile.workspace,
       pathToClaudeCodeExecutable: input.profile.command,
       abortController: abort,
       includePartialMessages: true,
       canUseTool,
-      tools: { type: "preset", preset: "claude_code" },
-      ...(this.options.hostTools?.length && this.options.hostToolHandler
+      tools: input.builtInTools === "none" ? [] : { type: "preset", preset: "claude_code" },
+      persistSession: input.ephemeral !== true,
+      ...(hostTools.length && this.options.hostToolHandler
         ? {
             mcpServers: {
-              imgent: this.hostMcpServer(input.turnId),
+              imgent: this.hostMcpServer(input.turnId, hostTools),
             },
-            allowedTools: this.options.hostTools.map(
-              (spec) => `mcp__imgent__${spec.namespace}_${spec.name}`,
-            ),
+            allowedTools: hostTools.map((spec) => `mcp__imgent__${spec.namespace}_${spec.name}`),
           }
         : {}),
       permissionMode: input.profile.permissions.maxMode === "deny" ? "dontAsk" : "default",
-      ...(input.sessionId ? { resume: input.sessionId } : {}),
-      ...(input.profile.prompt ? { systemPrompt: input.profile.prompt } : {}),
+      ...(input.sessionId && !input.ephemeral ? { resume: input.sessionId } : {}),
+      ...(appendedInstructions
+        ? {
+            systemPrompt: {
+              type: "preset" as const,
+              preset: "claude_code" as const,
+              append: appendedInstructions,
+            },
+          }
+        : {}),
     };
     const handle = this.sdk.query({ prompt: promptOf(input), options });
     active.query = handle;
@@ -285,12 +302,12 @@ export class ClaudeCodeDriver implements AgentDriver {
     }
   }
 
-  private hostMcpServer(turnId: string) {
+  private hostMcpServer(turnId: string, hostTools: readonly AgentHostToolSpec[]) {
     const handler = this.options.hostToolHandler!;
     return createSdkMcpServer({
       name: "imgent",
       version: "0.1.0",
-      tools: (this.options.hostTools ?? []).map((spec) => {
+      tools: hostTools.map((spec) => {
         const shape = schemaShape(spec.inputSchema);
         return tool(
           `${spec.namespace}_${spec.name}`,
@@ -419,6 +436,15 @@ export class ClaudeCodeDriver implements AgentDriver {
     this.pending.clear();
     this.active.clear();
   }
+}
+
+function selectedHostTools(
+  tools: readonly AgentHostToolSpec[],
+  allowed: readonly string[] | undefined,
+): AgentHostToolSpec[] {
+  if (!allowed) return [...tools];
+  const selected = new Set(allowed);
+  return tools.filter((tool) => selected.has(`${tool.namespace}.${tool.name}`));
 }
 
 function schemaShape(schema: Record<string, unknown>): Record<string, z.ZodType> {

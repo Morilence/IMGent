@@ -1,5 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { backup } from "node:sqlite";
 import { configSchema } from "../config/schema.js";
@@ -12,6 +22,7 @@ interface ArchiveFile {
   size: number;
   sha256: string;
   content: string;
+  mode?: number;
 }
 
 interface BackupArchive {
@@ -30,12 +41,13 @@ function checksum(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function archiveFile(path: string, value: Buffer): ArchiveFile {
+function archiveFile(path: string, value: Buffer, mode?: number): ArchiveFile {
   return {
     path,
     size: value.byteLength,
     sha256: checksum(value),
     content: value.toString("base64"),
+    ...(mode === undefined ? {} : { mode }),
   };
 }
 
@@ -75,6 +87,7 @@ export async function createBackup(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  files.push(...(await archiveSkillFiles(dataDir)));
   const archive: BackupArchive = {
     format: "imgent-backup/v1",
     manifest: {
@@ -82,7 +95,12 @@ export async function createBackup(
       schemaVersion: SCHEMA_VERSION,
       sensitive: true,
       externalAgentAuthenticationIncluded: false,
-      files: files.map(({ path, size, sha256 }) => ({ path, size, sha256 })),
+      files: files.map(({ path, size, sha256, mode }) => ({
+        path,
+        size,
+        sha256,
+        ...(mode === undefined ? {} : { mode }),
+      })),
     },
     files,
   };
@@ -139,7 +157,8 @@ export async function restoreBackup(
       !expected ||
       expected.size !== content.byteLength ||
       expected.sha256 !== checksum(content) ||
-      file.sha256 !== expected.sha256
+      file.sha256 !== expected.sha256 ||
+      file.mode !== expected.mode
     ) {
       throw new Error(`备份文件校验失败: ${file.path}`);
     }
@@ -148,9 +167,13 @@ export async function restoreBackup(
   for (const file of archive.files) {
     if (
       !allowed.has(file.path) &&
-      !/^data\/credentials\/[a-zA-Z0-9][a-zA-Z0-9._-]*\.enc$/.test(file.path)
+      !/^data\/credentials\/[a-zA-Z0-9][a-zA-Z0-9._-]*\.enc$/.test(file.path) &&
+      !safeSkillArchivePath(file.path)
     ) {
       throw new Error(`备份包含不安全路径: ${file.path}`);
+    }
+    if (file.path.startsWith("data/skills/") && file.mode !== 0o600 && file.mode !== 0o700) {
+      throw new Error(`备份包含不安全的 skill 文件权限: ${file.path}`);
     }
   }
 
@@ -186,8 +209,10 @@ export async function restoreBackup(
         ? join(dataDir, "imgent.sqlite")
         : file.path === "data/credentials.key"
           ? join(dataDir, "credentials.key")
-          : join(dataDir, "credentials", file.path.slice("data/credentials/".length));
-    await writeAtomic(target, Buffer.from(file.content, "base64"), 0o600, overwrite);
+          : file.path.startsWith("data/credentials/")
+            ? join(dataDir, "credentials", file.path.slice("data/credentials/".length))
+            : join(dataDir, file.path.slice("data/".length));
+    await writeAtomic(target, Buffer.from(file.content, "base64"), file.mode ?? 0o600, overwrite);
   }
   const configFile = archive.files.find((file) => file.path === "config.json");
   if (!configFile) throw new Error("备份缺少 config.json");
@@ -224,6 +249,50 @@ export async function restoreBackup(
     configPath,
     files: archive.files.length,
   };
+}
+
+async function archiveSkillFiles(dataDir: string): Promise<ArchiveFile[]> {
+  const root = join(dataDir, "skills");
+  const files: ArchiveFile[] = [];
+  const visit = async (directory: string, relativeDirectory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const relativePath = relativeDirectory ? join(relativeDirectory, entry.name) : entry.name;
+      const metadata = await lstat(path);
+      if (metadata.isSymbolicLink()) throw new Error(`拒绝备份 skill 符号链接: ${path}`);
+      if (metadata.isDirectory()) {
+        await visit(path, relativePath);
+      } else if (metadata.isFile()) {
+        files.push(
+          archiveFile(
+            `data/skills/${relativePath.split("\\").join("/")}`,
+            await readFile(path),
+            metadata.mode & 0o111 ? 0o700 : 0o600,
+          ),
+        );
+      } else {
+        throw new Error(`拒绝备份 skill 特殊文件: ${path}`);
+      }
+    }
+  };
+  try {
+    await visit(root, "");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  return files;
+}
+
+function safeSkillArchivePath(path: string): boolean {
+  if (!path.startsWith("data/skills/") || path.includes("\\") || path.includes("\0")) {
+    return false;
+  }
+  const segments = path.slice("data/skills/".length).split("/");
+  return (
+    segments.length >= 2 &&
+    segments.every((segment) => segment !== "" && segment !== "." && segment !== "..")
+  );
 }
 
 async function existingEntries(path: string): Promise<string[]> {

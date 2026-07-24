@@ -16,6 +16,7 @@ const profile = (
   driver,
   command,
   workspace,
+  skills: ["*"],
   permissions: { maxMode: "ask" },
   memory: { enabled: true },
 });
@@ -50,6 +51,13 @@ lines.on("line", (line) => {
     send({ id: request.id, result: { account: { type: "chatgpt" }, requiresOpenaiAuth: true } });
   } else if (request.method === "thread/start") {
     if (!request.params.dynamicTools) process.exit(9);
+    if (request.params.developerInstructions !== "IMGENT CATALOG") process.exit(10);
+    if (request.params.ephemeral !== true) process.exit(11);
+    if (request.params.dynamicTools.length !== 1 || request.params.dynamicTools[0].name !== "memory") process.exit(12);
+    if (request.params.config?.features?.shell_tool !== false) process.exit(14);
+    send({ id: request.id, result: { thread: { id: "thread-1" } } });
+  } else if (request.method === "thread/resume") {
+    if (request.params.developerInstructions !== "RESUMED CATALOG") process.exit(13);
     send({ id: request.id, result: { thread: { id: "thread-1" } } });
   } else if (request.method === "turn/start") {
     send({ id: request.id, result: { turn: { id: "vendor-turn" } } });
@@ -82,6 +90,12 @@ lines.on("line", (line) => {
         description: "search",
         inputSchema: { type: "object", properties: {} },
       },
+      {
+        namespace: "skills",
+        name: "list",
+        description: "list",
+        inputSchema: { type: "object", properties: {} },
+      },
     ],
     hostToolHandler: async () => {
       hostCalled = true;
@@ -91,22 +105,41 @@ lines.on("line", (line) => {
   try {
     assert.equal((await driver.checkReady(profile("codex", executable, directory))).ready, true);
     const events: AgentEvent[] = [];
-    for await (const event of driver.runTurn(turn(profile("codex", executable, directory)))) {
+    for await (const event of driver.runTurn({
+      ...turn(profile("codex", executable, directory)),
+      developerInstructions: "IMGENT CATALOG",
+      ephemeral: true,
+      hostTools: ["memory.search"],
+      builtInTools: "none",
+    })) {
       events.push(event);
     }
     assert.equal(hostCalled, true);
     assert.ok(events.some((event) => event.type === "session" && event.sessionId === "thread-1"));
     assert.ok(events.some((event) => event.type === "output-final" && event.text === "PONG"));
     assert.ok(events.some((event) => event.type === "completed" && event.result === "success"));
+    const resumed: AgentEvent[] = [];
+    for await (const event of driver.runTurn({
+      ...turn(profile("codex", executable, directory)),
+      turnId: "turn-2",
+      sessionId: "thread-1",
+      developerInstructions: "RESUMED CATALOG",
+      hostTools: ["memory.search"],
+    })) {
+      resumed.push(event);
+    }
+    assert.ok(resumed.some((event) => event.type === "completed" && event.result === "success"));
   } finally {
     await driver.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test("Claude driver contract streams output and persists the SDK session", async () => {
+test("Claude driver receives the same IMGent instructions and per-turn Host Tool filter", async () => {
+  let capturedOptions: Parameters<ClaudeSdk["query"]>[0]["options"];
   const sdk: ClaudeSdk = {
-    query: () => {
+    query: (parameters) => {
+      capturedOptions = parameters.options;
       const iterable = (async function* () {
         yield {
           type: "assistant",
@@ -129,9 +162,33 @@ test("Claude driver contract streams output and persists the SDK session", async
       }) as never;
     },
   };
-  const driver = new ClaudeCodeDriver({ sdk, probeOnReady: false });
+  const driver = new ClaudeCodeDriver({
+    sdk,
+    probeOnReady: false,
+    hostTools: [
+      {
+        namespace: "memory",
+        name: "search",
+        description: "search",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        namespace: "skills",
+        name: "list",
+        description: "list",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ],
+    hostToolHandler: async () => ({ success: true, text: "[]" }),
+  });
   const events: AgentEvent[] = [];
-  for await (const event of driver.runTurn(turn(profile("claude-code", "claude", process.cwd())))) {
+  for await (const event of driver.runTurn({
+    ...turn(profile("claude-code", "claude", process.cwd())),
+    developerInstructions: "IMGENT CATALOG",
+    ephemeral: true,
+    hostTools: ["memory.search"],
+    builtInTools: "none",
+  })) {
     events.push(event);
   }
   assert.ok(
@@ -139,5 +196,15 @@ test("Claude driver contract streams output and persists the SDK session", async
   );
   assert.ok(events.some((event) => event.type === "output-final" && event.text === "CLAUDE"));
   assert.ok(events.some((event) => event.type === "completed" && event.result === "success"));
+  assert.equal(capturedOptions?.persistSession, false);
+  assert.deepEqual(capturedOptions?.tools, []);
+  assert.match(
+    typeof capturedOptions?.systemPrompt === "object" &&
+      !Array.isArray(capturedOptions.systemPrompt)
+      ? (capturedOptions.systemPrompt.append ?? "")
+      : "",
+    /IMGENT CATALOG/,
+  );
+  assert.deepEqual(capturedOptions?.allowedTools, ["mcp__imgent__memory_search"]);
   await driver.close();
 });

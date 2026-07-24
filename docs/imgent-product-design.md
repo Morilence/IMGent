@@ -185,6 +185,8 @@ imgent restore <file>
 - `bot add` 写入不含 secret 的 BotInstance 配置。
 - 微信 `bot authorize` 在终端显示 QR 授权流程，将 bot token 写入本地凭据存储，并记录返回的 `ilink_bot_id` 与授权扫码者 `ilink_user_id`。
 - `profile add` 选择 Codex 或 Claude Code、工作区和权限上限。
+- `skills list`、`skills validate` 与 `skills init` 只在本机查看、校验和创建
+  IMGent 托管技能。
 - `doctor` 检查 Node.js、SQLite、Agent CLI、登录态、平台权限和工作目录。
 - `start` 先运行最小 readiness 检查，再启动机器人实例和队列。
 
@@ -204,6 +206,7 @@ imgent restore <file>
       "driver": "codex",
       "command": "codex",
       "workspace": "D:/Developments/agent-workspace",
+      "skills": ["*"],
       "permissions": {
         "maxMode": "ask"
       },
@@ -216,6 +219,7 @@ imgent restore <file>
       "driver": "claude-code",
       "command": "claude",
       "workspace": "D:/Developments/agent-workspace",
+      "skills": ["project-conventions"],
       "permissions": {
         "maxMode": "ask"
       },
@@ -260,6 +264,8 @@ imgent restore <file>
 - 微信 QR 授权返回的 `authorizingPlatformUserId` 只记录授权关系，不是 BotInstance ID，也不能代替消息发送者的 `platformUserId`。
 - 一个 BotInstance 只使用一个入站 Transport。
 - 一个 BotInstance 明确路由到一个 AgentProfile。
+- `AgentProfile.skills` 使用与 Driver 无关的 IMGent skill 名称；缺省为
+  `["*"]`，同一配置语义适用于 Codex 与 Claude Code。
 - 未实现的 `feishu`、`telegram` adapter 值在配置解析阶段直接报错。
 - 启动时拒绝未知字段和无效组合，不静默猜测。
 
@@ -295,6 +301,10 @@ imgent restore <file>
 imgent/
 ├─ package.json
 ├─ pnpm-workspace.yaml
+├─ skills/
+│  ├─ imgent-conversation/
+│  ├─ imgent-memory/
+│  └─ imgent-memory-curation/
 ├─ src/
 │  ├─ cli/
 │  ├─ config/
@@ -303,6 +313,7 @@ imgent/
 │  ├─ storage/
 │  ├─ identity/
 │  ├─ memory/
+│  ├─ skills/
 │  └─ approvals/
 ├─ packages/
 │  ├─ contracts/
@@ -339,13 +350,14 @@ flowchart LR
     N --> DB["SQLite transaction"]
     DB --> P["Identity + authorization + memory scope"]
     P --> Q["Per-conversation FIFO"]
-    Q --> D["AgentDriver"]
+    Q --> H["Skill registry + Host Tool router"]
+    H --> D["AgentDriver"]
     D --> CX["Codex app-server"]
     D --> CL["Claude Agent SDK"]
     D --> O["Outbound dispatcher"]
     O --> QA
     O --> WA
-    D --> M["Memory curator outbox"]
+    D --> M["Agent-driven Memory curator outbox"]
     M --> DB
 ```
 
@@ -358,7 +370,8 @@ flowchart LR
 5. 按 conversationKey 进入 FIFO。
 6. AgentDriver 运行 turn 并流式产生统一事件。
 7. 出站使用原入站消息的 replyContext 发送。
-8. 主回复成功后异步策展记忆；明确记忆请求同步完成。
+8. 普通 turn 通过统一 Host Tool 路由使用 skills 与 memory；主回复成功后用
+   受限临时 Agent turn 异步策展，明确记忆请求仍在原 turn 同步完成。
 
 平台事件确认必须快于 Agent 执行。Webhook 或长连接需要快速确认时，先持久化再确认，不能等待 Agent 完成。
 
@@ -372,6 +385,8 @@ flowchart LR
 - Authorization Service：配对、群授权和工具审批。
 - Conversation Scheduler：每会话 FIFO、取消和恢复。
 - Agent Runtime：Codex / Claude Code 驱动。
+- Skill Registry：内置/用户两层启动快照、Profile catalog 和临时只读物化。
+- Host Tool Router：按 turn 绑定 memory/skills 上下文并执行工具白名单。
 - Memory Service：同步记忆工具、异步策展、召回和删除。
 - Outbound Dispatcher：平台回复、主动发送降级和 dead letter。
 - Local Admin Server：health、ready 和本机管理接口。
@@ -589,7 +604,7 @@ queued/active/waiting_approval -> failed -> dead_letter
 
 #### `AgentProfile`
 
-定义 AgentDriver、工作区、人格提示、权限上限和记忆命名空间。
+定义 AgentDriver、工作区、人格提示、IMGent skills、权限上限和记忆命名空间。
 
 #### `Principal`
 
@@ -655,6 +670,22 @@ Principal 在某个群内的成员关系，保存平台成员 ID、群昵称、�
 
 绑定可撤销。撤销后不再跨平台召回；现有记忆保留来源并等待用户决定拆分或删除，不自动复制。
 
+### 10.4 IMGent 托管技能
+
+技能格式、覆盖与自定义示例见 [IMGent 托管技能](imgent-skills.md)。
+
+- 随版本发布的 `skills/` 是内置层，`dataDir/skills/` 是部署者层；同名时用户
+  包完整覆盖内置包。
+- 启动时严格校验并读取整个包的不可变快照；任一无效包或 Profile 缺失引用
+  都会让 readiness 失败，不支持热加载。
+- `imgent-conversation` 始终完整注入；记忆开启时
+  `imgent-memory` 始终完整注入；其他可见技能只注入名称与描述。
+- Agent 匹配任务或发现用户点名后调用 `skills.load`，取得正文与当前 turn
+  的临时只读资源目录；`skills.list` 返回当前 Profile catalog。
+- IMGent 不执行技能脚本。脚本如由 Agent 执行，仍受相同工作区、沙箱、权限
+  上限与聊天审批约束。
+- IMGent 不禁用 Agent 原生技能，但产品正确性不依赖、同步或映射厂商技能。
+
 ## 11. 原生记忆系统
 
 ### 11.1 原则
@@ -697,6 +728,8 @@ interface MemoryRecord {
   conversationSpaceId?: string;
   sourceConversationKey: string;
   sourceMessageIds: string[];
+  sourceTaskId?: string;
+  origin: "explicit" | "curated";
   kind: "fact" | "preference" | "decision" | "plan" | "episode";
   factKey?: string;
   value: string;
@@ -713,6 +746,8 @@ interface MemoryRecord {
 ### 11.4 私聊写入
 
 - 用户明确要求“记住”时，Agent 调用记忆工具。
+- 宿主不再通过“请记住”或 `remember` 等正则/关键词自行识别；语义判断完全由
+  会话 Agent 和 `imgent-memory` 指令完成。
 - 工具校验当前 Principal、作用域和敏感内容规则。
 - 同步事务成功后才返回成功。
 - 相同 factKey 的新事实 supersede 旧事实，不保留多个 active 冲突值。
@@ -745,11 +780,13 @@ memory.forget
 
 普通对话完成后写入 Memory Curator outbox：
 
-1. 读取当前消息、Agent 最终回复和相关 active 记忆。
-2. 使用同一受控本地 Agent 生成结构化候选。
-3. 校验 scope、类型、长度、来源和敏感内容。
-4. 对 factKey 冲突执行 supersede。
-5. 在事务中完成写入并标记 outbox。
+1. 读取当前消息、Agent 最终回复和当前作用域内的相关 active 记忆。
+2. 使用当前 AgentProfile 对应的 Driver 启动无用户输出的 ephemeral turn。
+3. 只注入 `imgent-memory-curation`，只暴露 `memory.search` 与
+   `memory.remember`；不暴露 Shell、update、forget 或用户问题。
+4. 每次工具调用仍由宿主校验 scope、类型、长度、来源和敏感内容，并对
+   factKey 冲突执行 supersede。
+5. 以来源 task、同 scope exact value 与 factKey 保证重试幂等，再标记 outbox。
 
 策展失败有限重试，不影响主回复。相同任务幂等键不能生成第二份相同记忆。
 
@@ -757,11 +794,13 @@ memory.forget
 
 候选筛选顺序：
 
-1. 强制加入当前明确相关且未过期的关键事实。
-2. 在允许作用域内使用 FTS5 召回。
-3. 按 scope、相关度、时间和置信度排序。
-4. 限制总条数和字符预算。
-5. 以“历史记忆资料”注入，明确其不具有系统指令优先级。
+1. 先限制为当前 AgentProfile、允许 scope、active 且未过期的记录。
+2. 写入时把 NFKC/lowercase Latin token 与连续汉字 bigram 生成到
+   `search_text`，查询使用同一规则和 token 上限。
+3. 在允许作用域内只使用 SQLite FTS5 召回；汉字查询不走整句 `LIKE` 旁路。
+4. 按 FTS5 相关度、置信度和更新时间排序。
+5. 限制总条数和字符预算。
+6. 以“历史记忆资料”注入，明确其不具有系统指令优先级。
 
 记录中的命令、链接和工具要求不能绕过当前权限。
 
@@ -789,6 +828,22 @@ interface AgentDriver {
   interrupt(turnId: string): Promise<void>;
 }
 ```
+
+统一 turn 输入还包含：
+
+```ts
+interface AgentTurnInput {
+  developerInstructions?: string;
+  ephemeral?: boolean;
+  hostTools?: string[];
+  builtInTools?: "default" | "none";
+}
+```
+
+普通会话的新建与恢复都注入 IMGent developer instructions。Codex 在
+`thread/start` / `thread/resume` 设置对应字段；Claude Code 使用 SDK preset
+system prompt 的 `append`。Driver 只暴露本 turn 白名单中的 IMGent Host
+Tools。Curator 使用 ephemeral、无持久 session 且禁用厂商内置工具的受限 turn。
 
 统一层只定义：
 
@@ -882,6 +937,14 @@ decidedAt
 - 如果未来启用 webhook，必须验证签名、防重放并限制 body 大小。
 - 不把 Codex app-server WebSocket 暴露为远程控制入口。
 
+### 13.6 技能信任边界
+
+- 只有本机部署者可以修改 `dataDir/skills/`；IM 用户只有加载与使用能力。
+- 部署者 skill 具有 developer instruction 语义，但不能增加 Profile 权限、
+  绕过审批、扩大 Host Tool 白名单或关闭敏感记忆校验。
+- 技能资源按启动快照物化为 turn 级只读副本，结束即清理；读取不等于批准执行。
+- 符号链接、目录穿越、特殊文件和超限包在启动前拒绝。
+
 ## 14. SQLite、迁移与备份
 
 ### 14.1 数据职责
@@ -894,6 +957,8 @@ SQLite 保存：
 - conversation、session/thread、task、turn 和队列状态。
 - 审批请求。
 - MemoryRecord、FTS 索引和 curator outbox。
+- MemoryRecord 的来源 task、`explicit` / `curated` 来源标记，以及生成后的
+  FTS5 `search_text`。
 - 出站幂等键、发送结果和 dead letter。
 - 群采集策略、同意记录和原文过期时间。
 - 审计事件。
@@ -916,6 +981,8 @@ SQLite 保存：
 - 启动时先备份元数据并在事务中执行迁移。
 - 迁移失败时拒绝 readiness，不带着半迁移 schema 运行。
 - 删除字段采用先停止写入、后续版本再清理的兼容步骤。
+- schema v2 为记忆增加 `source_task_id`、`origin`、同 scope active exact value
+  唯一约束，并把 FTS5 重建为生成后的 `search_text`；v1 升级前创建独立备份。
 
 ### 14.4 备份
 

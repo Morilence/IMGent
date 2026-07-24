@@ -10,8 +10,15 @@ pnpm monorepo 结构：
 - `packages/agent-drivers/codex`：Codex app-server stdio JSON-RPC。
 - `packages/agent-drivers/claude-code`：Claude Agent SDK。
 - `packages/contracts`：跨包类型和协议。
+- 根 `skills/` 与 `src/skills/`：IMGent 托管的内置技能包、两层注册表、启动
+  快照和 per-turn 只读物化。
 
 不包含飞书、Telegram、动态插件市场、云端记忆或向量数据库。
+
+当前 schema version 为 2。记忆记录包含来源 task 和
+`explicit` / `curated` 标记；召回只使用生成 `search_text` 的 SQLite FTS5，
+中文连续文本在写入和查询时生成 bigram，不存在正则显式记忆识别或汉字
+`LIKE` 旁路。
 
 ## 验证
 
@@ -29,7 +36,11 @@ pnpm verify:codex
 - 配置拒绝未知字段、未知适配器和未知驱动。
 - SQLite 原子入站、dedupe、checkpoint、每会话 FIFO、重启恢复和危险操作保护。
 - 配对、人工身份绑定、群授权、审批所有权与幂等。
-- 五类记忆边界、factKey 替换、中英文检索、显式记忆和 full 群 7 天清理。
+- 两层 skill 覆盖、Profile 过滤、严格包校验、启动快照、只读物化和清理。
+- Codex / Claude Code 的同构 developer instructions 与 per-turn Host Tool 白名单。
+- 五类记忆边界、factKey 替换、敏感内容拒绝、中英混合 FTS5、显式工具回执、
+  无正则识别、Curator 重试幂等和 full 群 7 天清理。
+- schema v1 到 v2 的迁移备份、来源字段和 FTS5 重建。
 - QQ / 微信 payload、QQ 回复上限、微信 cursor、疑似群消息拒绝。
 - 一致性备份、校验和、敏感文件权限和空目录恢复。
 - Codex fake app-server 双向 RPC 与 Claude SDK mock 合约。

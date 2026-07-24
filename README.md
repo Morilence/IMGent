@@ -22,9 +22,13 @@ packages/
   agent-drivers/
     codex/
     claude-code/
+skills/
+  imgent-conversation/
+  imgent-memory/
+  imgent-memory-curation/
 src/
   cli/ config/ runtime/ queue/ storage/
-  identity/ approvals/ memory/ security/ backup/
+  identity/ approvals/ memory/ skills/ security/ backup/
 ```
 
 这些包最终仍组成一个进程、一个 SQLite 数据库和一个数据目录；不存在运行时
@@ -42,6 +46,10 @@ imgent init --workspace /absolute/path/to/workspace
 imgent profile add main \
   --driver codex \
   --workspace /absolute/path/to/workspace
+
+imgent skills init project-conventions \
+  --description "Apply this project's local conventions"
+imgent skills validate
 ```
 
 不希望创建全局链接时，可把下文的 `imgent` 替换为
@@ -87,7 +95,12 @@ imgent group authorize <conversation-space-id> \
   `--config <path>` 指定。
 - 管理服务默认监听 `127.0.0.1:8787`，提供 `/healthz` 和 `/readyz`。
 - 配置、数据库、备份、凭据与密钥按本地敏感数据处理。
-- 备份包含本地平台凭据与加密密钥，但不包含 Codex/Claude 的外部登录目录。
+- 内置 skills 位于仓库 `skills/`；本机自定义与同名覆盖位于
+  `dataDir/skills/`，修改后重启生效。
+- `AgentProfile.skills` 默认 `["*"]`，同一 skill 可用于 Codex 或 Claude
+  Code；IMGent 不依赖厂商原生技能。
+- 备份包含本地平台凭据、加密密钥与用户 skills，但不包含 Codex/Claude 的
+  外部登录目录。
 - 微信只支持 direct；任何带 `group_id` 的事件都会进入兼容性死信。
 - QQ 群默认 `triggered`；`full` 只能由已配对且平台可验证的群主/管理员开启。
 
@@ -125,12 +138,14 @@ pnpm test
 安装依赖后 Husky 会启用本地 Git hooks：提交前只检查并格式化暂存文件，
 提交信息按 Conventional Commits 校验，例如 `feat(codex): support host tools`。
 
-测试覆盖配置、SQLite 事务与恢复、FIFO、身份绑定、审批、记忆隔离、备份恢复、
-IM payload 规范化以及两个驱动的协议合约。Codex 另有真实本机 app-server
-smoke；Claude Code 按当前交付约定只执行 mock/contract 验证。
+测试覆盖配置、SQLite 事务与恢复、FIFO、身份绑定、审批、技能覆盖与只读物化、
+五类记忆隔离、中文 FTS5、Curator 幂等、备份恢复、IM payload 规范化以及两个
+驱动的协议合约。Codex 另有真实本机 app-server smoke；Claude Code 按当前
+交付约定只执行 mock/contract 验证。
 
 完整产品与安全约束见
-[产品设计](docs/imgent-product-design.md)。
+[产品设计](docs/imgent-product-design.md)；技能格式与自定义流程见
+[IMGent 托管技能](docs/imgent-skills.md)。
 
 Docker 镜像不内置也不代管 Codex/Claude 的登录凭据；容器部署者需要在自己的
 派生镜像中安装对应 CLI，或把受控的可执行文件与认证目录按最小权限挂载进容器。

@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { memoryFtsQuery, memorySearchText } from "./search-text.js";
 import type { IMGentStore } from "../storage/store.js";
 
 export type MemoryScope =
   "personal_private" | "private_episode" | "group_shared" | "group_member" | "group_episode";
 
 export type MemoryKind = "fact" | "preference" | "decision" | "plan" | "episode";
+export type MemoryOrigin = "explicit" | "curated";
 
 export interface MemoryContext {
   agentProfileId: string;
@@ -13,6 +15,8 @@ export interface MemoryContext {
   conversationKey: string;
   conversationKind: "direct" | "group";
   sourceMessageIds: string[];
+  sourceTaskId?: string;
+  origin?: MemoryOrigin;
   actorIsGroupAdmin?: boolean;
 }
 
@@ -31,6 +35,7 @@ export interface MemoryRecord {
   value: string;
   factKey?: string;
   kind: MemoryKind;
+  origin: MemoryOrigin;
   confidence: number;
   updatedAt: string;
 }
@@ -41,16 +46,6 @@ const SENSITIVE =
 
 function now(): string {
   return new Date().toISOString();
-}
-
-function ftsQuery(query: string): string {
-  const tokens = query
-    .normalize("NFKC")
-    .split(/\s+/u)
-    .map((token) => token.replaceAll('"', "").trim())
-    .filter(Boolean)
-    .slice(0, 16);
-  return tokens.map((token) => `"${token}"`).join(" OR ");
 }
 
 export class MemoryService {
@@ -89,36 +84,94 @@ export class MemoryService {
     const id = `memory_${randomUUID()}`;
     const timestamp = now();
     const confidence = Math.max(0, Math.min(1, input.confidence ?? 1));
+    const origin = context.origin ?? "explicit";
 
-    this.store.transaction(() => {
-      if (input.factKey) {
-        const existing = this.store.all<{ id: string }>(
-          `SELECT id FROM memory_records
-           WHERE agent_profile_id = ? AND scope_type = ?
-             AND COALESCE(principal_id, '') = COALESCE(?, '')
-             AND COALESCE(conversation_space_id, '') = COALESCE(?, '')
-             AND fact_key = ? AND status = 'active'`,
-          context.agentProfileId,
-          scopeType,
-          principalId ?? null,
-          conversationSpaceId ?? null,
-          input.factKey,
+    return this.store.transaction(() => {
+      type ExistingRow = {
+        id: string;
+        scope_type: MemoryScope;
+        value: string;
+        fact_key: string | null;
+        kind: MemoryKind;
+        origin: MemoryOrigin;
+        confidence: number;
+        updated_at: string;
+      };
+      const sourced =
+        context.sourceTaskId && input.factKey
+          ? this.store.get<ExistingRow>(
+              `SELECT id, scope_type, value, fact_key, kind, origin, confidence, updated_at
+               FROM memory_records
+               WHERE source_task_id = ? AND scope_type = ?
+                 AND COALESCE(principal_id, '') = COALESCE(?, '')
+                 AND COALESCE(conversation_space_id, '') = COALESCE(?, '')
+                 AND (scope_type <> 'private_episode' OR source_conversation_key = ?)
+                 AND fact_key = ?`,
+              context.sourceTaskId,
+              scopeType,
+              principalId ?? null,
+              conversationSpaceId ?? null,
+              context.conversationKey,
+              input.factKey,
+            )
+          : undefined;
+      if (sourced) return memoryRecord(sourced);
+      const sameFact = input.factKey
+        ? this.store.all<{ id: string }>(
+            `SELECT id FROM memory_records
+             WHERE agent_profile_id = ? AND scope_type = ?
+               AND COALESCE(principal_id, '') = COALESCE(?, '')
+               AND COALESCE(conversation_space_id, '') = COALESCE(?, '')
+               AND (scope_type <> 'private_episode' OR source_conversation_key = ?)
+               AND fact_key = ? AND status = 'active'`,
+            context.agentProfileId,
+            scopeType,
+            principalId ?? null,
+            conversationSpaceId ?? null,
+            context.conversationKey,
+            input.factKey,
+          )
+        : [];
+      const duplicate = this.store.get<{
+        id: string;
+        scope_type: MemoryScope;
+        value: string;
+        fact_key: string | null;
+        kind: MemoryKind;
+        origin: MemoryOrigin;
+        confidence: number;
+        updated_at: string;
+      }>(
+        `SELECT id, scope_type, value, fact_key, kind, origin, confidence, updated_at
+         FROM memory_records
+         WHERE agent_profile_id = ? AND scope_type = ?
+           AND COALESCE(principal_id, '') = COALESCE(?, '')
+           AND COALESCE(conversation_space_id, '') = COALESCE(?, '')
+           AND (scope_type <> 'private_episode' OR source_conversation_key = ?)
+           AND value = ? AND status = 'active'`,
+        context.agentProfileId,
+        scopeType,
+        principalId ?? null,
+        conversationSpaceId ?? null,
+        context.conversationKey,
+        value,
+      );
+      for (const record of sameFact) {
+        if (record.id === duplicate?.id) continue;
+        this.store.run(
+          "UPDATE memory_records SET status = 'superseded', updated_at = ? WHERE id = ?",
+          timestamp,
+          record.id,
         );
-        for (const record of existing) {
-          this.store.run(
-            "UPDATE memory_records SET status = 'superseded', updated_at = ? WHERE id = ?",
-            timestamp,
-            record.id,
-          );
-          this.store.run("DELETE FROM memory_fts WHERE memory_id = ?", record.id);
-        }
+        this.store.run("DELETE FROM memory_fts WHERE memory_id = ?", record.id);
       }
+      if (duplicate) return memoryRecord(duplicate);
       this.store.run(
         `INSERT INTO memory_records(
           id, agent_profile_id, scope_type, principal_id, conversation_space_id,
-          source_conversation_key, source_message_ids, kind, fact_key, value,
-          confidence, status, created_at, updated_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+          source_conversation_key, source_message_ids, source_task_id, origin,
+          kind, fact_key, value, confidence, status, created_at, updated_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
         id,
         context.agentProfileId,
         scopeType,
@@ -126,6 +179,8 @@ export class MemoryService {
         conversationSpaceId ?? null,
         context.conversationKey,
         JSON.stringify(context.sourceMessageIds),
+        context.sourceTaskId ?? null,
+        origin,
         input.kind,
         input.factKey ?? null,
         value,
@@ -134,34 +189,39 @@ export class MemoryService {
         timestamp,
         input.expiresAt ?? null,
       );
-      this.store.run("INSERT INTO memory_fts(memory_id, value) VALUES (?, ?)", id, value);
+      this.store.run(
+        "INSERT INTO memory_fts(memory_id, search_text) VALUES (?, ?)",
+        id,
+        memorySearchText(value),
+      );
+      return {
+        id,
+        scopeType,
+        value,
+        ...(input.factKey ? { factKey: input.factKey } : {}),
+        kind: input.kind,
+        origin,
+        confidence,
+        updatedAt: timestamp,
+      };
     });
-
-    return {
-      id,
-      scopeType,
-      value,
-      ...(input.factKey ? { factKey: input.factKey } : {}),
-      kind: input.kind,
-      confidence,
-      updatedAt: timestamp,
-    };
   }
 
   search(context: MemoryContext, query: string, limit = 12): MemoryRecord[] {
-    const match = ftsQuery(query);
+    const match = memoryFtsQuery(query);
     if (!match) return [];
     const scopeWhere =
       context.conversationKind === "direct"
-        ? `(m.scope_type IN ('personal_private', 'private_episode')
-            AND m.principal_id = ?)`
+        ? `((m.scope_type = 'personal_private' AND m.principal_id = ?)
+            OR (m.scope_type = 'private_episode' AND m.principal_id = ?
+                AND m.source_conversation_key = ?))`
         : `((m.scope_type IN ('group_shared', 'group_episode')
               AND m.conversation_space_id = ?)
             OR (m.scope_type = 'group_member'
               AND m.conversation_space_id = ? AND m.principal_id = ?))`;
     const scopeParams =
       context.conversationKind === "direct"
-        ? [context.principalId]
+        ? [context.principalId, context.principalId, context.conversationKey]
         : [context.conversationSpaceId, context.conversationSpaceId, context.principalId];
     type SearchRow = {
       id: string;
@@ -169,64 +229,36 @@ export class MemoryService {
       value: string;
       fact_key: string | null;
       kind: MemoryKind;
+      origin: MemoryOrigin;
       confidence: number;
       updated_at: string;
     };
     const boundedLimit = Math.max(1, Math.min(limit, 50));
-    const hanTerms = /[\p{Script=Han}]/u.test(query)
-      ? query
-          .normalize("NFKC")
-          .split(/\s+/u)
-          .map((term) => term.trim())
-          .filter(Boolean)
-          .slice(0, 8)
-      : [];
-    const rows =
-      hanTerms.length > 0
-        ? this.store.all<SearchRow>(
-            `SELECT m.id, m.scope_type, m.value, m.fact_key, m.kind,
-                    m.confidence, m.updated_at
-             FROM memory_records m
-             WHERE (${hanTerms.map(() => "m.value LIKE ? ESCAPE '\\'").join(" OR ")})
-               AND m.agent_profile_id = ?
-               AND m.status = 'active'
-               AND (m.expires_at IS NULL OR m.expires_at > ?)
-               AND ${scopeWhere}
-             ORDER BY m.confidence DESC, m.updated_at DESC
-             LIMIT ?`,
-            ...hanTerms.map(
-              (term) =>
-                `%${term.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`,
-            ),
-            context.agentProfileId,
-            now(),
-            ...scopeParams,
-            boundedLimit,
-          )
-        : this.store.all<SearchRow>(
-            `SELECT m.id, m.scope_type, m.value, m.fact_key, m.kind,
-                    m.confidence, m.updated_at
-             FROM memory_fts f
-             JOIN memory_records m ON m.id = f.memory_id
-             WHERE memory_fts MATCH ?
-               AND m.agent_profile_id = ?
-               AND m.status = 'active'
-               AND (m.expires_at IS NULL OR m.expires_at > ?)
-               AND ${scopeWhere}
-             ORDER BY bm25(memory_fts), m.confidence DESC, m.updated_at DESC
-             LIMIT ?`,
-            match,
-            context.agentProfileId,
-            now(),
-            ...scopeParams,
-            boundedLimit,
-          );
+    const rows = this.store.all<SearchRow>(
+      `SELECT m.id, m.scope_type, m.value, m.fact_key, m.kind, m.origin,
+              m.confidence, m.updated_at
+       FROM memory_fts f
+       JOIN memory_records m ON m.id = f.memory_id
+       WHERE memory_fts MATCH ?
+         AND m.agent_profile_id = ?
+         AND m.status = 'active'
+         AND (m.expires_at IS NULL OR m.expires_at > ?)
+         AND ${scopeWhere}
+       ORDER BY bm25(memory_fts), m.confidence DESC, m.updated_at DESC
+       LIMIT ?`,
+      match,
+      context.agentProfileId,
+      now(),
+      ...scopeParams,
+      boundedLimit,
+    );
     return rows.map((row) => ({
       id: row.id,
       scopeType: row.scope_type,
       value: row.value,
       ...(row.fact_key ? { factKey: row.fact_key } : {}),
       kind: row.kind,
+      origin: row.origin,
       confidence: row.confidence,
       updatedAt: row.updated_at,
     }));
@@ -238,8 +270,9 @@ export class MemoryService {
         scope_type: MemoryScope;
         principal_id: string | null;
         conversation_space_id: string | null;
+        source_conversation_key: string;
       }>(
-        `SELECT scope_type, principal_id, conversation_space_id
+        `SELECT scope_type, principal_id, conversation_space_id, source_conversation_key
          FROM memory_records
          WHERE id = ? AND agent_profile_id = ? AND status = 'active'`,
         memoryId,
@@ -270,18 +303,36 @@ export class MemoryService {
         scope_type: MemoryScope;
         principal_id: string | null;
         conversation_space_id: string | null;
+        source_conversation_key: string;
         fact_key: string | null;
         kind: MemoryKind;
+        origin: MemoryOrigin;
         confidence: number;
       }>(
-        `SELECT id, scope_type, principal_id, conversation_space_id,
-                fact_key, kind, confidence
+        `SELECT id, scope_type, principal_id, conversation_space_id, source_conversation_key,
+                fact_key, kind, origin, confidence
          FROM memory_records
          WHERE id = ? AND agent_profile_id = ? AND status = 'active'`,
         memoryId,
         context.agentProfileId,
       );
       if (!record || !this.canManage(context, record)) return undefined;
+      const duplicate = this.store.get<{ id: string }>(
+        `SELECT id FROM memory_records
+         WHERE agent_profile_id = ? AND scope_type = ?
+           AND COALESCE(principal_id, '') = COALESCE(?, '')
+           AND COALESCE(conversation_space_id, '') = COALESCE(?, '')
+           AND (scope_type <> 'private_episode' OR source_conversation_key = ?)
+           AND value = ? AND status = 'active' AND id <> ?`,
+        context.agentProfileId,
+        record.scope_type,
+        record.principal_id,
+        record.conversation_space_id,
+        record.source_conversation_key,
+        normalized,
+        memoryId,
+      );
+      if (duplicate) throw new Error("相同作用域中已存在完全相同的 active 记忆");
       const updatedAt = now();
       this.store.run(
         "UPDATE memory_records SET value = ?, updated_at = ? WHERE id = ?",
@@ -291,9 +342,9 @@ export class MemoryService {
       );
       this.store.run("DELETE FROM memory_fts WHERE memory_id = ?", memoryId);
       this.store.run(
-        "INSERT INTO memory_fts(memory_id, value) VALUES (?, ?)",
+        "INSERT INTO memory_fts(memory_id, search_text) VALUES (?, ?)",
         memoryId,
-        normalized,
+        memorySearchText(normalized),
       );
       return {
         id: memoryId,
@@ -301,6 +352,7 @@ export class MemoryService {
         value: normalized,
         ...(record.fact_key ? { factKey: record.fact_key } : {}),
         kind: record.kind,
+        origin: record.origin,
         confidence: record.confidence,
         updatedAt,
       };
@@ -313,10 +365,18 @@ export class MemoryService {
       scope_type: MemoryScope;
       principal_id: string | null;
       conversation_space_id: string | null;
+      source_conversation_key: string;
     },
   ): boolean {
-    if (record.scope_type === "personal_private" || record.scope_type === "private_episode") {
+    if (record.scope_type === "personal_private") {
       return context.conversationKind === "direct" && record.principal_id === context.principalId;
+    }
+    if (record.scope_type === "private_episode") {
+      return (
+        context.conversationKind === "direct" &&
+        record.principal_id === context.principalId &&
+        record.source_conversation_key === context.conversationKey
+      );
     }
     if (record.scope_type === "group_member") {
       return (
@@ -343,4 +403,26 @@ export class MemoryService {
     }
     return result;
   }
+}
+
+function memoryRecord(row: {
+  id: string;
+  scope_type: MemoryScope;
+  value: string;
+  fact_key: string | null;
+  kind: MemoryKind;
+  origin: MemoryOrigin;
+  confidence: number;
+  updated_at: string;
+}): MemoryRecord {
+  return {
+    id: row.id,
+    scopeType: row.scope_type,
+    value: row.value,
+    ...(row.fact_key ? { factKey: row.fact_key } : {}),
+    kind: row.kind,
+    origin: row.origin,
+    confidence: row.confidence,
+    updatedAt: row.updated_at,
+  };
 }

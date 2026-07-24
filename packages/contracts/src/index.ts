@@ -118,6 +118,7 @@ export interface AgentProfile {
   command: string;
   workspace: string;
   prompt?: string;
+  skills: string[];
   permissions: {
     maxMode: PermissionMode;
   };
@@ -192,6 +193,10 @@ export interface AgentTurnInput {
   prompt: string;
   parts: MessagePart[];
   memoryContext: string[];
+  developerInstructions?: string;
+  ephemeral?: boolean;
+  hostTools?: string[];
+  builtInTools?: "default" | "none";
   signal?: AbortSignal;
 }
 

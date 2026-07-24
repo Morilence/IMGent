@@ -158,20 +158,24 @@ export class CodexDriver implements AgentDriver {
   async *runTurn(input: AgentTurnInput): AsyncIterable<AgentEvent> {
     await this.ensureReady(input.profile);
     let threadId: string;
-    if (input.sessionId) {
+    if (input.sessionId && !input.ephemeral) {
       try {
         const resumed = await this.rpc!.request<ThreadResponse>("thread/resume", {
           threadId: input.sessionId,
           cwd: input.profile.workspace,
           approvalPolicy: permissionPolicy(input.profile),
           approvalsReviewer: "user",
+          ...(input.profile.prompt ? { baseInstructions: input.profile.prompt } : {}),
+          ...(input.developerInstructions
+            ? { developerInstructions: input.developerInstructions }
+            : {}),
         });
         threadId = resumed.thread.id;
       } catch {
-        threadId = await this.startThread(input.profile);
+        threadId = await this.startThread(input);
       }
     } else {
-      threadId = await this.startThread(input.profile);
+      threadId = await this.startThread(input);
     }
 
     const active: ActiveTurn = {
@@ -215,7 +219,9 @@ export class CodexDriver implements AgentDriver {
     }
   }
 
-  private async startThread(profile: AgentProfile): Promise<string> {
+  private async startThread(input: AgentTurnInput): Promise<string> {
+    const profile = input.profile;
+    const hostTools = selectedHostTools(this.options.hostTools ?? [], input.hostTools);
     const response = await this.rpc!.request<ThreadResponse>("thread/start", {
       cwd: profile.workspace,
       approvalPolicy: permissionPolicy(profile),
@@ -227,11 +233,37 @@ export class CodexDriver implements AgentDriver {
             ? "read-only"
             : "workspace-write",
       ...(profile.prompt ? { baseInstructions: profile.prompt } : {}),
-      ephemeral: false,
+      ...(input.developerInstructions
+        ? { developerInstructions: input.developerInstructions }
+        : {}),
+      ephemeral: input.ephemeral === true,
       serviceName: "imgent",
-      ...(this.options.hostTools?.length
+      ...(input.builtInTools === "none"
         ? {
-            dynamicTools: groupTools(this.options.hostTools),
+            config: {
+              features: {
+                shell_tool: false,
+                unified_exec: false,
+                code_mode: false,
+                code_mode_host: false,
+                browser_use: false,
+                computer_use: false,
+                image_generation: false,
+                apps: false,
+                plugins: false,
+                goals: false,
+                multi_agent: false,
+                multi_agent_v2: false,
+                workspace_dependencies: false,
+              },
+            },
+            environments: [],
+            selectedCapabilityRoots: [],
+          }
+        : {}),
+      ...(hostTools.length
+        ? {
+            dynamicTools: groupTools(hostTools),
           }
         : {}),
     });
@@ -533,6 +565,15 @@ function groupTools(tools: readonly AgentHostToolSpec[]): Array<Record<string, u
       inputSchema: tool.inputSchema,
     })),
   }));
+}
+
+function selectedHostTools(
+  tools: readonly AgentHostToolSpec[],
+  allowed: readonly string[] | undefined,
+): AgentHostToolSpec[] {
+  if (!allowed) return [...tools];
+  const selected = new Set(allowed);
+  return tools.filter((tool) => selected.has(`${tool.namespace}.${tool.name}`));
 }
 
 function toolName(method: string): string {
