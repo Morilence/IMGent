@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -8,25 +9,31 @@ import { authorizeWechatIlink } from "@imgent/adapter-wechat-ilink";
 import { IMGentError, normalizeError } from "@imgent/contracts";
 import { Command, CommanderError, Option } from "commander";
 import qrcode from "qrcode-terminal";
-import { createBackup, restoreBackup } from "../backup/service.js";
-import { defaultConfig } from "../config/index.js";
+import { restoreBackup } from "../backup/service.js";
+import { defaultConfig, loadConfig } from "../config/index.js";
 import { readRawConfig, updateConfig, writeConfig } from "../config/write.js";
 import { normalizeLocale, renderError, renderErrorText, resolveLocale } from "../i18n/index.js";
-import { IMGentApplication, renderReadiness } from "../runtime/application.js";
-import { builtInSkillsDirectory } from "../skills/paths.js";
-import { SkillRegistry } from "../skills/registry.js";
+import { renderReadiness, type ReadinessReport } from "../service/application.js";
+import { resolveInstanceEndpoint } from "../service/instance.js";
+import { IMGentService } from "../service/lifecycle.js";
+import { OfflineAdminService } from "../service/offline-admin-service.js";
+import { OfflineLease } from "../service/offline-lease.js";
+import { COMMAND_CAPABILITIES, type CommandName } from "./command-capability.js";
 import { openAdminContext } from "./context.js";
+import { ControlClient, type ControlDiscovery } from "./control-client.js";
 import { cliErrorEnvelope, cliExitCode, cliSuccessEnvelope } from "./presentation.js";
 import type {
   AgentProfile,
   BotInstance,
   ErrorDescriptor,
+  IMGentConfig,
   SupportedLocale,
 } from "@imgent/contracts";
 
 const program = new Command();
 let activeLocale: SupportedLocale = "zh-CN";
 let jsonOutput = false;
+const offlineLeases = new Map<string, OfflineLease>();
 
 program
   .name("imgent")
@@ -49,12 +56,22 @@ program
   .option("--force", "覆盖已有配置文件", false)
   .action(async (options: { workspace: string; dataDir: string; force: boolean }) => {
     const configPath = configPathOf();
+    try {
+      await stat(configPath);
+      await routeCommand("init", await loadConfig(configPath));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     const workspace = resolve(options.workspace);
     await mkdir(workspace, { recursive: true });
     const config = {
       ...defaultConfig(workspace),
       dataDir: options.dataDir,
     };
+    await routeCommand("init", {
+      ...config,
+      dataDir: resolve(dirname(configPath), options.dataDir),
+    });
     await writeConfig(configPath, config, options.force);
     await mkdir(resolve(dirname(configPath), options.dataDir), {
       recursive: true,
@@ -95,6 +112,7 @@ profile
       },
     ) => {
       const configPath = configPathOf();
+      await routeCommand("profile add", await loadConfig(configPath));
       const entry: AgentProfile = {
         id,
         driver: options.driver,
@@ -126,33 +144,44 @@ skillsCommand
   .command("list")
   .description("列出内置 skill 与本机覆盖后的启动快照")
   .action(async () => {
-    const { registry } = await configuredSkills();
-    print(
-      registry.all().map((skill) => ({
-        name: skill.name,
-        description: skill.description,
-        source: skill.source,
-        files: skill.files,
-        bytes: skill.bytes,
-      })),
-    );
+    const discovery = await routeCommand("skills list");
+    if (discovery.state === "running") {
+      print({
+        mode: "online",
+        service: discovery.meta,
+        configDrift: discovery.configDrift,
+        skills: await discovery.client.get<unknown[]>("/v1/skills"),
+      });
+      return;
+    }
+    const offline = await OfflineAdminService.open(configPathOf());
+    try {
+      print({ mode: "offline", skills: await offline.skills() });
+    } finally {
+      offline.close();
+    }
   });
 
 skillsCommand
   .command("validate")
   .description("校验所有 skill 包和 AgentProfile 引用")
   .action(async () => {
-    const { config, registry } = await configuredSkills();
-    const profiles = config.agentProfiles.map((entry) => ({
-      profileId: entry.id,
-      skills: registry.visible(entry.skills, entry.memory.enabled).map((skill) => skill.name),
-    }));
-    print({
-      result: "valid",
-      skills: registry.all().length,
-      profiles,
-      restartRequiredAfterChanges: true,
-    });
+    const discovery = await routeCommand("skills validate");
+    if (discovery.state === "running") {
+      print({
+        mode: "online",
+        service: discovery.meta,
+        configDrift: discovery.configDrift,
+        ...(await discovery.client.post<Record<string, unknown>>("/v1/skills/validate")),
+      });
+      return;
+    }
+    const offline = await OfflineAdminService.open(configPathOf());
+    try {
+      print({ mode: "offline", ...(await offline.validateSkills()) });
+    } finally {
+      offline.close();
+    }
   });
 
 skillsCommand
@@ -164,6 +193,7 @@ skillsCommand
       throw new IMGentError("CLI_USAGE_INVALID");
     }
     const configPath = configPathOf();
+    await routeCommand("skills init", await loadConfig(configPath));
     const config = await readRawConfig(configPath);
     const userSkillsRoot = resolve(dirname(configPath), config.dataDir, "skills");
     const skillRoot = resolve(userSkillsRoot, name);
@@ -223,6 +253,7 @@ bot
         throw new IMGentError("CLI_USAGE_INVALID");
       }
       const configPath = configPathOf();
+      await routeCommand("bot add", await loadConfig(configPath));
       const current = await readRawConfig(configPath);
       if (!current.agentProfiles.some((entry) => entry.id === options.profile)) {
         throw new IMGentError("CONFIG_FILE_INVALID");
@@ -280,6 +311,7 @@ bot
   .option("--base-url <url>", "微信 iLink API 基础 URL")
   .action(async (id: string, options: { baseUrl?: string }) => {
     const configPath = configPathOf();
+    await routeCommand("bot authorize", await loadConfig(configPath));
     const config = await readRawConfig(configPath);
     const selected = config.bots.find((entry) => entry.id === id);
     if (!selected || selected.adapter !== "wechat-ilink") {
@@ -337,15 +369,15 @@ program
   .command("pair <code>")
   .description("确认私聊一次性配对码")
   .action(async (code: string) => {
-    const context = await openAdminContext(configPathOf());
-    try {
-      print({
-        result: "paired",
-        ...context.identity.confirmPairing(code),
-      });
-    } finally {
-      context.store.close();
-    }
+    const discovery = await requireRunning("pair");
+    print({
+      mode: "online",
+      service: discovery.meta,
+      configDrift: discovery.configDrift,
+      ...(await discovery.client.post<Record<string, unknown>>(
+        `/v1/pairings/${encodeURIComponent(code)}/confirm`,
+      )),
+    });
   });
 
 const identity = program.command("identity").description("查看本地身份映射");
@@ -353,20 +385,21 @@ identity
   .command("list")
   .description("列出平台身份与 Principal")
   .action(async () => {
-    const context = await openAdminContext(configPathOf());
+    const discovery = await routeCommand("identity list");
+    if (discovery.state === "running") {
+      print({
+        mode: "online",
+        service: discovery.meta,
+        configDrift: discovery.configDrift,
+        identities: await discovery.client.get<unknown[]>("/v1/identities"),
+      });
+      return;
+    }
+    const offline = await OfflineAdminService.open(configPathOf());
     try {
-      print(
-        context.store.all(
-          `SELECT pi.id AS platformIdentityId, pi.agent_profile_id AS agentProfileId,
-                pi.platform, pi.bot_instance_id AS botInstanceId,
-                pi.platform_user_id AS platformUserId, pi.principal_id AS principalId,
-                pi.display_name AS displayName, pi.paired
-         FROM platform_identities pi
-         ORDER BY pi.created_at`,
-        ),
-      );
+      print({ mode: "offline", identities: offline.identities() });
     } finally {
-      context.store.close();
+      offline.close();
     }
   });
 
@@ -375,24 +408,21 @@ group
   .command("list")
   .description("列出已发现群空间与授权状态")
   .action(async () => {
-    const context = await openAdminContext(configPathOf());
+    const discovery = await routeCommand("group list");
+    if (discovery.state === "running") {
+      print({
+        mode: "online",
+        service: discovery.meta,
+        configDrift: discovery.configDrift,
+        groups: await discovery.client.get<unknown[]>("/v1/groups"),
+      });
+      return;
+    }
+    const offline = await OfflineAdminService.open(configPathOf());
     try {
-      print(
-        context.store.all(
-          `SELECT cs.id AS conversationSpaceId, cs.agent_profile_id AS agentProfileId,
-                cs.bot_instance_id AS botInstanceId,
-                cs.platform_conversation_id AS platformConversationId,
-                gp.mode, gp.platform_full_capability AS platformFullCapability,
-                CASE WHEN ga.conversation_space_id IS NULL THEN 0 ELSE 1 END AS authorized
-         FROM conversation_spaces cs
-         JOIN group_policies gp ON gp.conversation_space_id = cs.id
-         LEFT JOIN group_authorizations ga ON ga.conversation_space_id = cs.id
-         WHERE cs.kind = 'group'
-         ORDER BY cs.created_at`,
-        ),
-      );
+      print({ mode: "offline", groups: offline.groups() });
     } finally {
-      context.store.close();
+      offline.close();
     }
   });
 
@@ -401,17 +431,16 @@ group
   .description("由已配对 Principal 授权一个 QQ 群")
   .requiredOption("--principal <id>", "执行授权的已配对 Principal ID")
   .action(async (conversationSpaceId: string, options: { principal: string }) => {
-    const context = await openAdminContext(configPathOf());
-    try {
-      context.identity.authorizeGroup(conversationSpaceId, options.principal);
-      print({
-        result: "group-authorized",
-        conversationSpaceId,
-        principalId: options.principal,
-      });
-    } finally {
-      context.store.close();
-    }
+    const discovery = await requireRunning("group authorize");
+    print({
+      mode: "online",
+      service: discovery.meta,
+      configDrift: discovery.configDrift,
+      ...(await discovery.client.post<Record<string, unknown>>(
+        `/v1/groups/${encodeURIComponent(conversationSpaceId)}/authorize`,
+        { principalId: options.principal },
+      )),
+    });
   });
 
 program
@@ -419,6 +448,7 @@ program
   .description("检查 Node、SQLite、平台和 Agent readiness")
   .action(async () => {
     const failures: ErrorDescriptor[] = [];
+    let runtimeMode: "online" | "offline" = "offline";
     const checks: Array<{
       check: string;
       ok: boolean;
@@ -434,21 +464,54 @@ program
     if (!nodeSupported()) {
       failures.push(new IMGentError("RUNTIME_NODE_UNSUPPORTED").descriptor);
     }
-    let application: IMGentApplication | undefined;
     try {
-      application = await IMGentApplication.create(configPathOf());
-      const readiness = await application.checkReady();
-      checks.push({
-        check: "runtime",
-        ok: readiness.ready,
-        details: renderReadiness(readiness, activeLocale),
-      });
-      if (!readiness.ready) {
-        failures.push(
-          ...readiness.issues,
-          ...Object.values(readiness.bots).flatMap((entry) => entry.issues),
-          ...Object.values(readiness.profiles).flatMap((entry) => entry.issues),
-        );
+      const discovery = await routeCommand("doctor");
+      if (discovery.state === "running") {
+        runtimeMode = "online";
+        const readiness = await discovery.client.get<ReadinessReport>("/v1/readiness");
+        checks.push({
+          check: "runtime",
+          ok: readiness.ready,
+          details: {
+            mode: "online",
+            service: discovery.meta,
+            configDrift: discovery.configDrift,
+            readiness: renderReadiness(readiness, activeLocale),
+          },
+        });
+        if (!readiness.ready) {
+          failures.push(
+            ...readiness.issues,
+            ...Object.values(readiness.bots).flatMap((entry) => entry.issues),
+            ...Object.values(readiness.profiles).flatMap((entry) => entry.issues),
+          );
+        }
+      } else {
+        const offline = await OfflineAdminService.open(configPathOf());
+        try {
+          const readiness = await offline.environmentReadiness();
+          checks.push({
+            check: "runtime",
+            ok: readiness.ready,
+            details: {
+              mode: "offline",
+              service: { state: "stopped" },
+              database: offline.persistentStatus().database,
+              skills: await offline.validateSkills(),
+              environmentReadiness: renderReadiness(readiness, activeLocale),
+              liveReadinessAvailable: false,
+            },
+          });
+          if (!readiness.ready) {
+            failures.push(
+              ...readiness.issues,
+              ...Object.values(readiness.bots).flatMap((entry) => entry.issues),
+              ...Object.values(readiness.profiles).flatMap((entry) => entry.issues),
+            );
+          }
+        } finally {
+          offline.close();
+        }
       }
     } catch (error) {
       const normalized = normalizeError(error);
@@ -458,10 +521,8 @@ program
         ok: false,
         details: renderError(normalized.descriptor, activeLocale),
       });
-    } finally {
-      await application?.stop();
     }
-    print(checks);
+    print({ mode: runtimeMode, checks });
     if (failures.length > 0) {
       process.exitCode = Math.max(...failures.map((failure) => cliExitCode(failure)));
     }
@@ -471,57 +532,43 @@ program
   .command("status")
   .description("显示数据库积压、Bot 与 Agent readiness")
   .action(async () => {
-    const application = await IMGentApplication.create(configPathOf());
+    const discovery = await routeCommand("status");
+    if (discovery.state === "running") {
+      const status = await discovery.client.get<
+        Record<string, unknown> & { readiness: ReadinessReport }
+      >("/v1/status");
+      print({
+        ...status,
+        mode: "online",
+        configDrift: discovery.configDrift,
+        readiness: renderReadiness(status.readiness, activeLocale),
+      });
+      return;
+    }
+    const offline = await OfflineAdminService.open(configPathOf());
     try {
       print({
-        database: application.store.status(),
-        transports: application.store.all(
-          `SELECT bot_instance_id AS botInstanceId,
-                  checkpoint_key AS checkpointKey, value, updated_at AS updatedAt
-           FROM transport_checkpoints
-           ORDER BY bot_instance_id, checkpoint_key`,
-        ),
-        lastInboundByBot: application.store.all(
-          `SELECT bot_instance_id AS botInstanceId,
-                  max(received_at) AS lastReceivedAt
-           FROM inbound_events GROUP BY bot_instance_id
-           ORDER BY bot_instance_id`,
-        ),
-        groups: application.store.all(
-          `SELECT cs.bot_instance_id AS botInstanceId, gp.mode,
-                  gp.platform_full_capability AS platformFullCapability,
-                  count(*) AS count
-           FROM group_policies gp
-           JOIN conversation_spaces cs
-             ON cs.id = gp.conversation_space_id
-           GROUP BY cs.bot_instance_id, gp.mode, gp.platform_full_capability
-           ORDER BY cs.bot_instance_id, gp.mode`,
-        ),
-        oldestWaitingTask:
-          application.store.get(
-            `SELECT id, conversation_key AS conversationKey, status,
-                  created_at AS createdAt
-           FROM tasks
-           WHERE status IN ('queued', 'active', 'retry_wait', 'waiting_approval')
-           ORDER BY created_at LIMIT 1`,
-          ) ?? null,
-        readiness: renderReadiness(await application.checkReady(), activeLocale),
+        mode: "offline",
+        service: { state: "stopped" },
+        ...offline.persistentStatus(),
+        readiness: null,
+        liveReadinessAvailable: false,
       });
     } finally {
-      await application.stop();
+      offline.close();
     }
   });
 
 program
   .command("start")
-  .description("执行 readiness 后启动所有启用的机器人实例")
+  .description("以前台常驻服务启动 IMGent")
   .action(async () => {
-    const application = await IMGentApplication.create(configPathOf());
+    const stopSignal = Promise.race([once(process, "SIGINT"), once(process, "SIGTERM")]);
+    const service = await IMGentService.start(configPathOf());
     try {
-      await application.start();
-      await Promise.race([once(process, "SIGINT"), once(process, "SIGTERM")]);
+      await stopSignal;
     } finally {
-      await application.stop();
+      await service.stop();
     }
   });
 
@@ -532,7 +579,30 @@ program
   .action(async (options: { output?: string }) => {
     const output =
       options.output ?? resolve(`imgent-${new Date().toISOString().replaceAll(":", "-")}.backup`);
-    print(await createBackup(configPathOf(), output));
+    const discovery = await routeCommand("backup");
+    if (discovery.state === "running") {
+      const controlled = await discovery.client.post<{
+        artifact: string;
+        files: number;
+        bytes: number;
+      }>("/v1/backups");
+      const path = await deliverControlledBackup(controlled.artifact, output);
+      print({
+        mode: "online",
+        service: discovery.meta,
+        configDrift: discovery.configDrift,
+        path,
+        files: controlled.files,
+        bytes: controlled.bytes,
+      });
+      return;
+    }
+    const offline = await OfflineAdminService.open(configPathOf());
+    try {
+      print({ mode: "offline", ...(await offline.createBackup(output)) });
+    } finally {
+      offline.close();
+    }
   });
 
 program
@@ -541,6 +611,13 @@ program
   .requiredOption("--data-dir <path>", "目标数据目录")
   .option("--force", "明确覆盖已有目标", false)
   .action(async (file: string, options: { dataDir: string; force: boolean }) => {
+    try {
+      await stat(configPathOf());
+      await routeCommand("restore", await loadConfig(configPathOf()));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await requireStoppedForDataDir("restore", options.dataDir);
     print(await restoreBackup(file, options.dataDir, configPathOf(), options.force));
   });
 
@@ -550,18 +627,95 @@ function configPathOf(): string {
   return resolve(program.opts<{ config: string }>().config);
 }
 
-async function configuredSkills(): Promise<{
-  config: Awaited<ReturnType<typeof readRawConfig>>;
-  registry: SkillRegistry;
-}> {
-  const configPath = configPathOf();
-  const config = await readRawConfig(configPath);
-  const registry = await SkillRegistry.load(
-    await builtInSkillsDirectory(),
-    resolve(dirname(configPath), config.dataDir, "skills"),
-  );
-  for (const profile of config.agentProfiles) registry.visible(profile.skills);
-  return { config, registry };
+async function routeCommand(
+  command: CommandName,
+  config?: IMGentConfig,
+): Promise<ControlDiscovery> {
+  const capability = COMMAND_CAPABILITIES[command];
+  const resolvedConfig = config ?? (await loadConfig(configPathOf()));
+  const endpoint = await resolveInstanceEndpoint(resolvedConfig.dataDir);
+  const discovery: ControlDiscovery = offlineLeases.has(endpoint.instanceKey)
+    ? { state: "stopped", endpoint }
+    : await ControlClient.discover(resolvedConfig);
+  if (discovery.state === "running" && capability === "offline") {
+    throw new IMGentError("RUNTIME_SERVICE_MUST_STOP");
+  }
+  if (discovery.state === "stopped" && capability === "online") {
+    throw new IMGentError("RUNTIME_SERVICE_NOT_RUNNING");
+  }
+  if (discovery.state === "stopped" && !offlineLeases.has(discovery.endpoint.instanceKey)) {
+    try {
+      const lease = await OfflineLease.acquire(discovery.endpoint);
+      offlineLeases.set(discovery.endpoint.instanceKey, lease);
+    } catch (error) {
+      if (capability === "dual") {
+        const raced = await ControlClient.discover(resolvedConfig);
+        if (raced.state === "running") return raced;
+      }
+      throw error;
+    }
+  }
+  return discovery;
+}
+
+async function requireRunning(
+  command: Extract<CommandName, "pair" | "group authorize">,
+): Promise<Extract<ControlDiscovery, { state: "running" }>> {
+  const discovery = await routeCommand(command);
+  if (discovery.state === "stopped") throw new IMGentError("RUNTIME_SERVICE_NOT_RUNNING");
+  return discovery;
+}
+
+async function requireStopped(command: Extract<CommandName, "restore">, config: IMGentConfig) {
+  await routeCommand(command, config);
+}
+
+async function requireStoppedForDataDir(
+  command: Extract<CommandName, "restore">,
+  dataDir: string,
+): Promise<void> {
+  await requireStopped(command, {
+    ...defaultConfig(process.cwd()),
+    dataDir: resolve(dataDir),
+  });
+}
+
+async function deliverControlledBackup(artifact: string, outputPath: string): Promise<string> {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.backup$/u.test(
+      artifact,
+    )
+  ) {
+    throw new IMGentError("RUNTIME_INSTANCE_MISMATCH");
+  }
+  const config = await loadConfig(configPathOf());
+  const controlledRoot = resolve(config.dataDir, "run", "backups");
+  const source = resolve(controlledRoot, artifact);
+  const within = relative(controlledRoot, source);
+  if (within.startsWith("..") || resolve(controlledRoot, within) !== source) {
+    throw new IMGentError("RUNTIME_INSTANCE_MISMATCH");
+  }
+  const sourceInfo = await lstat(source);
+  if (
+    !sourceInfo.isFile() ||
+    sourceInfo.isSymbolicLink() ||
+    (sourceInfo.mode & 0o077) !== 0 ||
+    (typeof process.getuid === "function" && sourceInfo.uid !== process.getuid())
+  ) {
+    throw new IMGentError("RUNTIME_INSTANCE_MISMATCH");
+  }
+  const output = resolve(outputPath);
+  const temporary = `${output}.${process.pid}.${randomUUID()}.tmp`;
+  await mkdir(dirname(output), { recursive: true, mode: 0o700 });
+  try {
+    await copyFile(source, temporary);
+    await chmod(temporary, 0o600);
+    await rename(temporary, output);
+    return output;
+  } finally {
+    await rm(temporary, { force: true });
+    await rm(source, { force: true });
+  }
 }
 
 function nodeSupported(): boolean {
@@ -606,6 +760,9 @@ async function main(): Promise<void> {
       process.stderr.write(`${renderErrorText(normalized.descriptor, activeLocale)}\n`);
     }
     process.exitCode = cliExitCode(normalized.descriptor);
+  } finally {
+    await Promise.allSettled([...offlineLeases.values()].reverse().map((lease) => lease.release()));
+    offlineLeases.clear();
   }
 }
 

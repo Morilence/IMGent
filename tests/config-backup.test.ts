@@ -27,6 +27,13 @@ test("configuration is strict and only exposes implemented adapters and drivers"
   assert.equal(
     configSchema.safeParse({
       ...base,
+      server: { host: "0.0.0.0", port: 8787 },
+    }).success,
+    false,
+  );
+  assert.equal(
+    configSchema.safeParse({
+      ...base,
       unknown: true,
     }).success,
     false,

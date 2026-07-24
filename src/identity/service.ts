@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { IMGentError } from "@imgent/contracts";
 import type { IMGentStore } from "../storage/store.js";
 import type { ActorRole, SupportedLocale } from "@imgent/contracts";
 
@@ -72,13 +73,24 @@ export class IdentityService {
         "SELECT platform_identity_id, expires_at, used_at FROM pairing_codes WHERE code_hash = ?",
         hashCode(code.toUpperCase()),
       );
-      if (!record || record.used_at) throw new Error("配对码无效或已使用");
-      if (record.expires_at <= now()) throw new Error("配对码已过期");
-      const identity = this.store.get<{ principal_id: string; agent_profile_id: string }>(
-        "SELECT principal_id, agent_profile_id FROM platform_identities WHERE id = ?",
+      if (!record) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+      const identity = this.store.get<{
+        principal_id: string;
+        agent_profile_id: string;
+        paired: number;
+      }>(
+        "SELECT principal_id, agent_profile_id, paired FROM platform_identities WHERE id = ?",
         record.platform_identity_id,
       );
-      if (!identity) throw new Error("配对身份不存在");
+      if (!identity) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+      if (record.used_at) {
+        if (identity.paired !== 1) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+        return {
+          platformIdentityId: record.platform_identity_id,
+          principalId: identity.principal_id,
+        };
+      }
+      if (record.expires_at <= now()) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
       const timestamp = now();
       this.store.run(
         `UPDATE pairing_codes SET used_at = ?
@@ -398,7 +410,9 @@ export class IdentityService {
         "SELECT agent_profile_id, kind FROM conversation_spaces WHERE id = ?",
         conversationSpaceId,
       );
-      if (!group || group.kind !== "group") throw new Error("群会话不存在");
+      if (!group || group.kind !== "group") {
+        throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+      }
       const identity = this.store.get<{ count: number }>(
         `SELECT count(*) AS count FROM platform_identities
          WHERE principal_id = ? AND agent_profile_id = ? AND paired = 1`,
@@ -406,7 +420,7 @@ export class IdentityService {
         group.agent_profile_id,
       );
       if (!identity?.count) {
-        throw new Error("授权者未在该 AgentProfile 下配对");
+        throw new IMGentError("IDENTITY_OPERATION_REJECTED");
       }
       this.store.run(
         `INSERT INTO group_authorizations(

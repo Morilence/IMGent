@@ -31,6 +31,18 @@ const zhCN = {
   "error.language_unsupported.action": "请选择 zh-CN 或 en-US。",
   "error.runtime_node_unsupported.message": "当前 Node.js 版本不受 IMGent 支持。",
   "error.runtime_node_unsupported.action": "请升级到 Node.js 24.18.0 或更高版本。",
+  "error.runtime_service_not_running.message": "IMGent 服务当前未运行。",
+  "error.runtime_service_not_running.action": "请先运行 imgent start。",
+  "error.runtime_service_must_stop.message": "该操作要求 IMGent 服务处于停止状态。",
+  "error.runtime_service_must_stop.action": "请先停止对应 dataDir 的 imgent start 进程。",
+  "error.runtime_control_unreachable.message": "检测到 IMGent 服务端点，但控制面暂时无法访问。",
+  "error.runtime_control_unreachable.action": "请检查服务日志；不要在此状态下直接操作 SQLite。",
+  "error.runtime_control_protocol_unsupported.message": "CLI 与运行中的 IMGent 控制协议不兼容。",
+  "error.runtime_control_protocol_unsupported.action": "请让 CLI 与服务使用相同版本后重试。",
+  "error.runtime_instance_conflict.message": "同一 dataDir 已有 IMGent 服务实例运行。",
+  "error.runtime_instance_conflict.action": "请使用现有实例，或先将其停止。",
+  "error.runtime_instance_mismatch.message": "控制端点属于另一个 IMGent 实例。",
+  "error.runtime_instance_mismatch.action": "请检查配置路径、dataDir 和本机运行中的实例。",
   "error.storage_unavailable.message": "IMGent 本地存储当前不可用。",
   "error.storage_unavailable.action": "请检查数据目录、磁盘空间和 SQLite 文件权限。",
   "error.storage_migration_failed.message": "数据库升级失败，IMGent 已停止启动以保护现有数据。",
@@ -124,6 +136,27 @@ const enUS = {
   "error.runtime_node_unsupported.message":
     "The current Node.js version is not supported by IMGent.",
   "error.runtime_node_unsupported.action": "Upgrade to Node.js 24.18.0 or newer.",
+  "error.runtime_service_not_running.message": "The IMGent service is not running.",
+  "error.runtime_service_not_running.action": "Run imgent start first.",
+  "error.runtime_service_must_stop.message":
+    "This operation requires the IMGent service to be stopped.",
+  "error.runtime_service_must_stop.action":
+    "Stop the imgent start process for this data directory first.",
+  "error.runtime_control_unreachable.message":
+    "An IMGent endpoint exists, but its control plane is unreachable.",
+  "error.runtime_control_unreachable.action":
+    "Inspect the service logs; do not access SQLite directly in this state.",
+  "error.runtime_control_protocol_unsupported.message":
+    "The CLI and running IMGent control protocol are incompatible.",
+  "error.runtime_control_protocol_unsupported.action":
+    "Use the same IMGent version for the CLI and service, then retry.",
+  "error.runtime_instance_conflict.message":
+    "An IMGent service is already running for this data directory.",
+  "error.runtime_instance_conflict.action": "Use the existing instance or stop it first.",
+  "error.runtime_instance_mismatch.message":
+    "The control endpoint belongs to a different IMGent instance.",
+  "error.runtime_instance_mismatch.action":
+    "Check the configuration path, data directory, and running local instances.",
   "error.storage_unavailable.message": "IMGent local storage is unavailable.",
   "error.storage_unavailable.action":
     "Check the data directory, disk space, and SQLite file permissions.",

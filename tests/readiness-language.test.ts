@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { defaultConfig } from "../src/config/index.js";
 import { writeConfig } from "../src/config/write.js";
-import { IMGentApplication } from "../src/runtime/application.js";
 import { CredentialStore } from "../src/security/credential-store.js";
+import { IMGentApplication } from "../src/service/application.js";
+import { IMGentService } from "../src/service/lifecycle.js";
 import { directMessage } from "./helpers.js";
 import type {
   AdapterReadiness,
@@ -59,7 +60,7 @@ function capturingAdapter(sent: OutboundMessage[]): ImAdapter {
 
 test("/healthz stays simple and /readyz localizes issues from Accept-Language", async () => {
   const directory = await mkdtemp(join(tmpdir(), "imgent-readyz-"));
-  let application: IMGentApplication | undefined;
+  let service: IMGentService | undefined;
   try {
     const port = await availablePort();
     const configPath = join(directory, "imgent.json");
@@ -68,8 +69,7 @@ test("/healthz stays simple and /readyz localizes issues from Accept-Language", 
       dataDir: "./state",
       server: { host: "127.0.0.1", port },
     });
-    application = await IMGentApplication.create(configPath);
-    await application.start({ skipReadiness: true });
+    service = await IMGentService.start(configPath);
 
     const health = (await (await fetch(`http://127.0.0.1:${port}/healthz`)).json()) as Record<
       string,
@@ -94,7 +94,7 @@ test("/healthz stays simple and /readyz localizes issues from Accept-Language", 
     assert.match(readiness.issues[0]?.message ?? "", /AgentProfile|Driver/);
     assert.ok(readiness.issues[0]?.action);
   } finally {
-    await application?.stop();
+    await service?.stop();
     await rm(directory, { recursive: true, force: true });
   }
 });

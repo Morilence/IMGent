@@ -139,11 +139,12 @@ test("CLI --json success uses locale and a stable success envelope", async () =>
     const envelope = JSON.parse(result.stdout) as {
       ok: boolean;
       locale: string;
-      result: unknown[];
+      result: { mode: string; skills: unknown[] };
     };
     assert.equal(envelope.ok, true);
     assert.equal(envelope.locale, "en-US");
-    assert.ok(Array.isArray(envelope.result));
+    assert.equal(envelope.result.mode, "offline");
+    assert.ok(Array.isArray(envelope.result.skills));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

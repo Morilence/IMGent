@@ -1,13 +1,14 @@
 # IMGent产品设计与落地指南
 
-> 状态：v0.2 设计基线
-> 最后核验：2026-07-23
+> 状态：v0.3 已实现架构基线
+> 最后核验：2026-07-24
 > 本文同时定义产品边界、架构约束、核心接口、数据模型和 v1 验收标准。
 
-配套事实手册：
+配套文档：
 
 - [IM 平台接口事实手册](references/im-platform-apis.md)
 - [Agent 驱动协议事实手册](references/agent-driver-protocols.md)
+- [CLI 与常驻服务架构](cli-service-architecture.md)
 
 ## 1. 产品概述
 
@@ -163,18 +164,28 @@ v1 的审批等待只在当前 IMGent/Driver 进程内有效。进程重启时�
 
 ### 4.1 运行形态
 
-v1 支持：
+IMGent 是一个以 CLI 作为部署者入口的本地常驻服务，而不是只在命令执行期间工作的
+一次性 CLI，也不是以 HTTP API 为主要业务入口的传统 Web Server。
 
-- 本机常驻进程。
-- Docker 单容器部署。
+v1 保持一个 npm 根包、一个 `imgent` 可执行入口和一个部署单元，但区分两类进程：
 
-两种方式都运行同一个 Node.js 进程并使用一个本地 SQLite 文件。Docker 需要挂载：
+- `imgent start`：唯一常驻业务进程，前台运行并持有 SQLite、凭据、连接、队列和
+  skill 启动快照。
+- `imgent <command>`：短生命周期管理进程；运行态操作通过本地控制面调用常驻
+  服务，停服维护按命令能力访问本地文件。
+
+服务支持本机 supervisor 托管和 Docker 单容器部署。两种方式都运行同一个 Node.js
+业务进程并使用一个本地 SQLite 文件。systemd、launchd、Windows Service 或
+Docker 负责后台化、重启、信号和日志，IMGent 不实现自己的 daemon manager。
+
+Docker 需要挂载：
 
 - IMGent 数据目录。
 - 目标工作区。
 - 部署者明确允许使用的 Codex / Claude Code 配置目录。
 
-容器不应把 app-server、SQLite 或健康检查以外的管理接口暴露到公网。
+容器不应把 app-server、SQLite、本地控制面或健康检查以外的接口暴露出去。健康
+检查默认只绑定 loopback；本地控制面只使用 Unix domain socket 或 Named Pipe。
 
 ### 4.2 CLI
 
@@ -182,14 +193,13 @@ v1 支持：
 imgent init
 imgent bot add qq
 imgent bot add wechat-ilink
-imgent bot authorize wechat-ilink <bot-instance>
+imgent bot authorize <bot-instance>
 imgent profile add
 imgent pair
 imgent doctor
 imgent --locale en-US status
 imgent --json doctor
 imgent start
-imgent status
 imgent backup
 imgent restore <file>
 ```
@@ -201,9 +211,37 @@ imgent restore <file>
 - `skills list`、`skills validate` 与 `skills init` 只在本机查看、校验和创建
   IMGent 托管技能。
 - `doctor` 检查 Node.js、SQLite、Agent CLI、登录态、平台权限和工作目录。
-- `start` 先运行最小 readiness 检查，再启动机器人实例和队列。
+- `start` 前台启动服务；本地基础设施错误导致退出，平台或 Agent 外部依赖错误使
+  服务保持 `degraded`，以便继续诊断和恢复。
 
-### 4.3 配置示例
+每个命令必须声明运行能力：
+
+| 能力    | 行为                                        | 代表命令                                                             |
+| ------- | ------------------------------------------- | -------------------------------------------------------------------- |
+| offline | 直接原子操作停服状态；服务运行时拒绝        | `init`、`profile add`、`bot add/authorize`、`skills init`、`restore` |
+| online  | 只通过本地控制面；服务未运行时拒绝          | `pair`、`group authorize`                                            |
+| dual    | 在线走控制面，停服走受限离线路径并标记 mode | `doctor`、`status`、列表/校验命令、`backup`                          |
+
+CLI 已发现控制 endpoint 但握手失败时，不得静默回退为直接打开 SQLite。
+offline/dual 命令进入离线路径后，必须在同一 endpoint 上持有短生命周期 ownership
+lease，直到本地数据操作完成，避免与并发 `imgent start` 形成 TOCTOU 竞争。
+
+### 4.3 本地控制面
+
+常驻服务额外监听受操作系统权限保护的本地 endpoint：
+
+- Linux/macOS：由规范化 dataDir 生成稳定 instance key，在受保护的用户 runtime
+  目录创建 Unix socket，并校验平台路径长度。
+- Windows：由 instance key 和当前用户派生的用户范围 Named Pipe。
+- 协议：HTTP/1.1 + JSON，路由统一使用 `/v1` 版本前缀。
+- TCP 上的 `/healthz` 和 `/readyz` 与控制面分离，不承载管理 mutation。
+
+服务运行时是 SQLite 和凭据存储的唯一在线所有者。`status`、配对、身份与群管理
+不再创建第二个 Application 或直接打开运行中的数据库。完整的进程状态机、命令
+矩阵、协议、项目结构和迁移顺序见
+[CLI 与常驻服务架构](cli-service-architecture.md)。
+
+### 4.4 配置示例
 
 ```json
 {
@@ -282,25 +320,30 @@ imgent restore <file>
 - `defaultLocale` 和可选的 `BotInstance.locale` 只接受 `zh-CN`、`en-US`。
 - `AgentProfile.skills` 使用与 Driver 无关的 IMGent skill 名称；缺省为
   `["*"]`，同一配置语义适用于 Codex 与 Claude Code。
+- v1 兼容保留的 `server` 字段只配置 health server，不能启用 TCP 控制面；未来
+  schema 升级可将其重命名为 `health`。
 - 未实现的 `feishu`、`telegram` adapter 值在配置解析阶段直接报错。
 - 启动时拒绝未知字段和无效组合，不静默猜测。
+- v1 将配置和用户 skills 视为启动快照；修改它们的 CLI 命令要求服务停止，并在
+  下一次 `imgent start` 生效。
 
 ## 5. 技术选型与仓库结构
 
 ### 5.1 技术选型
 
-| 项目           | 选择                    | 原因                                              |
-| -------------- | ----------------------- | ------------------------------------------------- |
-| Runtime        | Node.js 24.x            | 原生 TypeScript 生态、子进程和 WebSocket 支持     |
-| 语言           | TypeScript              | 约束平台事件、身份、记忆和驱动事件                |
-| 包管理         | pnpm workspaces         | 统一锁文件，并清晰管理 IM 适配器与 Agent 驱动子包 |
-| 管理服务       | Fastify 5               | 健康检查和本地管理端点                            |
-| 数据库         | `node:sqlite`           | 单机、无额外原生依赖、事务和 FTS5                 |
-| 全文检索       | SQLite FTS5             | 本地、可备份、无需外部服务                        |
-| QQ Transport   | 官方 Gateway WebSocket  | 本地和容器均无需公网回调                          |
-| 微信 Transport | iLink HTTP long polling | 与当前腾讯官方插件协议一致                        |
-| Codex          | app-server stdio        | 官方双向 JSON-RPC 控制面                          |
-| Claude Code    | TypeScript Agent SDK    | 官方 streaming、session 与当前进程内审批能力      |
+| 项目           | 选择                                  | 原因                                              |
+| -------------- | ------------------------------------- | ------------------------------------------------- |
+| Runtime        | Node.js 24.x                          | 原生 TypeScript 生态、子进程和 WebSocket 支持     |
+| 语言           | TypeScript                            | 约束平台事件、身份、记忆和驱动事件                |
+| 包管理         | pnpm workspaces                       | 统一锁文件，并清晰管理 IM 适配器与 Agent 驱动子包 |
+| 本地控制面     | HTTP/JSON over Unix socket/Named Pipe | 复用成熟协议，同时保持本机权限边界                |
+| 健康服务       | Fastify 5 + loopback TCP              | 只提供 health/readiness，不开放管理 mutation      |
+| 数据库         | `node:sqlite`                         | 单机、无额外原生依赖、事务和 FTS5                 |
+| 全文检索       | SQLite FTS5                           | 本地、可备份、无需外部服务                        |
+| QQ Transport   | 官方 Gateway WebSocket                | 本地和容器均无需公网回调                          |
+| 微信 Transport | iLink HTTP long polling               | 与当前腾讯官方插件协议一致                        |
+| Codex          | app-server stdio                      | 官方双向 JSON-RPC 控制面                          |
+| Claude Code    | TypeScript Agent SDK                  | 官方 streaming、session 与当前进程内审批能力      |
 
 `node:sqlite` 在 Node.js 24 当前文档中仍为 release candidate。实现必须固定实际验证过的 24.x 最低补丁版本，并在 `doctor` / 启动时检查：
 
@@ -321,15 +364,20 @@ imgent/
 │  ├─ imgent-conversation/
 │  └─ imgent-memory/
 ├─ src/
-│  ├─ cli/
+│  ├─ cli/             # 参数、命令能力、Control Client、输出
+│  ├─ service/         # 进程组装、生命周期、实例和 readiness
+│  ├─ control/         # 本地协议、transport、管理路由
+│  ├─ health/          # 无副作用的 TCP health/readiness
+│  ├─ runtime/         # 消息运行期通用能力
 │  ├─ config/
-│  ├─ runtime/
-│  ├─ queue/
 │  ├─ storage/
+│  ├─ queue/
 │  ├─ identity/
 │  ├─ memory/
 │  ├─ skills/
-│  └─ approvals/
+│  ├─ approvals/
+│  ├─ security/
+│  └─ backup/
 ├─ packages/
 │  ├─ contracts/
 │  ├─ im-adapters/
@@ -343,11 +391,15 @@ imgent/
 
 约束：
 
-- 根包是 `imgent` CLI 和运行时，主要实现始终位于 `src/`。
+- 根包是 `imgent` CLI 和常驻服务，主要实现始终位于 `src/`。
+- `cli`、`service`、`control`、`health` 是代码边界，不是四个部署单元。
+- CLI online command 不得 import `IMGentStore`；Control route 不得直接拼业务 SQL。
 - `pnpm-workspace.yaml` 分别声明 `packages/im-adapters/*` 与 `packages/agent-drivers/*`。
 - v1 适配器位于 `packages/im-adapters/qq` 和 `packages/im-adapters/wechat-ilink`。
 - Codex 与 Claude Code 驱动分别位于 `packages/agent-drivers/codex` 和 `packages/agent-drivers/claude-code`。
 - `packages/contracts` 只保存跨包协议，不承载运行时业务逻辑。
+- 本地 control protocol 在 v1 留在根包 `src/control/`，不作为公共 workspace package
+  或第三方 API 发布。
 - 不引入 Turborepo、Nx 或动态插件加载器。
 - Feishu、Telegram 等到进入实现阶段再创建包。
 - Monorepo 只解决边界和测试，不改变单进程、单数据库、单部署单元。
@@ -393,6 +445,10 @@ flowchart LR
 ### 6.2 运行模块
 
 - Config Loader：严格校验配置与 secret 引用。
+- Service Lifecycle：单实例、starting/ready/degraded/stopping 状态和有序关闭。
+- Control Server：在本地 socket/pipe 上提供版本化管理协议。
+- Health Server：在 loopback TCP 上提供无副作用的 health/readiness。
+- Control Client：为 online/dual CLI 命令连接活动实例并校验协议与 config hash。
 - Bot Supervisor：启动 BotInstance、恢复连接、隔离单个实例故障。
 - Adapter Host：接收统一消息并发送出站消息。
 - Event Store：去重、Transport checkpoint 和诊断。
@@ -404,7 +460,23 @@ flowchart LR
 - Host Tool Router：按 turn 绑定 memory/skills 上下文并执行工具白名单。
 - Memory Service：同步记忆工具、异步策展、召回和删除。
 - Outbound Dispatcher：平台回复、主动发送降级和 dead letter。
-- Local Admin Server：health、ready 和本机管理接口。
+
+### 6.3 管理链路
+
+```mermaid
+flowchart LR
+    CLI["imgent CLI"] -->|"local HTTP/JSON"| CS["Control Server"]
+    CS --> AS["Application Services"]
+    AS --> DB["SQLite"]
+    AS --> RT["运行状态"]
+    SUP["Supervisor / Probe"] --> HS["Health Server"]
+    HS --> RP["Readiness Projection"]
+    CS --> RP
+```
+
+Control Server 与 CLI 只负责 transport 和 DTO；身份、群授权、配对、备份等规则位于
+可复用的 application service。Health Server 使用独立的脱敏 DTO，不能注册控制
+路由。常驻服务运行时是 SQLite、credential store 和运行状态的唯一在线所有者。
 
 ## 7. IM 适配器契约
 
@@ -659,7 +731,7 @@ interface ErrorDescriptor {
 - Driver 错误事件为 `{ type: "error"; error: ErrorDescriptor }`；Adapter、
   Driver 和 readiness 都使用结构化 issues。
 - cause、stack、完整消息正文、路径、SQL、凭据和原始平台响应不进入错误
-  descriptor、数据库错误字段、聊天、CLI JSON 或管理端点。
+  descriptor、数据库错误字段、聊天、CLI JSON 或控制面响应。
 
 ## 10. 身份模型
 
@@ -1012,8 +1084,14 @@ decidedAt
 
 ### 13.5 管理服务
 
-- 默认只监听 `127.0.0.1`。
+- 本地控制面只监听当前部署用户可访问的 Unix socket 或 Named Pipe；默认不存在
+  TCP 管理接口。
+- `server.host` / `server.port` 只配置 health server，默认监听 `127.0.0.1`。
+- health 与 control 使用不同路由集合和不同响应 DTO。
 - 健康检查不返回消息正文、平台 ID、记忆或 token。
+- 控制面错误只返回稳定 ErrorDescriptor；CLI 负责本地化，不返回 cause、stack、
+  SQL、完整路径或原始厂商响应。
+- 服务运行时，CLI 不得直接打开 SQLite 或 credential store。
 - 如果未来启用 webhook，必须验证签名、防重放并限制 body 大小。
 - 不把 Codex app-server WebSocket 暴露为远程控制入口。
 
@@ -1031,7 +1109,6 @@ decidedAt
 
 SQLite 保存：
 
-- AgentProfile 与 BotInstance 非敏感配置。
 - Principal、PlatformIdentity、ConversationSpace、GroupMembership。
 - 入站事件去重键和 Transport checkpoint。
 - conversation、session/thread、task、turn 和队列状态。
@@ -1044,6 +1121,10 @@ SQLite 保存：
 - 出站幂等键、发送结果和标准错误 dead letter。
 - 群采集策略、同意记录和原文过期时间。
 - 审计事件。
+
+配置文件是 AgentProfile、BotInstance、Route、工作区和静态权限策略的权威来源。
+SQLite 只用稳定 ID 引用它们并保存运行事实；不得把同一可变配置字段同时维护为两份
+权威状态。服务运行时是 SQLite 的唯一在线访问者。
 
 ### 14.2 事务边界
 
@@ -1080,13 +1161,14 @@ Principal、conversation 和过期时间，再由 Driver 接受答复，最后�
 
 `imgent backup`：
 
-1. 确保数据库处于一致状态。
+1. 服务在线时通过本地控制面协调；停服时使用相同的 backup application service。
 2. 使用 SQLite backup 能力创建快照。
-3. 复制非敏感配置和必要附件。
+3. 在同一配置/skill 快照下复制配置、平台凭据和必要附件。
 4. 默认不导出外部 CLI 的认证目录。
 5. 输出 manifest、schema version 和校验和。
 
-恢复时先验证 manifest、校验和和目标目录为空或明确允许覆盖。
+恢复时要求目标实例停止，先验证 manifest、校验和、控制 endpoint、目标目录为空或
+明确允许覆盖。`--force` 不得绕过活动实例检查。
 
 ## 15. 可观测性与故障处理
 
@@ -1120,12 +1202,16 @@ incidentId
 
 ### 15.2 健康检查
 
-- `GET /healthz`：仅返回简单进程状态。
+- `GET /healthz`：仅返回进程、本地核心和生命周期状态。
 - `GET /readyz`：数据库可写、迁移完成、至少一个启用 BotInstance 和对应
   AgentProfile ready；按 `Accept-Language` 返回 code、locale 和本地化
   message/action，不返回内部诊断。
 
-`imgent status` 额外显示：
+外部平台、凭据或 Agent readiness 失败使服务进入 `degraded`，`/healthz` 仍成功而
+`/readyz` 返回 503。配置无效、数据目录不安全、单实例冲突、凭据主密钥不可读、
+SQLite/迁移/FTS5 失败属于致命错误。
+
+`imgent status` 通过本地控制面额外显示：
 
 - 各 BotInstance 的 Transport 状态、最后事件时间和 checkpoint。
 - QQ 全量事件权限与群采集模式数量。
@@ -1133,6 +1219,9 @@ incidentId
 - 每个会话 active turn 和队列长度。
 - 最老等待任务、待审批和 dead letter。
 - Memory Curator outbox 积压。
+
+服务停服时，`status` 只报告 `service.state = "stopped"` 和安全的持久化摘要，不
+创建第二套 Adapter/Driver 或伪造实时状态。
 
 ### 15.3 错误分类
 
@@ -1215,7 +1304,7 @@ CLI 错误退出码固定为：0 成功、2 输入/配置、3 需要部署者操
 已记入本群共享记忆：发布前先运行集成测试。
 ```
 
-### 16.5 QQ 群采集切换
+### 16.6 QQ 群采集切换
 
 建议使用明确命令：
 
@@ -1234,6 +1323,8 @@ CLI 错误退出码固定为：0 成功、2 输入/配置、3 需要部署者操
 - Feishu、Telegram 始终标记待扩展。
 - 全文始终把 Codex app-server 与 Claude Agent SDK 描述为独立协议，只由内部 AgentDriver 统一产品语义。
 - 仓库结构始终描述 pnpm workspaces Monorepo，同时明确它仍是单部署单元。
+- 全文区分 CLI、常驻服务、Control Server 与 Health Server，不把一个可执行入口
+  误写成一个进程生命周期。
 - 两份事实手册中的字段和能力都有官方来源与核验日期。
 
 ### 17.2 QQ
@@ -1296,12 +1387,32 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
   自动化测试。
 - token、secret、replyContext、完整消息正文、路径、SQL 和原始厂商错误不出现
   在用户表面、持久化错误或默认日志。
-- 管理服务默认只绑定 loopback。
+- health server 默认只绑定 loopback；control server 只绑定当前部署用户可访问的
+  Unix socket/Named Pipe。
 - schema v2→v3 保留业务数据、创建独立备份；失败时事务回滚且 readiness 失败。
 - FTS5 不可用时启动失败，不静默退化。
 - 备份可恢复到新的空数据目录并通过完整性检查。
 
-## 18. 建议交付顺序
+### 17.7 CLI 与常驻服务
+
+- 用户只需安装和理解一个 `imgent` 入口，`imgent start` 是唯一常驻业务进程。
+- `start` 前台运行，生命周期由 systemd、launchd、Windows Service 或 Docker
+  管理，不实现自行后台化。
+- 同一 dataDir 只能有一个服务实例；stale endpoint 清理不跟随符号链接，也不删除
+  其他用户文件。
+- online/dual CLI 命令通过版本化本地控制面获得同一 `instanceId` 的实时状态。
+- 服务运行期间，CLI 不直接打开 SQLite、credential store 或写配置/skills。
+- offline 配置和 restore 命令在活动实例存在时明确拒绝。
+- endpoint 握手失败或协议不兼容时不静默回退到离线访问；config hash 不一致显式
+  报告 configuration drift。
+- 外部平台或 Agent 失败进入 degraded 并可诊断；本地配置、权限、SQLite、迁移、
+  FTS5 或单实例错误属于 fatal。
+- 两进程测试覆盖 status、doctor、身份/群管理、备份、SIGTERM 和 endpoint 清理。
+
+## 18. 实现与发布顺序
+
+阶段一至阶段四已经落地并纳入自动化回归；阶段五中的真实平台/Agent 发布验收仍按
+目标环境执行。
 
 ### 阶段一：运行时骨架与 QQ 私聊
 
@@ -1332,7 +1443,21 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
 
 完成标准：QQ 私聊/群聊、微信私聊和五类记忆作用域通过完整隔离验收。
 
-### 阶段四：发布准备
+### 阶段四（已完成）：CLI 与服务边界
+
+- Service Lifecycle、单实例 endpoint 和 starting/ready/degraded/stopping 状态机。
+- Unix socket/Named Pipe 上的版本化本地控制面。
+- status、doctor、身份、配对、群管理和在线备份迁移到 control application
+  service。
+- offline/online/dual 命令能力与停服保护。
+- Health Server 与 Control Server 的 DTO 和路由隔离。
+
+完成标准：常驻服务运行时只有服务进程访问 SQLite 和 credential store；CLI
+查询与 mutation 都针对同一 `instanceId`，外部依赖失败仍可诊断。
+
+具体迁移步骤见 [CLI 与常驻服务架构](cli-service-architecture.md)。
+
+### 阶段五：发布准备
 
 - Docker 单容器。
 - 数据迁移、备份恢复和死信诊断。
@@ -1350,6 +1475,9 @@ v1 只有在 QQ、微信、Codex、Claude Code 四条主链路全部达到本指
 | QQ 群采集   | 默认 triggered，管理员可选 full                 | 需要权限、同意和清理治理   |
 | 群原文      | full 模式普通消息 7 天                          | 长期回溯依赖确认记忆       |
 | 仓库        | pnpm workspaces；IM 适配器与 Agent 驱动分别建包 | 不提供运行时插件市场       |
+| 发行入口    | 一个 `imgent` CLI                               | 代码内必须区分短命令和服务 |
+| 在线管理    | 本地 socket/pipe 控制面                         | 增加协议和两进程测试       |
+| 配置        | v1 启动快照，修改要求停服                       | 暂无通用热更新             |
 | 部署        | 单进程 + SQLite                                 | 不面向水平扩展             |
 | Agent 协议  | 统一语义，不统一 wire                           | 维护两个驱动实现           |
 | Codex       | app-server stdio                                | 不提供公网远程 app-server  |
@@ -1388,3 +1516,7 @@ v1 只有在 QQ、微信、Codex、Claude Code 四条主链路全部达到本指
 - [Node.js `node:sqlite`](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html)
 - [Fastify v5](https://fastify.dev/docs/latest/)
 - [SQLite FTS5](https://www.sqlite.org/fts5.html)
+- [Caddy command line 与 Admin API](https://caddyserver.com/docs/command-line)
+- [Docker Engine client-server 架构](https://docs.docker.com/engine/)
+- [Docker daemon socket 安全](https://docs.docker.com/engine/security/protect-access/)
+- [Tailscale CLI 与 daemon](https://tailscale.com/docs/reference/tailscaled)

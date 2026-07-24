@@ -5,23 +5,22 @@ import { WechatIlinkAdapter, type WechatCredential } from "@imgent/adapter-wecha
 import { conversationKey, IMGentError, normalizeError, textOf } from "@imgent/contracts";
 import { ClaudeCodeDriver } from "@imgent/driver-claude-code";
 import { CodexDriver } from "@imgent/driver-codex";
-import Fastify, { type FastifyInstance } from "fastify";
 import { ApprovalService } from "../approvals/service.js";
 import { loadConfig } from "../config/index.js";
-import { renderError, renderErrorText, resolveLocale } from "../i18n/index.js";
+import { renderError, renderErrorText } from "../i18n/index.js";
 import { IdentityService } from "../identity/service.js";
 import { MemoryCurator } from "../memory/curator.js";
 import { MemoryHostTools } from "../memory/host-tools.js";
 import { MemoryService } from "../memory/service.js";
 import { ConversationScheduler } from "../queue/scheduler.js";
+import { IMGENT_HOST_TOOLS, IMGentHostTools } from "../runtime/host-tools.js";
+import { Logger } from "../runtime/logger.js";
+import { OutboundDispatcher } from "../runtime/outbound.js";
 import { CredentialStore } from "../security/credential-store.js";
 import { SkillHostTools } from "../skills/host-tools.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { IMGentStore } from "../storage/store.js";
-import { IMGENT_HOST_TOOLS, IMGentHostTools } from "./host-tools.js";
-import { Logger } from "./logger.js";
-import { OutboundDispatcher } from "./outbound.js";
 import type {
   AgentDriver,
   ErrorDescriptor,
@@ -57,7 +56,8 @@ export class IMGentApplication {
   private readonly scheduler: ConversationScheduler;
   private readonly curator: MemoryCurator;
   private readonly routes: ReadonlyMap<string, string>;
-  private server: FastifyInstance | undefined;
+  private readonly botAssemblyIssues = new Map<string, ErrorDescriptor[]>();
+  private readonly adapterStartIssues = new Map<string, ErrorDescriptor[]>();
   private maintenanceTimer: NodeJS.Timeout | undefined;
   private mediaCleanupRunning = false;
   private started = false;
@@ -144,17 +144,23 @@ export class IMGentApplication {
       if (bot.adapter === "qq") {
         const credential = await this.credentials.get<QqCredential>(bot.credentialRef);
         if (!credential?.appSecret) {
-          throw new IMGentError("ADAPTER_AUTH_REQUIRED", {
-            diagnostic: { botInstanceId: bot.id, credential: "appSecret" },
-          });
+          this.botAssemblyIssues.set(bot.id, [
+            new IMGentError("ADAPTER_AUTH_REQUIRED", {
+              diagnostic: { botInstanceId: bot.id, credential: "appSecret" },
+            }).descriptor,
+          ]);
+          continue;
         }
         const appId =
           bot.platformBotId ??
           (bot.platformBotIdEnv ? process.env[bot.platformBotIdEnv] : undefined);
         if (!appId) {
-          throw new IMGentError("CONFIG_FILE_INVALID", {
-            diagnostic: { botInstanceId: bot.id, setting: "platformBotId" },
-          });
+          this.botAssemblyIssues.set(bot.id, [
+            new IMGentError("ADAPTER_AUTH_REQUIRED", {
+              diagnostic: { botInstanceId: bot.id, setting: "platformBotId" },
+            }).descriptor,
+          ]);
+          continue;
         }
         const resume = parseQqResume(this.store.checkpoint(bot.id, "gateway_resume"));
         const fullGroupPolicy = this.store.get<{
@@ -212,9 +218,12 @@ export class IMGentApplication {
       } else {
         const credential = await this.credentials.get<WechatCredential>(bot.credentialRef);
         if (!credential?.botToken || !bot.platformBotId) {
-          throw new IMGentError("ADAPTER_AUTH_REQUIRED", {
-            diagnostic: { botInstanceId: bot.id, credential: "wechat authorization" },
-          });
+          this.botAssemblyIssues.set(bot.id, [
+            new IMGentError("ADAPTER_AUTH_REQUIRED", {
+              diagnostic: { botInstanceId: bot.id, credential: "wechat authorization" },
+            }).descriptor,
+          ]);
+          continue;
         }
         const cursor = this.store.checkpoint(bot.id, "get_updates_buf");
         this.adapters.set(
@@ -275,6 +284,17 @@ export class IMGentApplication {
     } catch (error) {
       issues.push(normalizeError(error, "STORAGE_UNAVAILABLE").descriptor);
     }
+    for (const bot of this.config.bots) {
+      if (bot.enabled === false) continue;
+      const assemblyIssues = this.botAssemblyIssues.get(bot.id);
+      const startIssues = this.adapterStartIssues.get(bot.id);
+      if (assemblyIssues || startIssues) {
+        bots[bot.id] = {
+          ready: false,
+          issues: [...(assemblyIssues ?? []), ...(startIssues ?? [])],
+        };
+      }
+    }
     await Promise.all(
       [...this.drivers.entries()].map(async ([profileId, driver]) => {
         const profile = this.profiles.get(profileId);
@@ -297,7 +317,12 @@ export class IMGentApplication {
     await Promise.all(
       [...this.adapters.entries()].map(async ([botId, adapter]) => {
         try {
-          bots[botId] = await adapter.checkReady();
+          const result = await adapter.checkReady();
+          const startIssues = this.adapterStartIssues.get(botId) ?? [];
+          bots[botId] = {
+            ready: result.ready && startIssues.length === 0,
+            issues: [...result.issues, ...startIssues],
+          };
         } catch (error) {
           bots[botId] = {
             ready: false,
@@ -325,14 +350,8 @@ export class IMGentApplication {
     };
   }
 
-  async start(options: { skipReadiness?: boolean } = {}): Promise<void> {
+  async start(_options: { skipReadiness?: boolean } = {}): Promise<void> {
     if (this.started) throw new Error("IMGent 已启动");
-    if (!options.skipReadiness) {
-      const readiness = await this.checkReady();
-      if (!readiness.ready) {
-        throw readiness.issues[0] ?? new IMGentError("INTERNAL_UNEXPECTED_ERROR");
-      }
-    }
     this.scheduler.start();
     this.curator.start();
     await this.cleanupReleasedMedia();
@@ -347,35 +366,20 @@ export class IMGentApplication {
     }, 60_000);
     this.maintenanceTimer.unref();
     for (const [botId, adapter] of this.adapters) {
-      await adapter.start(async (message, checkpoint) => {
-        await this.handleInbound(message, checkpoint);
-      });
-      this.logger.info("adapter.started", { botInstanceId: botId });
+      try {
+        await adapter.start(async (message, checkpoint) => {
+          await this.handleInbound(message, checkpoint);
+        });
+        this.logger.info("adapter.started", { botInstanceId: botId });
+      } catch (error) {
+        this.adapterStartIssues.set(botId, [
+          normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor,
+        ]);
+        this.logger.errorFrom("adapter.start-failed", error, { botInstanceId: botId });
+      }
     }
-    this.server = Fastify({ logger: false });
-    this.server.get("/healthz", async () => ({
-      status: "ok",
-      started: this.started,
-    }));
-    this.server.get("/readyz", async (request, reply) => {
-      const readiness = await this.checkReady();
-      if (!readiness.ready) reply.code(503);
-      const locale = resolveLocale(
-        [
-          typeof request.headers["accept-language"] === "string"
-            ? request.headers["accept-language"]
-            : undefined,
-          this.config.defaultLocale,
-        ],
-        this.config.defaultLocale,
-      );
-      return renderReadiness(readiness, locale);
-    });
-    await this.server.listen(this.config.server);
     this.started = true;
     this.logger.info("application.started", {
-      host: this.config.server.host,
-      port: this.config.server.port,
       bots: this.adapters.size,
       profiles: this.drivers.size,
     });
@@ -385,16 +389,32 @@ export class IMGentApplication {
     if (this.closed) return;
     this.closed = true;
     this.started = false;
+    const failures: unknown[] = [];
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
     this.maintenanceTimer = undefined;
     await Promise.allSettled([...this.adapters.values()].map((adapter) => adapter.stop()));
-    await this.scheduler.stop();
-    await this.curator.stop();
-    await this.cleanupReleasedMedia();
+    try {
+      await this.scheduler.stop();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await this.curator.stop();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await this.cleanupReleasedMedia();
+    } catch (error) {
+      failures.push(error);
+    }
     await Promise.allSettled([...this.drivers.values()].map((driver) => driver.close?.()));
-    await this.server?.close();
-    this.server = undefined;
-    this.store.close();
+    try {
+      this.store.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length > 0) throw failures[0];
   }
 
   async handleInbound(

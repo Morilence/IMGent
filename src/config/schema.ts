@@ -100,7 +100,7 @@ export const configSchema = z
     dataDir: z.string().min(1).default("./data"),
     server: z
       .object({
-        host: z.string().min(1).default("127.0.0.1"),
+        host: z.enum(["127.0.0.1", "::1", "localhost"]).default("127.0.0.1"),
         port: z.number().int().min(1).max(65_535).default(8787),
       })
       .strict()

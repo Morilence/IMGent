@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseIMGentCommand } from "../src/runtime/application.js";
+import { parseIMGentCommand } from "../src/service/application.js";
 
 test("IMGent command namespace rejects legacy and lookalike prefixes", () => {
   assert.deepEqual(parseIMGentCommand("/imgent cancel"), { name: "cancel" });

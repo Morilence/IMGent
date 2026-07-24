@@ -4,6 +4,11 @@ IMGent 是一个自托管的单进程桥接器：通过 QQ 官方机器人或微
 iLink 接收消息，在严格的身份、审批、会话与记忆边界内驱动本地 Codex 或
 Claude Code。
 
+`imgent` 是统一的 CLI 入口：配置、诊断和维护命令是短生命周期进程，
+`imgent start` 则前台启动常驻服务。进程边界、在线/离线命令和本地控制面见
+[CLI 与常驻服务架构](docs/cli-service-architecture.md)，已交付范围见
+[实现状态](docs/implementation-status.md)。
+
 ## 要求
 
 - Node.js 24.18.0 或更高版本
@@ -26,12 +31,18 @@ skills/
   imgent-conversation/
   imgent-memory/
 src/
-  cli/ config/ runtime/ queue/ storage/
+  cli/ service/ control/ health/ config/ runtime/
+  queue/ storage/
   identity/ approvals/ memory/ skills/ security/ backup/
 ```
 
 这些包最终仍组成一个进程、一个 SQLite 数据库和一个数据目录；不存在运行时
 插件市场或动态第三方适配器加载。
+
+仓库使用 pnpm workspace 管理依赖，使用 TypeScript project references 和
+`tsc -b` 直接输出 ESM JavaScript；当前没有使用 esbuild、Rollup、Webpack 等
+bundler。CLI 与 Service 共享 `dist/src/cli/main.js` 这一个可执行入口，不是两套
+构建产物。
 
 ## 开始
 
@@ -71,13 +82,21 @@ imgent bot add wechat-ilink wechat-main --profile main
 imgent bot authorize wechat-main
 ```
 
-首次私聊会返回一次性配对码。部署者在本机确认后，用户才能运行 Agent：
+配置和授权命令要求服务处于停止状态。先做离线检查，再以前台方式启动服务：
 
 ```bash
-imgent pair <code>
 imgent doctor
 imgent start
 ```
+
+首次私聊会返回一次性配对码。保持服务运行，在另一个终端由部署者确认：
+
+```bash
+imgent pair <code>
+```
+
+`pair` 是在线命令，只通过运行中服务的本地控制面执行。确认后用户才能运行
+Agent。
 
 QQ 群需要先出现一次触发消息，随后由部署者查看本地群空间并授权：
 
@@ -92,14 +111,23 @@ imgent group authorize <conversation-space-id> \
 
 - 配置默认是当前目录的 `imgent.json`，可用全局
   `--config <path>` 指定。
-- 管理服务默认监听 `127.0.0.1:8787`，提供 `/healthz` 和 `/readyz`。
+- 健康服务只允许配置 loopback 地址，默认监听 `127.0.0.1:8787`，提供
+  `/healthz` 和 `/readyz`，不承载管理操作。
+- 本机管理使用 HTTP/JSON over Unix socket 或 Windows Named Pipe；endpoint
+  由规范化 `dataDir` 和操作系统用户生成，不开放管理 TCP 端口。
+- `init`、Profile/Bot/skill 修改、微信授权和 `restore` 是 offline 命令，检测到
+  活动实例时会拒绝；执行期间会短暂持有 ownership lease，阻止服务并发启动。
+  `pair` 和 `group authorize` 是 online 命令。
+- `status`、`doctor`、列表/校验和 `backup` 是 dual 命令，输出明确包含
+  `mode: "online" | "offline"`；endpoint 异常时不会回退为直接访问 SQLite。
 - 配置、数据库、备份、凭据与密钥按本地敏感数据处理。
 - 内置 skills 位于仓库 `skills/`；本机自定义与同名覆盖位于
   `dataDir/skills/`，修改后重启生效。
 - `AgentProfile.skills` 默认 `["*"]`，同一 skill 可用于 Codex 或 Claude
   Code；IMGent 不依赖厂商原生技能。
 - 备份包含本地平台凭据、加密密钥与用户 skills，但不包含 Codex/Claude 的
-  外部登录目录。
+  外部登录目录。运行中备份由服务使用现有 SQLite owner 创建，停服时走离线路径；
+  `restore --force` 也不能绕过停服检查。
 - 微信只支持 direct；任何带 `group_id` 的事件都会进入兼容性死信。
 - QQ 群默认 `triggered`；`full` 只能由已配对且平台可验证的群主/管理员开启。
 

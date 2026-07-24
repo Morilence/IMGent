@@ -16,6 +16,7 @@ import { configSchema } from "../config/schema.js";
 import { CredentialStore } from "../security/credential-store.js";
 import { SCHEMA_VERSION } from "../storage/migrations.js";
 import { IMGentStore } from "../storage/store.js";
+import type { IMGentConfig } from "@imgent/contracts";
 
 interface ArchiveFile {
   path: string;
@@ -54,70 +55,80 @@ function archiveFile(path: string, value: Buffer, mode?: number): ArchiveFile {
 export async function createBackup(
   configPath: string,
   outputPath: string,
+  options: { store?: IMGentStore; config?: IMGentConfig } = {},
 ): Promise<{ path: string; files: number; bytes: number }> {
-  const rawConfig = await readFile(configPath);
+  const rawConfig = options.config
+    ? Buffer.from(`${JSON.stringify(options.config, null, 2)}\n`)
+    : await readFile(configPath);
   const parsed = configSchema.safeParse(JSON.parse(rawConfig.toString("utf8")));
   if (!parsed.success) throw new Error("配置无效，拒绝备份");
   const base = dirname(resolve(configPath));
   const dataDir = resolve(base, parsed.data.dataDir);
   const credentials = new CredentialStore(dataDir);
-  const store = await IMGentStore.open(
-    join(dataDir, "imgent.sqlite"),
-    await credentials.secretBox(),
-  );
+  const store =
+    options.store ??
+    (await IMGentStore.open(join(dataDir, "imgent.sqlite"), await credentials.secretBox()));
+  const ownsStore = options.store === undefined;
   const snapshotPath = join(dataDir, `.backup-${process.pid}-${randomUUID()}.sqlite`);
   try {
     await backup(store.database, snapshotPath);
-  } finally {
-    store.close();
-  }
-  const files: ArchiveFile[] = [
-    archiveFile("config.json", rawConfig),
-    archiveFile("data/imgent.sqlite", await readFile(snapshotPath)),
-    archiveFile("data/credentials.key", await readFile(join(dataDir, "credentials.key"))),
-  ];
-  await rm(snapshotPath, { force: true });
-  try {
-    for (const name of await readdir(join(dataDir, "credentials"))) {
-      if (!name.endsWith(".enc")) continue;
-      files.push(
-        archiveFile(`data/credentials/${name}`, await readFile(join(dataDir, "credentials", name))),
-      );
+    const files: ArchiveFile[] = [
+      archiveFile("config.json", rawConfig),
+      archiveFile("data/imgent.sqlite", await readFile(snapshotPath)),
+      archiveFile("data/credentials.key", await readFile(join(dataDir, "credentials.key"))),
+    ];
+    try {
+      for (const name of await readdir(join(dataDir, "credentials"))) {
+        if (!name.endsWith(".enc")) continue;
+        files.push(
+          archiveFile(
+            `data/credentials/${name}`,
+            await readFile(join(dataDir, "credentials", name)),
+          ),
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    files.push(...(await archiveSkillFiles(dataDir)));
+    const archive: BackupArchive = {
+      format: "imgent-backup/v1",
+      manifest: {
+        createdAt: new Date().toISOString(),
+        schemaVersion: SCHEMA_VERSION,
+        sensitive: true,
+        externalAgentAuthenticationIncluded: false,
+        files: files.map(({ path, size, sha256, mode }) => ({
+          path,
+          size,
+          sha256,
+          ...(mode === undefined ? {} : { mode }),
+        })),
+      },
+      files,
+    };
+    const finalPath = resolve(outputPath);
+    await mkdir(dirname(finalPath), { recursive: true, mode: 0o700 });
+    const temporary = `${finalPath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(archive), {
+        mode: 0o600,
+        flag: "wx",
+      });
+      await rename(temporary, finalPath);
+      await chmod(finalPath, 0o600);
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    return {
+      path: finalPath,
+      files: files.length,
+      bytes: files.reduce((total, file) => total + file.size, 0),
+    };
+  } finally {
+    if (ownsStore) store.close();
+    await rm(snapshotPath, { force: true });
   }
-  files.push(...(await archiveSkillFiles(dataDir)));
-  const archive: BackupArchive = {
-    format: "imgent-backup/v1",
-    manifest: {
-      createdAt: new Date().toISOString(),
-      schemaVersion: SCHEMA_VERSION,
-      sensitive: true,
-      externalAgentAuthenticationIncluded: false,
-      files: files.map(({ path, size, sha256, mode }) => ({
-        path,
-        size,
-        sha256,
-        ...(mode === undefined ? {} : { mode }),
-      })),
-    },
-    files,
-  };
-  const finalPath = resolve(outputPath);
-  await mkdir(dirname(finalPath), { recursive: true, mode: 0o700 });
-  const temporary = `${finalPath}.${process.pid}.tmp`;
-  await writeFile(temporary, JSON.stringify(archive), {
-    mode: 0o600,
-    flag: "wx",
-  });
-  await rename(temporary, finalPath);
-  await chmod(finalPath, 0o600);
-  return {
-    path: finalPath,
-    files: files.length,
-    bytes: files.reduce((total, file) => total + file.size, 0),
-  };
 }
 
 export async function restoreBackup(
