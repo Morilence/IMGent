@@ -200,6 +200,69 @@ export class IdentityService {
     });
   }
 
+  unbindPlatformIdentity(platformIdentityId: string): {
+    previousPrincipalId: string;
+    principalId: string;
+  } {
+    return this.store.transaction(() => {
+      const identity = this.store.get<{
+        principal_id: string;
+        agent_profile_id: string;
+        platform: string;
+        bot_instance_id: string;
+        platform_user_id: string;
+        paired: number;
+      }>("SELECT * FROM platform_identities WHERE id = ?", platformIdentityId);
+      if (!identity || identity.paired !== 1) {
+        throw new Error("当前平台身份尚未配对");
+      }
+      const identityCount =
+        this.store.get<{ count: number }>(
+          "SELECT count(*) AS count FROM platform_identities WHERE principal_id = ?",
+          identity.principal_id,
+        )?.count ?? 0;
+      if (identityCount <= 1) {
+        throw new Error("当前平台身份没有可解除的跨平台绑定");
+      }
+
+      const principalId = `principal_${randomUUID()}`;
+      const locale = this.locale(identity.principal_id);
+      const timestamp = now();
+      this.store.run(
+        "INSERT INTO principals(id, agent_profile_id, locale, created_at) VALUES (?, ?, ?, ?)",
+        principalId,
+        identity.agent_profile_id,
+        locale ?? null,
+        timestamp,
+      );
+      this.store.run(
+        `UPDATE platform_identities
+         SET principal_id = ?, updated_at = ?
+         WHERE id = ?`,
+        principalId,
+        timestamp,
+        platformIdentityId,
+      );
+      this.store.run(
+        `UPDATE binding_codes SET used_at = ?
+         WHERE source_platform_identity_id = ? AND used_at IS NULL`,
+        timestamp,
+        platformIdentityId,
+      );
+      this.audit("identity.unbound", identity.agent_profile_id, principalId, undefined, {
+        previousPrincipalId: identity.principal_id,
+        platform: identity.platform,
+        botInstanceId: identity.bot_instance_id,
+        platformUserId: identity.platform_user_id,
+        historicalMemoryDisposition: "retained-by-previous-principal",
+      });
+      return {
+        previousPrincipalId: identity.principal_id,
+        principalId,
+      };
+    });
+  }
+
   private mergePrincipal(fromPrincipalId: string, toPrincipalId: string): void {
     const locales = this.store.get<{
       from_locale: SupportedLocale | null;

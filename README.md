@@ -120,6 +120,7 @@ imgent restore ./state.backup \
 ```text
 /imgent cancel
 /imgent bind [绑定码]
+/imgent unbind
 /imgent allow <requestId>
 /imgent deny <requestId>
 /imgent answer <requestId> <内容>
@@ -148,8 +149,8 @@ pnpm test
 
 测试覆盖配置、SQLite 事务与恢复、FIFO、身份绑定、审批、技能覆盖与只读物化、
 五类记忆隔离、中文 FTS5、Curator 幂等、备份恢复、IM payload 规范化以及两个
-驱动的协议合约。Codex 另有真实本机 app-server smoke；Claude Code 按当前
-交付约定只执行 mock/contract 验证。
+驱动的协议合约。Codex 另有真实本机 app-server smoke；`doctor` 会对 Claude
+Code 执行真实认证/协议探测，自动化测试仍使用 mock/contract 验证。
 
 完整产品与安全约束见
 [产品设计](docs/imgent-product-design.md)；技能格式与自定义流程见

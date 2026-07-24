@@ -67,8 +67,9 @@ IMGent 是一个自托管的消息 Agent 框架。它把 QQ 官方机器人和�
 
 每个 QQ 群保存独立的采集模式：
 
-- `triggered`：默认值。只处理 @机器人、回复机器人、显式命令和已激活连续会话中的消息。
-- `full`：处理群内全部可见消息，但普通消息只进入群上下文和异步记忆策展，不主动触发机器人回复。
+- `triggered`：默认值。只处理 @机器人、回复机器人和显式命令。
+- `full`：接收群内全部可见消息，但普通消息只做短期原文持久化和异步记忆策展，
+  不注入后续实时 turn，也不主动触发机器人回复。
 
 切换为 `full` 必须同时满足：
 
@@ -118,7 +119,9 @@ IMGent 是一个自托管的消息 Agent 框架。它把 QQ 官方机器人和�
 
 ### 3.2 私聊
 
-用户直接向机器人发送任务。系统解析平台身份，在当前 AgentProfile 下映射到 Principal，加载该用户允许的私聊记忆和会话摘要，再调用本地 Agent。
+用户直接向机器人发送任务。系统解析平台身份，在当前 AgentProfile 下映射到
+Principal，恢复厂商 Agent session 并加载该用户允许的 IMGent 私聊记忆，再调用
+本地 Agent。v1 不另建或注入一份“最近对话摘要”。
 
 如果 QQ 与微信身份经过人工绑定，两端可以召回同一 Principal 的个人记忆，但各自保持独立 Agent session。
 
@@ -130,11 +133,13 @@ IMGent 是一个自托管的消息 Agent 框架。它把 QQ 官方机器人和�
 
 - 当前群的共享记忆。
 - 当前发言者在该群的成员档案。
-- 当前群或线程的最近会话摘要。
+- 当前 conversationKey 对应的厂商 Agent session；恢复失败时建立新 session。
 
 系统绝不加载任何成员的私聊记忆。
 
-`full` 模式下，普通群消息可以补充群上下文和候选群记忆，但不会让群成员获得新的工具权限，也不会改变私聊隔离。
+`full` 模式下，普通群消息只进入 7 天短期原文和异步策展输入，不直接补充实时
+Agent 上下文。策展后形成的群记忆可在后续触发 turn 中按作用域召回；该模式不会
+让群成员获得新的工具权限，也不会改变私聊隔离。
 
 ### 3.4 连续任务
 
@@ -144,9 +149,15 @@ IMGent 是一个自托管的消息 Agent 框架。它把 QQ 官方机器人和�
 
 Agent 请求高风险工具时，系统把工具名、目标、影响和一次性审批按钮或文本命令发回原会话。审批只能由原请求对应的已授权 Principal 完成。
 
+v1 的审批等待只在当前 IMGent/Driver 进程内有效。进程重启时旧审批失效，
+`waiting_approval` task 进入 dead letter，系统不猜测 Driver 是否已接受过答复，
+也不自动重放可能产生副作用的 turn。
+
 ### 3.6 跨平台身份绑定
 
-用户在两个私聊端分别取得短期绑定码，部署者或已授权管理员确认后建立绑定。系统不根据昵称自动合并身份。
+已配对身份 A 在私聊中取得短期一次性绑定码，身份 B 在自己的私聊中提交该码；
+提交动作本身就是确认并立即建立绑定。系统不要求两端分别生成码，也不根据昵称
+自动合并身份。
 
 ## 4. 运行形态与产品命令
 
@@ -289,7 +300,7 @@ imgent restore <file>
 | QQ Transport   | 官方 Gateway WebSocket  | 本地和容器均无需公网回调                          |
 | 微信 Transport | iLink HTTP long polling | 与当前腾讯官方插件协议一致                        |
 | Codex          | app-server stdio        | 官方双向 JSON-RPC 控制面                          |
-| Claude Code    | TypeScript Agent SDK    | 官方 streaming、session、审批和 defer 能力        |
+| Claude Code    | TypeScript Agent SDK    | 官方 streaming、session 与当前进程内审批能力      |
 
 `node:sqlite` 在 Node.js 24 当前文档中仍为 release candidate。实现必须固定实际验证过的 24.x 最低补丁版本，并在 `doctor` / 启动时检查：
 
@@ -532,6 +543,11 @@ WeChat adapter 直接实现官方插件公开的 HTTP/JSON 行为，不依赖 Op
 - `context_token` 短期保存和回复。
 - text、image、voice、file、video item 标准化。
 - 媒体 AES-128-ECB 处理、CDN 下载 / 上传和完整性校验。
+- 入站媒体按 100 MiB 上限下载；支持 raw key、base64 key 和 base64 包裹的 hex
+  key，校验 PKCS#7、可用的长度/MD5，并为明文生成 SHA-256。
+- 明文只写入 `dataDir/media/wechat-ilink/<bot>` 下的 `0600` 临时文件；图片和音频
+  使用 Driver 原生本地输入，其他类型以受控本地路径交给 Agent。task 终态后删除
+  文件并清除持久化路径；进程崩溃遗留且未被数据库引用的文件在一小时后清理。
 - 会话失效后停止消费并提示重新 QR 授权。
 
 如果收到包含 `group_id` 的新协议数据：
@@ -607,8 +623,11 @@ queued -> active -> succeeded
   结果不确定时进入 dead letter。
 - Driver 流缺少 completed/error 终态时记录
   `DRIVER_PROTOCOL_INCOMPLETE`，不能遗留 active 任务。
-- 重启后 safe active 进入 retry_wait；已经开始危险副作用的 active 或
-  waiting_approval 直接进入 dead letter。
+- 重启后 safe active 进入 retry_wait；已经开始危险副作用的 active 直接进入
+  dead letter。所有 `waiting_approval` 审批先标记 expired，task 直接进入 dead
+  letter，不提供跨进程审批恢复。
+- 厂商 session 恢复在产生输出前失败时，Driver 建立新 session，并继续使用
+  IMGent 长期记忆；不依赖独立的最近对话摘要补偿。
 
 ### 9.5 统一错误合约
 
@@ -707,12 +726,14 @@ Principal 在某个群内的成员关系，保存平台成员 ID、群昵称、�
 
 1. 用户在身份 A 的私聊申请绑定，得到短期一次性码。
 2. 用户在身份 B 的私聊提交该码。
-3. 系统显示两个平台、BotInstance 和平台稳定用户 ID。
-4. 用户确认后建立绑定并写审计事件。
+3. 系统验证 A 已配对、两端属于同一 AgentProfile、码未过期且未使用。
+4. B 的提交动作视为确认；系统立即建立绑定并写审计事件。
 5. 两端在同一 AgentProfile 下共享个人记忆。
 6. 两端仍保留各自的 PlatformIdentity、会话和平台侧权限。
 
-绑定可撤销。撤销后不再跨平台召回；现有记忆保留来源并等待用户决定拆分或删除，不自动复制。
+当前私聊身份可用 `/imgent unbind` 撤销。撤销后它获得独立 Principal，不再跨平台
+召回；历史合并记忆保留在原 Principal，不自动复制或拆分，并通过审计事件明确
+记录该处置。
 
 ### 10.4 IMGent 托管技能
 
@@ -900,6 +921,9 @@ interface AgentTurnInput {
 system prompt 的 `append`。Driver 只暴露本 turn 白名单中的 IMGent Host
 Tools。Curator 使用 ephemeral、无持久 session 且禁用厂商内置工具的受限 turn。
 
+会话连续性以厂商 session 加 IMGent 记忆为准。v1 不维护第二套最近对话摘要；
+Codex/Claude session 在产生输出前恢复失败时回退到新 session。
+
 统一层只定义：
 
 - session 的建立和恢复。
@@ -922,8 +946,8 @@ Tools。Curator 使用 ephemeral、无持久 session 且禁用厂商内置工具
 
 - 使用 `@anthropic-ai/claude-agent-sdk` TypeScript。
 - 使用 streaming input、显式 session ID 和 `resume`。
-- `canUseTool` 处理短等待审批。
-- 使用 `PreToolUse permissionDecision: "defer"` 持久化长等待审批并稍后恢复。
+- `canUseTool` 在当前进程内处理最长 15 分钟的聊天审批。
+- 不承诺 `PreToolUse defer` 或其他跨进程长等待恢复；重启按 9.4 安全失效。
 - 最低 Claude Code 版本为 2.1.89。
 - 不使用 `continue: true` 猜最近 session。
 - 不默认使用会绕过本地 OAuth/keychain 的 `--bare`。
@@ -966,7 +990,8 @@ decidedAt
 规则：
 
 - 只有请求所属 Principal 或明确授权管理员可以答复。
-- allow、deny、过期和重复答复都是幂等终态。
+- Driver 接受答复后，allow、deny、过期和重复答复形成幂等终态；Driver 投递失败
+  时审批保持 pending，可在当前进程内重试。
 - 危险参数只显示必要的脱敏摘要。
 - “始终允许”不能超过 AgentProfile 权限上限。
 - 审批消息转发或复制到其他会话后无效。
@@ -1028,9 +1053,12 @@ SQLite 保存：
 - task succeeded、最终回复 outbox 和 memory outbox。
 - waiting_approval 状态和审批提示 outbox。
 - 明确记忆写入与工具成功结果。
-- 审批终态与 Agent 恢复任务。
 - Outbound 独立 claim、发送成功记录与出站幂等键；发送失败不能反向把
   succeeded task 改为 failed。
+
+审批答复跨越本地数据库与活跃 Driver，无法构成单个数据库事务。实现必须先验证
+Principal、conversation 和过期时间，再由 Driver 接受答复，最后在同一数据库
+事务中写审批终态并恢复 task；Driver 投递失败不得提前写终态。
 
 所有记忆查询必须显式包含 `agentProfileId` 和允许 scope 条件。
 
@@ -1215,7 +1243,8 @@ CLI 错误退出码固定为：0 成功、2 输入/配置、3 需要部署者操
 - Gateway 断线使用 session + seq Resume，补发事件不会重复执行。
 - 被动回复遵守单聊 60 分钟 / 4 次、群聊 5 分钟 / 5 次约束。
 - 非管理员无法开启 `full`。
-- 缺少全量事件权限时 readiness 明确失败。
+- 至少一个群配置为 `full` 且缺少全量事件权限时 readiness 明确失败；没有
+  `full` 群时该能力不是启动阻塞项。
 - `full` 开关在群内通知并写审计。
 - 普通全量消息不触发回复，原文 7 天后清理。
 - 全量消息不能读取或写入成员私聊记忆。
@@ -1228,6 +1257,8 @@ CLI 错误退出码固定为：0 成功、2 输入/配置、3 需要部署者操
 - 每个联系人使用独立 direct conversation 和 Agent session。
 - 回复携带正确 `context_token`。
 - text、图片、语音、文件和视频类型不被静默丢弃。
+- 图片、语音、文件和视频完成 CDN 下载、AES-128-ECB 解密、长度/MD5/SHA-256
+  校验、受控临时落盘并实际传递给 Agent；task 终态后清理明文。
 - 疑似 `group_id` 事件不创建群会话或群记忆。
 - session 失效后明确要求重新 QR 授权。
 
@@ -1237,8 +1268,8 @@ Codex 和 Claude Code 都通过：
 
 - 新会话、连续两轮和指定会话恢复。
 - 流式输出不与最终输出重复。
-- 审批 allow、deny、超时和重复答复。
-- 长等待审批跨进程恢复。
+- 当前进程内审批 allow、deny、回答、超时、投递失败重试和重复答复。
+- 重启使等待审批安全失效并将 task 送入 dead letter，不跨进程恢复。
 - active turn 取消。
 - 进程异常退出后的明确状态和恢复。
 - CLI 缺失、版本不兼容、登录失效和工作目录不匹配的 doctor 提示。
@@ -1286,10 +1317,11 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
 
 - WeChat adapter、QR 授权、long polling、cursor 和 context_token。
 - Claude Code Agent SDK driver、session、streaming 和 defer。
-- 两个驱动统一审批、取消和恢复。
+- 两个驱动统一当前进程内审批、取消和 session 恢复失败回退。
 - direct Principal 与人工跨平台绑定。
 
-完成标准：QQ 与微信私聊都能选择任一正式 AgentDriver，审批可跨聊天等待和进程重启。
+完成标准：QQ 与微信私聊都能选择任一正式 AgentDriver；审批可在原聊天中等待，
+进程重启后按安全失效语义处理。
 
 ### 阶段三：QQ 群聊与记忆
 

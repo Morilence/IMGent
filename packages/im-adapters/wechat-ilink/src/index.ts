@@ -8,5 +8,6 @@ export {
   type WechatCredential,
   type WechatIlinkAdapterOptions,
 } from "./client.js";
+export { materializeWechatInboundMedia } from "./media.js";
 export { normalizeWechatMessage, WechatCompatibilityError } from "./normalize.js";
 export type { GetUpdatesResponse, MessageItem, WechatMessage } from "./protocol.js";

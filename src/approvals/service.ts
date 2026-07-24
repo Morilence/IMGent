@@ -15,6 +15,14 @@ export interface ApprovalDecision {
   changed: boolean;
 }
 
+export interface ApprovalInspection {
+  requestId: string;
+  status: "pending" | "allowed" | "denied" | "expired";
+  taskId: string;
+  answer: AgentRequestAnswer;
+  expired: boolean;
+}
+
 export class ApprovalService {
   constructor(private readonly store: IMGentStore) {}
 
@@ -111,6 +119,42 @@ export class ApprovalService {
         changed: true,
       };
     });
+  }
+
+  inspect(
+    requestId: string,
+    principalId: string,
+    answer: AgentRequestAnswer,
+    conversationKey?: string,
+  ): ApprovalInspection {
+    const approval = this.store.get<{
+      task_id: string;
+      principal_id: string;
+      conversation_key: string;
+      status: "pending" | "allowed" | "denied" | "expired";
+      expires_at: string;
+      decision_json: string | null;
+    }>(
+      `SELECT task_id, principal_id, conversation_key, status, expires_at, decision_json
+       FROM approvals WHERE request_id = ?`,
+      requestId,
+    );
+    if (!approval) throw new IMGentError("APPROVAL_NOT_FOUND");
+    if (
+      approval.principal_id !== principalId ||
+      (conversationKey && approval.conversation_key !== conversationKey)
+    ) {
+      throw new IMGentError("APPROVAL_FORBIDDEN");
+    }
+    return {
+      requestId,
+      status: approval.status,
+      taskId: approval.task_id,
+      answer: approval.decision_json
+        ? (JSON.parse(approval.decision_json) as AgentRequestAnswer)
+        : answer,
+      expired: approval.status === "pending" && approval.expires_at <= now(),
+    };
   }
 
   expirePending(): number {

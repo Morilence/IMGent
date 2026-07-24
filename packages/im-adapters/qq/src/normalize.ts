@@ -58,6 +58,7 @@ export function normalizeQqDispatch(
   botInstanceId: string,
   platformBotId: string,
   receivedAt = new Date().toISOString(),
+  isBotMessageId: (messageId: string) => boolean = () => false,
 ): InboundMessage | undefined {
   if (payload.op !== 0) return undefined;
   if (
@@ -104,7 +105,12 @@ export function normalizeQqDispatch(
   const replyMinutes = group ? 5 : 60;
   const command = event.content?.trimStart().startsWith("/imgent") ?? false;
   const mentionsBot = mentionsOf(event).some((mention) => mention.platformUserId === platformBotId);
-  const triggered = !group || payload.t === "GROUP_AT_MESSAGE_CREATE" || command || mentionsBot;
+  const referencedMessageId = event.message_reference?.message_id
+    ? String(event.message_reference.message_id)
+    : undefined;
+  const repliesToBot = Boolean(referencedMessageId && isBotMessageId(referencedMessageId));
+  const triggered =
+    !group || payload.t === "GROUP_AT_MESSAGE_CREATE" || command || mentionsBot || repliesToBot;
   return {
     ...(payload.id ? { eventId: String(payload.id) } : {}),
     messageId,
@@ -123,9 +129,7 @@ export function normalizeQqDispatch(
     },
     parts,
     mentions: mentionsOf(event),
-    ...(event.message_reference?.message_id
-      ? { replyTo: { messageId: String(event.message_reference.message_id) } }
-      : {}),
+    ...(referencedMessageId ? { replyTo: { messageId: referencedMessageId } } : {}),
     replyContext: {
       expiresAt: new Date(
         Date.parse(event.timestamp ?? receivedAt) + replyMinutes * 60_000,

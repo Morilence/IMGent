@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { QqAdapter, normalizeQqDispatch, QqCompatibilityError } from "@imgent/adapter-qq";
 import {
   WechatIlinkAdapter,
+  materializeWechatInboundMedia,
   normalizeWechatMessage,
   WechatCompatibilityError,
 } from "@imgent/adapter-wechat-ilink";
@@ -69,10 +74,53 @@ test("QQ full group messages are context-only and unknown events fail closed", (
     "app",
   );
   assert.equal(message?.triggered, false);
+  const reply = normalizeQqDispatch(
+    {
+      op: 0,
+      s: 2,
+      t: "GROUP_MESSAGE_CREATE",
+      d: {
+        id: "reply",
+        content: "reply to bot",
+        group_openid: "group",
+        author: { member_openid: "member" },
+        message_reference: { message_id: "bot-message" },
+      },
+    },
+    "qq-main",
+    "app",
+    new Date().toISOString(),
+    (messageId) => messageId === "bot-message",
+  );
+  assert.equal(reply?.triggered, true);
   assert.throws(
     () => normalizeQqDispatch({ op: 0, t: "SOMETHING_NEW", d: {} }, "qq-main", "app"),
     QqCompatibilityError,
   );
+});
+
+test("QQ full-group readiness is optional until a full-mode group requires it", async () => {
+  const fetcher: typeof fetch = async (input) =>
+    String(input).includes("getAppAccessToken")
+      ? Response.json({ access_token: "access", expires_in: 3600 })
+      : Response.json({ url: "wss://gateway.example.test" });
+  const optional = new QqAdapter({
+    botInstanceId: "qq-main",
+    appId: "app",
+    credential: { appSecret: "secret" },
+    fetch: fetcher,
+    fullGroupEventPermission: false,
+  });
+  assert.equal((await optional.checkReady()).ready, true);
+  const required = new QqAdapter({
+    botInstanceId: "qq-main",
+    appId: "app",
+    credential: { appSecret: "secret" },
+    fetch: fetcher,
+    fullGroupEventPermission: false,
+    fullGroupEventPermissionRequired: true,
+  });
+  assert.equal((await required.checkReady()).ready, false);
 });
 
 test("WeChat normalizer preserves context token and media while rejecting groups", () => {
@@ -116,6 +164,61 @@ test("WeChat normalizer preserves context token and media while rejecting groups
       ),
     WechatCompatibilityError,
   );
+});
+
+test("WeChat inbound media is downloaded, decrypted, verified and materialized locally", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-wechat-media-"));
+  try {
+    const plaintext = Buffer.from("verified attachment", "utf8");
+    const key = randomBytes(16);
+    const cipher = createCipheriv("aes-128-ecb", key, null);
+    cipher.setAutoPadding(true);
+    const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    const message = normalizeWechatMessage(
+      {
+        seq: "8",
+        message_id: "wx-media",
+        from_user_id: "contact-1",
+        message_type: 1,
+        item_list: [
+          {
+            type: 4,
+            file_item: {
+              file_name: "note.txt",
+              len: String(plaintext.byteLength),
+              md5: createHash("md5").update(plaintext).digest("hex"),
+              media: {
+                full_url: "https://cdn.example.test/download",
+                aes_key: key.toString("base64"),
+              },
+            },
+          },
+        ],
+      },
+      "wechat-main",
+    );
+    assert.ok(message);
+    const result = await materializeWechatInboundMedia(
+      {
+        fetch: async () => new Response(encrypted),
+        post: async () => {
+          throw new Error("not used");
+        },
+      },
+      message,
+      directory,
+    );
+    const part = result.parts[0];
+    assert.equal(part?.type, "file");
+    if (!part || part.type !== "file") throw new Error("file part missing");
+    assert.deepEqual(await readFile(part.attachment.localPath!), plaintext);
+    assert.equal(part.attachment.size, plaintext.byteLength);
+    assert.equal(part.attachment.mimeType, "text/plain");
+    assert.match(part.attachment.checksum ?? "", /^sha256:[0-9a-f]{64}$/u);
+    assert.equal(part.attachment.opaque, undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("QQ adapter enforces the direct-message four-reply limit", async () => {

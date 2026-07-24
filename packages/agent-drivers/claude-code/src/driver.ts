@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import {
   createSdkMcpServer,
@@ -11,6 +11,7 @@ import {
   type PermissionUpdate,
   type Query,
   type SDKMessage,
+  type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { IMGentError, normalizeError } from "@imgent/contracts";
 import { z } from "zod";
@@ -30,7 +31,7 @@ const execute = promisify(execFile);
 const MINIMUM_VERSION = [2, 1, 89] as const;
 
 export interface ClaudeSdk {
-  query(parameters: { prompt: string; options?: Options }): Query;
+  query(parameters: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Options }): Query;
 }
 
 export interface ClaudeCodeDriverOptions {
@@ -44,6 +45,7 @@ interface Active {
   input: AgentTurnInput;
   queue: AsyncQueue<AgentEvent>;
   query?: Query;
+  options?: Options;
   abort: AbortController;
 }
 
@@ -74,7 +76,13 @@ function promptOf(input: AgentTurnInput): string {
   const attachmentContext = input.parts.flatMap((part) => {
     if (part.type === "text") return [];
     if ("attachment" in part) {
-      return [`${part.type}: ${part.attachment.url ?? part.attachment.name ?? "附件元数据已提供"}`];
+      const location =
+        part.attachment.localPath ??
+        part.attachment.url ??
+        part.attachment.name ??
+        "附件元数据已提供";
+      const metadata = [part.attachment.mimeType, part.attachment.checksum].filter(Boolean);
+      return [`${part.type}: ${location}${metadata.length ? ` (${metadata.join(", ")})` : ""}`];
     }
     return [];
   });
@@ -86,6 +94,46 @@ function promptOf(input: AgentTurnInput): string {
           ...input.memoryContext.map((entry) => `- ${entry}`),
         ];
   return [input.prompt, ...attachmentContext, ...memories].join("\n\n");
+}
+
+type ClaudeImageMime = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+
+function claudeImageMime(value: string | undefined): ClaudeImageMime | undefined {
+  return value === "image/jpeg" ||
+    value === "image/png" ||
+    value === "image/gif" ||
+    value === "image/webp"
+    ? value
+    : undefined;
+}
+
+function promptForSdk(input: AgentTurnInput): string | AsyncIterable<SDKUserMessage> {
+  const images = input.parts.flatMap((part) => {
+    if (part.type !== "image" || !part.attachment.localPath) return [];
+    const mimeType = claudeImageMime(part.attachment.mimeType);
+    return mimeType ? [{ path: part.attachment.localPath, mimeType }] : [];
+  });
+  if (images.length === 0) return promptOf(input);
+  return (async function* (): AsyncIterable<SDKUserMessage> {
+    type Content = Exclude<SDKUserMessage["message"]["content"], string>;
+    const content: Content = [{ type: "text", text: promptOf(input) }];
+    for (const image of images) {
+      const data = await readFile(image.path);
+      content.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: image.mimeType,
+          data: data.toString("base64"),
+        },
+      });
+    }
+    yield {
+      type: "user",
+      message: { role: "user", content },
+      parent_tool_use_id: null,
+    };
+  })();
 }
 
 function textFromAssistant(message: SDKMessage): string {
@@ -303,7 +351,8 @@ export class ClaudeCodeDriver implements AgentDriver {
           }
         : {}),
     };
-    const handle = this.sdk.query({ prompt: promptOf(input), options });
+    active.options = options;
+    const handle = this.sdk.query({ prompt: promptForSdk(input), options });
     active.query = handle;
     void this.consume(active, handle);
     try {
@@ -345,40 +394,66 @@ export class ClaudeCodeDriver implements AgentDriver {
     let sessionEmitted = false;
     let streamed = "";
     let final = "";
+    let current = handle;
+    let canStartFresh = Boolean(active.input.sessionId && !active.input.ephemeral);
     try {
-      for await (const message of handle) {
-        if (!sessionEmitted && "session_id" in message && message.session_id) {
-          active.queue.push({ type: "session", sessionId: message.session_id });
-          sessionEmitted = true;
-        }
-        const delta = deltaFromMessage(message);
-        if (delta) {
-          streamed += delta;
-          active.queue.push({ type: "output-delta", text: delta });
-        }
-        const assistantText = textFromAssistant(message);
-        if (assistantText) final = assistantText;
-        if (message.type === "result") {
-          if (message.subtype === "success") {
-            final = message.result || final || streamed;
-            if (final) active.queue.push({ type: "output-final", text: final });
-            if (message.terminal_reason === "tool_deferred") {
-              continue;
+      while (true) {
+        let retryFresh = false;
+        try {
+          for await (const message of current) {
+            if (!sessionEmitted && "session_id" in message && message.session_id) {
+              active.queue.push({ type: "session", sessionId: message.session_id });
+              sessionEmitted = true;
             }
-            active.queue.push({ type: "completed", result: "success" });
+            const delta = deltaFromMessage(message);
+            if (delta) {
+              streamed += delta;
+              active.queue.push({ type: "output-delta", text: delta });
+            }
+            const assistantText = textFromAssistant(message);
+            if (assistantText) final = assistantText;
+            if (message.type === "result") {
+              if (message.subtype === "success") {
+                final = message.result || final || streamed;
+                if (final) active.queue.push({ type: "output-final", text: final });
+                if (message.terminal_reason === "tool_deferred") {
+                  continue;
+                }
+                active.queue.push({ type: "completed", result: "success" });
+              } else if (canStartFresh && !streamed && !final) {
+                retryFresh = true;
+                break;
+              } else {
+                active.queue.push({
+                  type: "error",
+                  error: new IMGentError("AGENT_TURN_FAILED", {
+                    diagnostic: {
+                      driver: "claude-code",
+                      subtype: message.subtype,
+                      vendorErrors: message.errors,
+                    },
+                  }).descriptor,
+                });
+              }
+            }
+          }
+        } catch (error) {
+          if (canStartFresh && !streamed && !final && !active.abort.signal.aborted) {
+            retryFresh = true;
           } else {
-            active.queue.push({
-              type: "error",
-              error: new IMGentError("AGENT_TURN_FAILED", {
-                diagnostic: {
-                  driver: "claude-code",
-                  subtype: message.subtype,
-                  vendorErrors: message.errors,
-                },
-              }).descriptor,
-            });
+            throw error;
           }
         }
+        if (!retryFresh) break;
+        canStartFresh = false;
+        const options = { ...active.options };
+        delete options.resume;
+        current = this.sdk.query({
+          prompt: promptForSdk(active.input),
+          options,
+        });
+        active.query = current;
+        sessionEmitted = false;
       }
     } catch (error) {
       if (active.abort.signal.aborted) {

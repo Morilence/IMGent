@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { readdir, rm, stat } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
 import { QqAdapter, type QqCredential } from "@imgent/adapter-qq";
 import { WechatIlinkAdapter, type WechatCredential } from "@imgent/adapter-wechat-ilink";
 import { conversationKey, IMGentError, normalizeError, textOf } from "@imgent/contracts";
@@ -58,6 +59,7 @@ export class IMGentApplication {
   private readonly routes: ReadonlyMap<string, string>;
   private server: FastifyInstance | undefined;
   private maintenanceTimer: NodeJS.Timeout | undefined;
+  private mediaCleanupRunning = false;
   private started = false;
   private closed = false;
 
@@ -133,12 +135,7 @@ export class IMGentApplication {
       };
       this.drivers.set(
         profile.id,
-        profile.driver === "codex"
-          ? new CodexDriver(options)
-          : new ClaudeCodeDriver({
-              ...options,
-              probeOnReady: false,
-            }),
+        profile.driver === "codex" ? new CodexDriver(options) : new ClaudeCodeDriver(options),
       );
     }
 
@@ -160,17 +157,22 @@ export class IMGentApplication {
           });
         }
         const resume = parseQqResume(this.store.checkpoint(bot.id, "gateway_resume"));
-        const fullGroupEventPermission = Boolean(
-          this.store.get<{ count: number }>(
-            `SELECT count(*) AS count
+        const fullGroupPolicy = this.store.get<{
+          required: number;
+          available: number;
+        }>(
+          `SELECT
+             COALESCE(sum(CASE WHEN gp.mode = 'full' THEN 1 ELSE 0 END), 0) AS required,
+             COALESCE(max(gp.platform_full_capability), 0) AS available
              FROM group_policies gp
              JOIN conversation_spaces cs
                ON cs.id = gp.conversation_space_id
-             WHERE cs.bot_instance_id = ?
-               AND gp.platform_full_capability = 1`,
-            bot.id,
-          )?.count,
+             WHERE cs.bot_instance_id = ?`,
+          bot.id,
         );
+        const fullGroupEventPermissionRequired = Boolean(fullGroupPolicy?.required);
+        const fullGroupEventPermission =
+          !fullGroupEventPermissionRequired || fullGroupPolicy?.available === 1;
         this.adapters.set(
           bot.id,
           new QqAdapter({
@@ -179,6 +181,18 @@ export class IMGentApplication {
             credential,
             ...(resume ? { resume } : {}),
             fullGroupEventPermission,
+            fullGroupEventPermissionRequired,
+            isBotMessageId: (messageId) =>
+              Boolean(
+                this.store.get<{ id: string }>(
+                  `SELECT id FROM outbound_messages
+                   WHERE bot_instance_id = ? AND platform_message_id = ?
+                     AND status = 'sent'
+                   LIMIT 1`,
+                  bot.id,
+                  messageId,
+                ),
+              ),
             onCompatibilityError: async (error, payload, checkpoint) => {
               this.store.transaction(() => {
                 this.store.addDeadLetter(
@@ -215,6 +229,7 @@ export class IMGentApplication {
               : {}),
             credential,
             baseUrl: bot.baseUrl ?? WECHAT_BASE_URL,
+            mediaDirectory: join(this.config.dataDir, "media", "wechat-ilink", bot.id),
             ...(cursor ? { cursor } : {}),
             onCompatibilityError: async (error, checkpoint) => {
               this.store.transaction(() => {
@@ -320,10 +335,12 @@ export class IMGentApplication {
     }
     this.scheduler.start();
     this.curator.start();
+    await this.cleanupReleasedMedia();
     await this.outbound.drain(this.adapters);
     this.maintenanceTimer = setInterval(() => {
       this.approvals.expirePending();
       this.store.cleanupExpiredRawEvents();
+      void this.cleanupReleasedMedia();
       void this.outbound.drain(this.adapters).catch((error: unknown) => {
         this.logger.errorFrom("outbound.drain-failed", error);
       });
@@ -373,6 +390,7 @@ export class IMGentApplication {
     await Promise.allSettled([...this.adapters.values()].map((adapter) => adapter.stop()));
     await this.scheduler.stop();
     await this.curator.stop();
+    await this.cleanupReleasedMedia();
     await Promise.allSettled([...this.drivers.values()].map((driver) => driver.close?.()));
     await this.server?.close();
     this.server = undefined;
@@ -565,12 +583,21 @@ export class IMGentApplication {
             throw new Error("绑定码只能在私聊中创建");
           }
           const code = this.identity.createBindingCode(platformIdentityId);
-          response = `绑定码：${code}\n请在另一个已经配对的私聊身份中发送 /imgent bind ${code}`;
+          response = `绑定码：${code}\n请在另一个私聊身份中发送 /imgent bind ${code}；提交即确认绑定。`;
           break;
         }
         case "bind-consume": {
           this.identity.consumeBindingCode(command.code, platformIdentityId);
           response = "两个平台身份已绑定到同一 Principal；Agent session 仍保持分离。";
+          break;
+        }
+        case "unbind": {
+          if (message.conversation.kind !== "direct") {
+            throw new Error("解绑只能在私聊中执行");
+          }
+          this.identity.unbindPlatformIdentity(platformIdentityId);
+          response =
+            "当前平台身份已解除跨平台绑定；后续记忆不再跨身份召回。历史合并记忆保留在原 Principal，不会自动复制或拆分。";
           break;
         }
         case "group-mode": {
@@ -608,6 +635,7 @@ export class IMGentApplication {
           response = [
             "/imgent cancel",
             "/imgent bind [绑定码]",
+            "/imgent unbind",
             "/imgent allow <requestId>",
             "/imgent deny <requestId>",
             "/imgent answer <requestId> <内容>",
@@ -649,6 +677,66 @@ export class IMGentApplication {
       this.config.defaultLocale
     );
   }
+
+  private async cleanupReleasedMedia(): Promise<void> {
+    if (this.mediaCleanupRunning) return;
+    this.mediaCleanupRunning = true;
+    const mediaRoot = resolve(this.config.dataDir, "media", "wechat-ilink");
+    try {
+      for (const event of this.store.releasableMediaEvents()) {
+        let removed = true;
+        for (const path of event.paths) {
+          const candidate = resolve(path);
+          if (candidate !== mediaRoot && !candidate.startsWith(`${mediaRoot}${sep}`)) {
+            removed = false;
+            this.logger.warn("media.cleanup-path-rejected", {
+              eventId: event.eventId,
+            });
+            continue;
+          }
+          try {
+            await rm(candidate, { force: true });
+          } catch (error) {
+            removed = false;
+            this.logger.errorFrom("media.cleanup-failed", error, {
+              eventId: event.eventId,
+            });
+          }
+        }
+        if (removed) this.store.clearLocalMediaPaths(event.eventId);
+      }
+      await this.cleanupOrphanedMedia(
+        mediaRoot,
+        new Set(this.store.referencedMediaPaths().map((path) => resolve(path))),
+      );
+    } finally {
+      this.mediaCleanupRunning = false;
+    }
+  }
+
+  private async cleanupOrphanedMedia(
+    directory: string,
+    referencedPaths: ReadonlySet<string>,
+  ): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await this.cleanupOrphanedMedia(path, referencedPaths);
+      } else if (entry.isFile() && !referencedPaths.has(resolve(path))) {
+        const info = await stat(path);
+        if (Date.now() - info.mtimeMs >= 60 * 60_000) {
+          await rm(path, { force: true });
+        }
+      }
+    }
+  }
 }
 
 export type IMGentCommand =
@@ -657,6 +745,7 @@ export type IMGentCommand =
   | { name: "answer"; requestId: string; value: string }
   | { name: "bind-create" }
   | { name: "bind-consume"; code: string }
+  | { name: "unbind" }
   | { name: "group-mode"; mode: "triggered" | "full" }
   | { name: "language"; locale: string }
   | { name: "help" };
@@ -682,6 +771,7 @@ export function parseIMGentCommand(text: string): IMGentCommand | undefined {
   if (action === "bind") {
     return parts[2] ? { name: "bind-consume", code: parts[2] } : { name: "bind-create" };
   }
+  if (action === "unbind") return { name: "unbind" };
   if (action === "group" && (parts[2] === "full" || parts[2] === "triggered")) {
     return { name: "group-mode", mode: parts[2] };
   }

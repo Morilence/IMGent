@@ -41,6 +41,7 @@ export class ConversationScheduler {
   private readonly logger: Logger;
   private running = new Map<string, Promise<void>>();
   private taskDrivers = new Map<string, AgentDriver>();
+  private answeringRequests = new Map<string, Promise<ApprovalDecision>>();
   private timer: NodeJS.Timeout | undefined;
   private stopped = true;
 
@@ -264,12 +265,47 @@ export class ConversationScheduler {
     answer: AgentRequestAnswer,
     conversationKey?: string,
   ): Promise<ApprovalDecision> {
-    const decision = this.options.approvals.decide(requestId, principalId, answer, conversationKey);
-    if (decision.status === "expired") {
+    const existing = this.answeringRequests.get(requestId);
+    if (existing) {
+      await existing.catch(() => undefined);
+    }
+    const delivery = this.deliverAnswer(requestId, principalId, answer, conversationKey);
+    this.answeringRequests.set(requestId, delivery);
+    try {
+      return await delivery;
+    } finally {
+      if (this.answeringRequests.get(requestId) === delivery) {
+        this.answeringRequests.delete(requestId);
+      }
+    }
+  }
+
+  private async deliverAnswer(
+    requestId: string,
+    principalId: string,
+    answer: AgentRequestAnswer,
+    conversationKey?: string,
+  ): Promise<ApprovalDecision> {
+    const inspection = this.options.approvals.inspect(
+      requestId,
+      principalId,
+      answer,
+      conversationKey,
+    );
+    if (inspection.status !== "pending") {
+      return {
+        requestId,
+        status: inspection.status,
+        taskId: inspection.taskId,
+        answer: inspection.answer,
+        changed: false,
+      };
+    }
+    if (inspection.expired) {
+      this.options.approvals.decide(requestId, principalId, answer, conversationKey);
       throw new IMGentError("APPROVAL_EXPIRED");
     }
-    if (!decision.changed) return decision;
-    const task = this.options.store.task(decision.taskId);
+    const task = this.options.store.task(inspection.taskId);
     if (!task) throw new IMGentError("APPROVAL_NOT_FOUND");
     if (answer.decision === "allow") {
       this.options.store.markDangerousSideEffect(task.id);
@@ -277,7 +313,7 @@ export class ConversationScheduler {
     const driver = this.taskDrivers.get(task.id) ?? this.options.drivers.get(task.agentProfileId);
     if (!driver) throw new IMGentError("PROFILE_OR_DRIVER_MISSING");
     await driver.answerRequest(requestId, answer);
-    return decision;
+    return this.options.approvals.decide(requestId, principalId, answer, conversationKey);
   }
 
   async cancelConversation(

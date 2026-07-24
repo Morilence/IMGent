@@ -6,18 +6,18 @@
 
 ## 1. 支持矩阵
 
-| 能力       | Codex                                 | Claude Code                                                |
-| ---------- | ------------------------------------- | ---------------------------------------------------------- |
-| 集成入口   | `codex app-server`                    | `@anthropic-ai/claude-agent-sdk` TypeScript                |
-| 底层进程   | 长生命周期 app-server                 | SDK 管理本地 `claude` 进程                                 |
-| 协议       | 双向 JSON-RPC，stdio 为默认 Transport | SDK message stream / hook callback                         |
-| 会话 ID    | thread ID                             | session ID                                                 |
-| Turn       | `turn/start`                          | 一次 `query()` / streaming input                           |
-| 流式输出   | `item/*`、`turn/*` notifications      | SDK assistant / stream event / result messages             |
-| 审批       | app-server 发起 JSON-RPC request      | `canUseTool` 与 `PreToolUse` hook                          |
-| 长等待审批 | 保持请求或持久化后恢复 thread         | TypeScript `permissionDecision: "defer"` 后按 session 恢复 |
-| 取消       | turn interrupt / cancel               | AbortSignal / query interrupt                              |
-| 登录       | 本地 Codex 登录态                     | 本地 Claude Code 登录态                                    |
+| 能力     | Codex                                 | Claude Code                                    |
+| -------- | ------------------------------------- | ---------------------------------------------- |
+| 集成入口 | `codex app-server`                    | `@anthropic-ai/claude-agent-sdk` TypeScript    |
+| 底层进程 | 长生命周期 app-server                 | SDK 管理本地 `claude` 进程                     |
+| 协议     | 双向 JSON-RPC，stdio 为默认 Transport | SDK message stream / hook callback             |
+| 会话 ID  | thread ID                             | session ID                                     |
+| Turn     | `turn/start`                          | 一次 `query()` / streaming input               |
+| 流式输出 | `item/*`、`turn/*` notifications      | SDK assistant / stream event / result messages |
+| 审批     | app-server 发起 JSON-RPC request      | `canUseTool` 与 `PreToolUse` hook              |
+| 审批等待 | 仅当前 app-server 进程内保持请求      | 仅当前 SDK/CLI 进程内保持 `canUseTool` 回调    |
+| 取消     | turn interrupt / cancel               | AbortSignal / query interrupt                  |
+| 登录     | 本地 Codex 登录态                     | 本地 Claude Code 登录态                        |
 
 本机调研基线：
 
@@ -125,7 +125,8 @@ sandbox、`approvalPolicy: never`，并通过 thread config 关闭 Shell、统�
 
 - thread ID 与 conversationKey 一一映射；不同 BotInstance 或不同平台的私聊即使共享个人记忆，也不自动共享 thread。
 - app-server 异常退出时，当前 turn 标记 interrupted；重启后先尝试恢复 thread。
-- 恢复能力不可用时建立新 thread，并注入最近会话摘要和当前允许作用域的记忆。
+- 恢复能力不可用时建立新 thread，并注入当前允许作用域的 IMGent 记忆；v1
+  不维护独立的最近会话摘要。
 - stderr 只用于脱敏诊断；不能混入 JSON-RPC stdout parser。
 - `doctor` 至少检查：命令存在、版本可读取、登录有效、app-server 可 initialize、工作目录存在且在允许边界内。
 
@@ -146,14 +147,16 @@ sandbox、`approvalPolicy: never`，并通过 thread config 关闭 Shell、统�
 
 - Streaming input 支持长生命周期交互、排队消息、实时输出、中断、session 和权限请求。
 - `canUseTool` 可以把工具审批和 `AskUserQuestion` 转发到聊天。
-- TypeScript `PreToolUse` hook 支持 `permissionDecision: "defer"`：非交互进程可以在工具调用处退出，保留调用并稍后恢复。
+- TypeScript `PreToolUse` hook 具备 `permissionDecision: "defer"` 的厂商能力，
+  但 IMGent v1 不用它承诺跨进程审批恢复。
 - 直接解析 `claude -p --output-format stream-json` 会重新实现 SDK 已提供的协议和兼容处理，因此 v1 不走这条路径。
 
 ### 4.3 Turn 和 session
 
 - 每个 conversationKey 明确保存自己的 Claude session ID；conversationKey 已包含 `botInstanceId`，不能使用 `continue: true` 猜“当前目录最近一次 session”。
 - 新会话调用 `query()`；已有会话通过 `resume: sessionId` 恢复。
-- 工作目录必须与创建 session 时一致。目录变化或 session 文件丢失时 readiness / resume 明确失败，再按新 session + 摘要策略恢复。
+- 工作目录必须与创建 session 时一致。目录变化或 session 文件丢失时 readiness /
+  resume 明确失败，再按新 session + IMGent 记忆策略恢复。
 - 从 init system message 或 result message 尽早捕获 session ID，并在可能出现审批前持久化。
 - output stream 只将用户可读文本和状态转换为 `AgentEvent`；工具参数、内部思考和 token 不直接回发 IM。
 - IMGent developer instructions 使用 preset system prompt 的 `append`，不替换
@@ -170,13 +173,12 @@ sandbox、`approvalPolicy: never`，并通过 thread config 关闭 Shell、统�
 2. 持久化审批请求并发送到原 IM 会话。
 3. 回调保持 pending，收到用户答复后返回 allow 或 deny。
 
-长等待或进程需要退出：
+进程退出或重启：
 
-1. `PreToolUse` hook 返回 `permissionDecision: "defer"`。
-2. 持久化 session ID、deferred tool use、原始请求和审批消息 ID。
-3. turn 进入 `waiting_approval`，释放进程资源。
-4. 用户答复后以同一 session 恢复并提交决定。
-5. 重复、过期或来自错误会话的答复拒绝且不执行工具。
+1. 所有 pending 审批标记 expired。
+2. `waiting_approval` task 进入 dead letter。
+3. 不恢复 deferred tool use，也不自动重放原 turn。
+4. 重复、过期或来自错误会话的答复拒绝且不执行工具。
 
 任何“始终允许”权限更新都必须受 AgentProfile 的权限上限约束；IM 用户不能通过 SDK suggestion 扩大宿主允许范围。
 
@@ -195,7 +197,7 @@ sandbox、`approvalPolicy: never`，并通过 thread config 关闭 Shell、统�
 - Agent SDK 与本地 CLI 组合可启动一次无副作用的 readiness 查询。
 - 本地认证有效；失败时只显示官方登录指引，不回显凭据。
 - profile 工作目录存在、可访问且与 session 恢复目录一致。
-- streaming input、session capture、defer hook 和 interrupt 能力可用。
+- streaming input、session capture、`canUseTool` 和 interrupt 能力可用。
 
 ## 5. 同等正式支持的验收
 
@@ -205,7 +207,7 @@ Codex 与 Claude Code 都必须通过：
 - 连续两轮对话不串 conversationKey。
 - 流式文本与最终文本不重复发送。
 - 工具审批允许、拒绝、超时和重复答复。
-- 长等待审批跨进程恢复。
+- 当前进程内审批投递失败可重试；进程重启后审批安全失效且不重放。
 - 用户取消 active turn。
 - Agent 进程异常退出后的明确状态和可控恢复。
 - 登录失效、CLI 版本不兼容、工作目录丢失的 readiness 提示。

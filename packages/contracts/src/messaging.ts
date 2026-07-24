@@ -5,6 +5,7 @@ export type ActorRole = "owner" | "admin" | "member" | "unknown";
 export interface AttachmentRef {
   id?: string;
   url?: string;
+  localPath?: string;
   name?: string;
   mimeType?: string;
   size?: number;

@@ -29,6 +29,8 @@ export interface QqAdapterOptions {
   tokenUrl?: string;
   gatewayUrl?: string;
   fullGroupEventPermission?: boolean;
+  fullGroupEventPermissionRequired?: boolean;
+  isBotMessageId?: (messageId: string) => boolean;
   resume?: { sessionId: string; sequence: string };
   fetch?: typeof globalThis.fetch;
   websocketFactory?: (url: string) => WebSocket;
@@ -151,6 +153,7 @@ export class QqAdapter implements ImAdapter {
 
   async checkReady(): Promise<AdapterReadiness> {
     const issues: ErrorDescriptor[] = [];
+    let fullGroupPermissionIssue: ErrorDescriptor | undefined;
     if (!this.options.appId || !this.options.credential.appSecret) {
       issues.push(new IMGentError("ADAPTER_AUTH_REQUIRED").descriptor);
     }
@@ -169,16 +172,20 @@ export class QqAdapter implements ImAdapter {
       issues.push(normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor);
     }
     if (!this.fullGroupEventPermission) {
-      issues.push(
-        new IMGentError("ADAPTER_PERMISSION_DENIED", {
-          diagnostic: { platform: "qq", capability: "full-group-events", optional: true },
-        }).descriptor,
-      );
+      fullGroupPermissionIssue = new IMGentError("ADAPTER_PERMISSION_DENIED", {
+        diagnostic: {
+          platform: "qq",
+          capability: "full-group-events",
+          optional: !this.options.fullGroupEventPermissionRequired,
+        },
+      }).descriptor;
+      issues.push(fullGroupPermissionIssue);
     }
     return {
       ready: issues.every(
         (issue) =>
-          issue.code === "ADAPTER_PERMISSION_DENIED" &&
+          issue === fullGroupPermissionIssue &&
+          !this.options.fullGroupEventPermissionRequired &&
           !this.blockedIssue &&
           Boolean(this.options.appId) &&
           Boolean(this.options.credential.appSecret),
@@ -351,6 +358,8 @@ export class QqAdapter implements ImAdapter {
             payload,
             this.options.botInstanceId,
             this.options.appId,
+            new Date().toISOString(),
+            this.options.isBotMessageId,
           );
           if (message) {
             await onMessage(message, checkpoint);

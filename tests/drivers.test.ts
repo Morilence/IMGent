@@ -33,6 +33,8 @@ const turn = (profileValue: AgentProfile): AgentTurnInput => ({
 test("Codex driver speaks app-server JSON-RPC and serves dynamic host tools", async () => {
   const directory = await mkdtemp(join(tmpdir(), "imgent-codex-"));
   const executable = join(directory, "fake-codex.mjs");
+  const imagePath = join(directory, "input.png");
+  await writeFile(imagePath, Buffer.from([137, 80, 78, 71]));
   await writeFile(
     executable,
     `#!/usr/bin/env node
@@ -43,6 +45,7 @@ if (process.argv.includes("--version")) {
 import { createInterface } from "node:readline";
 const lines = createInterface({ input: process.stdin });
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+let turns = 0;
 lines.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.method === "initialize") {
@@ -60,6 +63,8 @@ lines.on("line", (line) => {
     if (request.params.developerInstructions !== "RESUMED CATALOG") process.exit(13);
     send({ id: request.id, result: { thread: { id: "thread-1" } } });
   } else if (request.method === "turn/start") {
+    turns += 1;
+    if (turns === 1 && !request.params.input.some((part) => part.type === "localImage" && part.path.endsWith("input.png"))) process.exit(15);
     send({ id: request.id, result: { turn: { id: "vendor-turn" } } });
     send({ id: 900, method: "item/tool/call", params: {
       threadId: "thread-1", namespace: "memory", tool: "search",
@@ -111,6 +116,13 @@ lines.on("line", (line) => {
       ephemeral: true,
       hostTools: ["memory.search"],
       builtInTools: "none",
+      parts: [
+        { type: "text", text: "reply" },
+        {
+          type: "image",
+          attachment: { localPath: imagePath, mimeType: "image/png" },
+        },
+      ],
     })) {
       events.push(event);
     }
@@ -136,11 +148,20 @@ lines.on("line", (line) => {
 });
 
 test("Claude driver receives the same IMGent instructions and per-turn Host Tool filter", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-claude-"));
+  const imagePath = join(directory, "input.png");
+  await writeFile(imagePath, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]));
   let capturedOptions: Parameters<ClaudeSdk["query"]>[0]["options"];
+  let capturedUserContent: unknown;
   const sdk: ClaudeSdk = {
     query: (parameters) => {
       capturedOptions = parameters.options;
       const iterable = (async function* () {
+        if (typeof parameters.prompt !== "string") {
+          for await (const userMessage of parameters.prompt) {
+            capturedUserContent = userMessage.message.content;
+          }
+        }
         yield {
           type: "assistant",
           session_id: "claude-session",
@@ -182,29 +203,104 @@ test("Claude driver receives the same IMGent instructions and per-turn Host Tool
     hostToolHandler: async () => ({ success: true, text: "[]" }),
   });
   const events: AgentEvent[] = [];
-  for await (const event of driver.runTurn({
-    ...turn(profile("claude-code", "claude", process.cwd())),
-    developerInstructions: "IMGENT CATALOG",
-    ephemeral: true,
-    hostTools: ["memory.search"],
-    builtInTools: "none",
-  })) {
-    events.push(event);
+  try {
+    for await (const event of driver.runTurn({
+      ...turn(profile("claude-code", "claude", directory)),
+      developerInstructions: "IMGENT CATALOG",
+      ephemeral: true,
+      hostTools: ["memory.search"],
+      builtInTools: "none",
+      parts: [
+        { type: "text", text: "reply" },
+        {
+          type: "image",
+          attachment: { localPath: imagePath, mimeType: "image/png" },
+        },
+      ],
+    })) {
+      events.push(event);
+    }
+    assert.ok(
+      events.some((event) => event.type === "session" && event.sessionId === "claude-session"),
+    );
+    assert.ok(events.some((event) => event.type === "output-final" && event.text === "CLAUDE"));
+    assert.ok(events.some((event) => event.type === "completed" && event.result === "success"));
+    assert.equal(capturedOptions?.persistSession, false);
+    assert.deepEqual(capturedOptions?.tools, []);
+    assert.match(
+      typeof capturedOptions?.systemPrompt === "object" &&
+        !Array.isArray(capturedOptions.systemPrompt)
+        ? (capturedOptions.systemPrompt.append ?? "")
+        : "",
+      /IMGENT CATALOG/,
+    );
+    assert.deepEqual(capturedOptions?.allowedTools, ["mcp__imgent__memory_search"]);
+    assert.ok(
+      Array.isArray(capturedUserContent) &&
+        capturedUserContent.some(
+          (block) =>
+            typeof block === "object" &&
+            block !== null &&
+            "type" in block &&
+            block.type === "image",
+        ),
+    );
+  } finally {
+    await driver.close();
+    await rm(directory, { recursive: true, force: true });
   }
-  assert.ok(
-    events.some((event) => event.type === "session" && event.sessionId === "claude-session"),
-  );
-  assert.ok(events.some((event) => event.type === "output-final" && event.text === "CLAUDE"));
-  assert.ok(events.some((event) => event.type === "completed" && event.result === "success"));
-  assert.equal(capturedOptions?.persistSession, false);
-  assert.deepEqual(capturedOptions?.tools, []);
-  assert.match(
-    typeof capturedOptions?.systemPrompt === "object" &&
-      !Array.isArray(capturedOptions.systemPrompt)
-      ? (capturedOptions.systemPrompt.append ?? "")
-      : "",
-    /IMGENT CATALOG/,
-  );
-  assert.deepEqual(capturedOptions?.allowedTools, ["mcp__imgent__memory_search"]);
-  await driver.close();
+});
+
+test("Claude driver starts a new session when resume fails before producing output", async () => {
+  const resumes: Array<string | undefined> = [];
+  const sdk: ClaudeSdk = {
+    query: ({ options }) => {
+      resumes.push(options?.resume);
+      const call = resumes.length;
+      const iterable = (async function* () {
+        if (call === 1) {
+          yield {
+            type: "result",
+            subtype: "error_during_execution",
+            session_id: "stale-session",
+            errors: ["session not found"],
+          };
+          return;
+        }
+        yield {
+          type: "result",
+          subtype: "success",
+          session_id: "fresh-session",
+          result: "RECOVERED",
+          terminal_reason: "completed",
+        };
+      })();
+      return Object.assign(iterable, {
+        interrupt: async () => undefined,
+        close: () => undefined,
+      }) as never;
+    },
+  };
+  const driver = new ClaudeCodeDriver({ sdk, probeOnReady: false });
+  try {
+    const events: AgentEvent[] = [];
+    for await (const event of driver.runTurn({
+      ...turn(profile("claude-code", "claude", process.cwd())),
+      sessionId: "stale-session",
+    })) {
+      events.push(event);
+    }
+    assert.deepEqual(resumes, ["stale-session", undefined]);
+    assert.ok(
+      events.some((event) => event.type === "session" && event.sessionId === "fresh-session"),
+    );
+    assert.ok(events.some((event) => event.type === "output-final" && event.text === "RECOVERED"));
+    assert.ok(events.some((event) => event.type === "completed" && event.result === "success"));
+    assert.equal(
+      events.some((event) => event.type === "error"),
+      false,
+    );
+  } finally {
+    await driver.close();
+  }
 });

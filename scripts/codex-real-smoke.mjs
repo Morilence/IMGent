@@ -16,7 +16,11 @@ const driver = new CodexDriver();
 try {
   const readiness = await driver.checkReady(profile);
   if (!readiness.ready) {
-    throw new Error(`Codex readiness failed: ${readiness.details.join("; ")}`);
+    throw new Error(
+      `Codex readiness failed: ${readiness.issues
+        .map((issue) => `${issue.code}: ${issue.messageKey}`)
+        .join("; ")}`,
+    );
   }
   let final = "";
   let completed = false;
@@ -37,7 +41,7 @@ try {
     if (event.type === "output-final") final = event.text;
     if (event.type === "completed") completed = event.result === "success";
     if (event.type === "error") {
-      throw new Error(`${event.code}: ${event.message}`);
+      throw new Error(`${event.error.code}: ${event.error.messageKey}`);
     }
   }
   if (!completed || final.trim() !== "CODEX_SMOKE_OK") {

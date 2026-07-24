@@ -1,6 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { IMGentError, normalizeError } from "@imgent/contracts";
-import { attachmentToWechatItem, type WechatHttpClient } from "./media.js";
+import {
+  attachmentToWechatItem,
+  materializeWechatInboundMedia,
+  type WechatHttpClient,
+} from "./media.js";
 import { normalizeWechatMessage, WechatCompatibilityError } from "./normalize.js";
 import {
   MessageType,
@@ -30,6 +34,7 @@ export interface WechatIlinkAdapterOptions {
   baseUrl: string;
   cursor?: string;
   cdnBaseUrl?: string;
+  mediaDirectory?: string;
   fetch?: typeof globalThis.fetch;
   onCompatibilityError?: (
     error: WechatCompatibilityError,
@@ -162,7 +167,28 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
               ? { key: "get_updates_buf", value: response.get_updates_buf }
               : undefined;
           try {
-            const message = normalizeWechatMessage(raw, this.options.botInstanceId);
+            const normalized = normalizeWechatMessage(raw, this.options.botInstanceId);
+            let message = normalized;
+            if (normalized && normalized.parts.some((part) => "attachment" in part)) {
+              if (!this.options.mediaDirectory) {
+                throw new WechatCompatibilityError("微信媒体目录未配置", {
+                  messageId: normalized.messageId,
+                });
+              }
+              try {
+                message = await materializeWechatInboundMedia(
+                  this,
+                  normalized,
+                  this.options.mediaDirectory,
+                  this.options.cdnBaseUrl,
+                );
+              } catch (error) {
+                throw new WechatCompatibilityError("微信媒体下载、解密或校验失败", {
+                  messageId: normalized.messageId,
+                  reason: error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
             if (message) await onMessage(message, checkpoint);
             else if (checkpoint) {
               await this.options.onCheckpoint?.(checkpoint);

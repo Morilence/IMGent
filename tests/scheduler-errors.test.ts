@@ -196,6 +196,68 @@ test("scheduler never replays unknown or dangerous side effects", async () => {
   }
 });
 
+test("approval state becomes terminal only after the live driver accepts the answer", async () => {
+  let attempts = 0;
+  const driver = fakeDriver(async () => []);
+  driver.answerRequest = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("transient delivery failure");
+  };
+  const { fixture, scheduler } = await schedulerFixture(driver);
+  try {
+    const ingested = fixture.store.ingest(
+      directMessage({ messageId: "approval", dedupeKey: "approval" }),
+      "main",
+      "approval-conversation",
+    );
+    const task = fixture.store.claimNextTask();
+    assert.equal(task?.id, ingested.taskId);
+    new ApprovalService(fixture.store).create(
+      task!.id,
+      "main",
+      "approval-conversation",
+      ingested.principalId,
+      {
+        requestId: "approval-delivery",
+        toolName: "shell",
+        sanitizedInput: { command: "pwd" },
+        risk: "high",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    );
+    await assert.rejects(
+      scheduler.answerRequest(
+        "approval-delivery",
+        ingested.principalId,
+        { decision: "allow" },
+        "approval-conversation",
+      ),
+      /transient delivery failure/u,
+    );
+    assert.equal(
+      fixture.store.get<{ status: string }>(
+        "SELECT status FROM approvals WHERE request_id = ?",
+        "approval-delivery",
+      )?.status,
+      "pending",
+    );
+    assert.equal(fixture.store.task(task!.id)?.status, "waiting_approval");
+
+    const delivered = await scheduler.answerRequest(
+      "approval-delivery",
+      ingested.principalId,
+      { decision: "allow" },
+      "approval-conversation",
+    );
+    assert.equal(delivered.status, "allowed");
+    assert.equal(delivered.changed, true);
+    assert.equal(fixture.store.task(task!.id)?.status, "active");
+  } finally {
+    await scheduler.stop();
+    await fixture.cleanup();
+  }
+});
+
 test("missing driver terminal becomes a retryable protocol error and retry_wait can be cancelled", async () => {
   const { fixture, scheduler } = await schedulerFixture(
     fakeDriver(async () => [{ type: "output-final", text: "partial" }]),

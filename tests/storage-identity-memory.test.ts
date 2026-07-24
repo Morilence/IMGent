@@ -105,15 +105,30 @@ test("restart recovery requeues safe work and dead-letters possibly executed wor
     "main",
     "unsafe",
   );
+  const third = store.ingest(
+    directMessage({ messageId: "approval", dedupeKey: "approval" }),
+    "main",
+    "approval",
+  );
   assert.equal(store.claimNextTask()?.id, first.taskId);
   assert.equal(store.claimNextTask()?.id, second.taskId);
+  const waiting = store.claimNextTask();
+  assert.equal(waiting?.id, third.taskId);
+  new ApprovalService(store).create(waiting!.id, "main", "approval", third.principalId, {
+    requestId: "restart-approval",
+    toolName: "shell",
+    sanitizedInput: {},
+    risk: "high",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
   store.markDangerousSideEffect(second.taskId!);
   store.close();
   store = await IMGentStore.open(path, new SecretBox(key));
   const recovered = store.recoverAfterRestart();
-  assert.deepEqual(recovered, { requeued: 1, deadLettered: 1 });
+  assert.deepEqual(recovered, { requeued: 1, deadLettered: 2 });
   assert.equal(store.task(first.taskId!)?.status, "retry_wait");
   assert.equal(store.task(second.taskId!)?.status, "dead_letter");
+  assert.equal(store.task(third.taskId!)?.status, "dead_letter");
   store.close();
   await (
     await import("node:fs/promises")
@@ -170,6 +185,17 @@ test("pairing and explicit cross-platform binding merge principals without displ
     );
     assert.equal(identities.isPaired(second.platformIdentityId), true);
     assert.equal(identities.locale(first.principalId), "en-US");
+    const unbound = identities.unbindPlatformIdentity(second.platformIdentityId);
+    assert.equal(unbound.previousPrincipalId, first.principalId);
+    assert.notEqual(unbound.principalId, first.principalId);
+    assert.equal(
+      fixture.store.get<{ principal_id: string }>(
+        "SELECT principal_id FROM platform_identities WHERE id = ?",
+        second.platformIdentityId,
+      )?.principal_id,
+      unbound.principalId,
+    );
+    assert.equal(identities.isPaired(second.platformIdentityId), true);
   } finally {
     await fixture.cleanup();
   }
@@ -435,6 +461,43 @@ test("approvals are idempotent and bound to principal and conversation", async (
         .changed,
       false,
     );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("local inbound media is retained only while a task can still consume it", async () => {
+  const fixture = await testStore();
+  try {
+    const ingested = fixture.store.ingest(
+      directMessage({
+        messageId: "media",
+        dedupeKey: "media",
+        parts: [
+          {
+            type: "file",
+            attachment: {
+              localPath: `${fixture.directory}/media.bin`,
+              name: "media.bin",
+            },
+          },
+        ],
+      }),
+      "main",
+      "media-conversation",
+    );
+    assert.deepEqual(fixture.store.releasableMediaEvents(), []);
+    const task = fixture.store.claimNextTask();
+    assert.equal(task?.id, ingested.taskId);
+    fixture.store.transitionTask(task!.id, ["active"], "succeeded");
+    assert.deepEqual(fixture.store.releasableMediaEvents(), [
+      {
+        eventId: ingested.eventId,
+        paths: [`${fixture.directory}/media.bin`],
+      },
+    ]);
+    fixture.store.clearLocalMediaPaths(ingested.eventId);
+    assert.deepEqual(fixture.store.releasableMediaEvents(), []);
   } finally {
     await fixture.cleanup();
   }
