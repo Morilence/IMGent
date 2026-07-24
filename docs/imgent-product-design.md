@@ -175,6 +175,8 @@ imgent bot authorize wechat-ilink <bot-instance>
 imgent profile add
 imgent pair
 imgent doctor
+imgent --locale en-US status
+imgent --json doctor
 imgent start
 imgent status
 imgent backup
@@ -195,6 +197,7 @@ imgent restore <file>
 ```json
 {
   "version": 1,
+  "defaultLocale": "zh-CN",
   "dataDir": "./data",
   "server": {
     "host": "127.0.0.1",
@@ -235,6 +238,7 @@ imgent restore <file>
       "transport": "websocket",
       "platformBotIdEnv": "IMGENT_QQ_APP_ID",
       "credentialRef": "qq-main",
+      "locale": "zh-CN",
       "groupIngestionDefault": "triggered"
     },
     {
@@ -264,6 +268,7 @@ imgent restore <file>
 - 微信 QR 授权返回的 `authorizingPlatformUserId` 只记录授权关系，不是 BotInstance ID，也不能代替消息发送者的 `platformUserId`。
 - 一个 BotInstance 只使用一个入站 Transport。
 - 一个 BotInstance 明确路由到一个 AgentProfile。
+- `defaultLocale` 和可选的 `BotInstance.locale` 只接受 `zh-CN`、`en-US`。
 - `AgentProfile.skills` 使用与 Driver 无关的 IMGent skill 名称；缺省为
   `["*"]`，同一配置语义适用于 Codex 与 Claude Code。
 - 未实现的 `feishu`、`telegram` adapter 值在配置解析阶段直接报错。
@@ -569,9 +574,12 @@ conversationKey =
 任务状态：
 
 ```text
-queued -> active -> waiting_approval -> active -> succeeded
-                              \-> cancelled
-queued/active/waiting_approval -> failed -> dead_letter
+queued -> active -> succeeded
+            ├-> retry_wait -> active
+            ├-> waiting_approval -> active
+            ├-> cancelled
+            ├-> failed
+            └-> dead_letter
 ```
 
 规则：
@@ -586,17 +594,54 @@ queued/active/waiting_approval -> failed -> dead_letter
 
 - 用户只能取消自己有权访问的会话。
 - active turn 优先调用 AgentDriver `interrupt`。
-- queued 任务直接标记 cancelled。
+- queued 和 retry_wait 任务直接标记 cancelled。
 - 已开始的外部副作用不因取消自动回滚；系统明确告知用户实际状态。
 
 ### 9.4 重试和恢复
 
 - 平台重复事件命中 `dedupeKey` 后返回成功，不重新入队。
-- Agent 临时断开先尝试恢复原 session/thread。
-- 不支持恢复时新建 session，并注入最近摘要与当前作用域记忆。
-- 自动重试沿用原任务幂等键。
-- 危险工具已经开始执行时不自动重放。
-- 重启后恢复 queued 和 waiting_approval；遗留 active 先标记 interrupted，再按驱动能力恢复。
+- 只有 `backoff + replay safe + 尚未开始危险副作用` 才能自动重试。
+- 每个 task 总计最多执行 3 次，前两次等待 2 秒、10 秒；平台
+  `Retry-After` 优先但最多 5 分钟。
+- retry_wait 继续占据同会话 FIFO 头部，后续任务不能越过。
+- replay 为 unsafe/unknown、审批过期或达到上限时不再自动执行；外部副作用
+  结果不确定时进入 dead letter。
+- Driver 流缺少 completed/error 终态时记录
+  `DRIVER_PROTOCOL_INCOMPLETE`，不能遗留 active 任务。
+- 重启后 safe active 进入 retry_wait；已经开始危险副作用的 active 或
+  waiting_approval 直接进入 dead letter。
+
+### 9.5 统一错误合约
+
+`@imgent/contracts` 只提供一个 `IMGentError` 和集中错误定义表：
+
+```ts
+interface ErrorDescriptor {
+  code: ErrorCode;
+  domain: ErrorDomain;
+  kind: ErrorKind;
+  messageKey: ErrorMessageKey;
+  messageParams?: Record<string, string | number | boolean>;
+  actionKey?: ErrorMessageKey;
+  actionParams?: Record<string, string | number | boolean>;
+  retry: {
+    strategy: "none" | "backoff" | "after_user_action";
+    replay: "safe" | "unsafe" | "unknown";
+    retryAfterMs?: number;
+  };
+  incidentId?: string;
+}
+```
+
+- 错误码使用 `DOMAIN_SUBJECT_REASON`，一个 code 只对应一种稳定语义。
+- 定义表固定 domain、kind、message/action key 和默认恢复策略；边界只能附加
+  已声明的安全参数、cause 和内部诊断。
+- `normalizeError()` 统一映射 Node、Zod、HTTP、平台和厂商错误；未知错误变为
+  `INTERNAL_UNEXPECTED_ERROR`。
+- Driver 错误事件为 `{ type: "error"; error: ErrorDescriptor }`；Adapter、
+  Driver 和 readiness 都使用结构化 issues。
+- cause、stack、完整消息正文、路径、SQL、凭据和原始平台响应不进入错误
+  descriptor、数据库错误字段、聊天、CLI JSON 或管理端点。
 
 ## 10. 身份模型
 
@@ -685,6 +730,17 @@ Principal 在某个群内的成员关系，保存平台成员 ID、群昵称、�
 - IMGent 不执行技能脚本。脚本如由 Agent 执行，仍受相同工作区、沙箱、权限
   上限与聊天审批约束。
 - IMGent 不禁用 Agent 原生技能，但产品正确性不依赖、同步或映射厂商技能。
+
+### 10.5 语言偏好
+
+- CLI：`--locale` → `LC_ALL/LC_MESSAGES/LANG` → 配置默认值 → `zh-CN`。
+- IM：Principal 偏好 → `BotInstance.locale` → 全局默认值 → `zh-CN`。
+- `/imgent language zh-CN|en-US` 对未配对私聊也开放；偏好保存在 Principal，
+  人工绑定身份后共享。
+- v1 只国际化错误、恢复动作、doctor/status 诊断和 language 命令；普通对话、
+  排队提示和业务成功文案不在本次范围。
+- `intl-messageformat` 渲染 ICU 目录；`zh-CN`、`en-US` 必须等量完整。测试/CI
+  校验缺失键、多余键、ICU 语法、占位符集合和声明参数。
 
 ## 11. 原生记忆系统
 
@@ -959,7 +1015,9 @@ SQLite 保存：
 - MemoryRecord、FTS 索引和 curator outbox。
 - MemoryRecord 的来源 task、`explicit` / `curated` 来源标记，以及生成后的
   FTS5 `search_text`。
-- 出站幂等键、发送结果和 dead letter。
+- task、outbound、memory outbox 的标准错误 descriptor、incident ID、尝试次数
+  和 next attempt；不保存渲染后的语言文本。
+- 出站幂等键、发送结果和标准错误 dead letter。
 - 群采集策略、同意记录和原文过期时间。
 - 审计事件。
 
@@ -968,10 +1026,12 @@ SQLite 保存：
 以下操作必须原子完成：
 
 - 入站事件、去重键、队列任务和 Transport checkpoint。
-- task 状态和 memory outbox。
+- task succeeded、最终回复 outbox 和 memory outbox。
+- waiting_approval 状态和审批提示 outbox。
 - 明确记忆写入与工具成功结果。
 - 审批终态与 Agent 恢复任务。
-- 发送成功记录与出站幂等键。
+- Outbound 独立 claim、发送成功记录与出站幂等键；发送失败不能反向把
+  succeeded task 改为 failed。
 
 所有记忆查询必须显式包含 `agentProfileId` 和允许 scope 条件。
 
@@ -980,9 +1040,14 @@ SQLite 保存：
 - 数据库使用单调递增 schema version。
 - 启动时先备份元数据并在事务中执行迁移。
 - 迁移失败时拒绝 readiness，不带着半迁移 schema 运行。
-- 删除字段采用先停止写入、后续版本再清理的兼容步骤。
 - schema v2 为记忆增加 `source_task_id`、`origin`、同 scope active exact value
   唯一约束，并把 FTS5 重建为生成后的 `search_text`；v1 升级前创建独立备份。
+- schema v3 事务内重建 task/outbound/memory outbox/dead letter 表，新增
+  retry_wait、`error_json`、incident、next attempt 和 Principal locale，并删除
+  分散的 `error_code` / `error_message`。
+- v2 历史错误只映射为 `LEGACY_RECORDED_ERROR`，历史诊断不复制进新错误字段；
+  业务数据保留。升级前创建独立 0600 备份，迁移后执行 foreign-key check，
+  任一步失败都回滚并拒绝启动。
 
 ### 14.4 备份
 
@@ -1016,14 +1081,22 @@ eventType
 durationMs
 result
 errorCode
+errorDomain
+retryStrategy
+replaySafety
+attempt
+incidentId
 ```
 
-Info 和 Debug 默认都不记录完整消息正文、记忆值、平台 token 或 replyContext。只有部署者在本机显式开启的短期诊断模式可以记录脱敏正文，并自动到期。
+日志不国际化。所有诊断经过统一脱敏；默认不记录 cause/stack、完整消息正文、
+记忆值、路径、SQL、原始厂商响应、平台 token 或 replyContext。
 
 ### 15.2 健康检查
 
-- `GET /healthz`：进程仍能响应。
-- `GET /readyz`：数据库可写、迁移完成、至少一个启用 BotInstance 和对应 AgentProfile ready。
+- `GET /healthz`：仅返回简单进程状态。
+- `GET /readyz`：数据库可写、迁移完成、至少一个启用 BotInstance 和对应
+  AgentProfile ready；按 `Accept-Language` 返回 code、locale 和本地化
+  message/action，不返回内部诊断。
 
 `imgent status` 额外显示：
 
@@ -1036,19 +1109,36 @@ Info 和 Debug 默认都不记录完整消息正文、记忆值、平台 token �
 
 ### 15.3 错误分类
 
-| 错误              | 行为                                         |
-| ----------------- | -------------------------------------------- |
-| 重复事件          | 返回成功，不重新入队                         |
-| 标准化失败        | 进入脱敏 compatibility dead letter           |
-| 平台权限缺失      | BotInstance 或对应能力 not ready，不循环重连 |
-| QQ Resume 失败    | 重新 Identify，依赖业务 dedupe 防重          |
-| 微信 session 失效 | 停止消费并要求重新 QR 授权                   |
-| Agent 临时断开    | 尝试恢复 session/thread                      |
-| Agent 版本不兼容  | readiness 失败并给升级提示                   |
-| Agent turn 失败   | 向原会话返回简短失败，不自动重放危险操作     |
-| 平台发送失败      | 按分类有限重试，最终进入 dead letter         |
-| 记忆策展失败      | 不影响主回复，有限重试                       |
-| 记忆权限失败      | 拒绝调用并写安全审计                         |
+| 错误                            | 行为                                                |
+| ------------------------------- | --------------------------------------------------- |
+| 重复事件                        | 返回成功，不重新入队                                |
+| 标准化失败                      | 进入脱敏 compatibility dead letter                  |
+| 401/403、微信 session 失效      | not ready，停止重连，等待部署者操作                 |
+| 429                             | 遵循 Retry-After，单次最多等待 5 分钟               |
+| 网络、超时、5xx                 | 指数退避，Adapter 单次最长 30 秒                    |
+| 普通 4xx、reply context、协议错 | 不自动重试                                          |
+| Driver 缺少终态                 | `DRIVER_PROTOCOL_INCOMPLETE`，按 replay policy 收口 |
+| Task 安全临时失败               | 总计最多 3 次，2 秒/10 秒，保持会话 FIFO            |
+| Task 副作用结果不确定           | 不重放，进入 dead letter                            |
+| Outbound 临时失败               | 与 task 解耦，总计 3 次，1 秒/5 秒                  |
+| 记忆策展失败                    | 不影响主回复，有限重试                              |
+
+CLI 错误退出码固定为：0 成功、2 输入/配置、3 需要部署者操作、4 临时外部故障、
+1 未分类内部错误。`--json` 错误 envelope 为
+`{ ok: false, locale, error: { code, message, action, retry, incidentId } }`，
+不含内部诊断。
+
+### 15.4 运维恢复
+
+1. 先运行 `imgent doctor` 或 `imgent --json doctor`，以稳定错误码判断责任边界。
+2. `*_AUTH_REQUIRED` / `*_SESSION_INVALID`：更新凭据或重新授权，再运行 doctor。
+3. `*_VERSION_UNSUPPORTED` / `CONFIG_*`：升级 Agent 或修正配置，不要循环重启。
+4. `OUTBOUND_*` dead letter：先确认 task 是否已 succeeded，再决定重新投递；不得
+   重新执行已成功 Agent task。
+5. `TASK_UNSAFE_REPLAY`：人工确认外部副作用的真实结果后，再决定是否新建任务。
+6. `STORAGE_MIGRATION_FAILED`：保留 `.pre-migrate-*.backup`，确认磁盘和 schema；
+   不在原库上手工跳过版本。
+7. 向部署者传递 incident ID；用户可见表面不应复制原始平台错误或本机路径。
 
 ## 16. 产品交互
 
@@ -1068,7 +1158,17 @@ Info 和 Debug 默认都不记录完整消息正文、记忆值、平台 token �
 
 原生按钮可用时显示 allow / deny；不可用时使用带短期 request code 的文本命令。回复必须落在原会话并匹配当前 Principal。
 
-### 16.4 记忆回执
+### 16.4 语言
+
+```text
+/imgent language zh-CN
+/imgent language en-US
+```
+
+命令成功后用新语言确认；不支持的 locale 使用当前有效语言返回
+`LANGUAGE_UNSUPPORTED`。
+
+### 16.5 记忆回执
 
 成功：
 
@@ -1159,9 +1259,15 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
 ### 17.6 故障和安全
 
 - 重复事件、进程重启和平台重连不造成重复危险操作。
-- token、secret、replyContext、完整消息正文和记忆值不出现在默认日志。
+- 错误码定义唯一，双语目录等量，ICU 与占位符合约通过自动校验。
+- safe task 的三次上限、retry_wait FIFO、unknown/unsafe 不重放和 Driver 缺失
+  终态均通过状态机测试。
+- Outbound 的 429/5xx/4xx/context、重启恢复、最终死信及 task 成功独立性通过
+  自动化测试。
+- token、secret、replyContext、完整消息正文、路径、SQL 和原始厂商错误不出现
+  在用户表面、持久化错误或默认日志。
 - 管理服务默认只绑定 loopback。
-- 数据库迁移失败时 readiness 失败。
+- schema v2→v3 保留业务数据、创建独立备份；失败时事务回滚且 readiness 失败。
 - FTS5 不可用时启动失败，不静默退化。
 - 备份可恢复到新的空数据目录并通过完整性检查。
 

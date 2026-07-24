@@ -6,6 +6,7 @@ import {
   normalizeWechatMessage,
   WechatCompatibilityError,
 } from "@imgent/adapter-wechat-ilink";
+import { IMGentError } from "@imgent/contracts";
 
 test("QQ normalizer preserves actor, mentions, references, attachments and reply limits", () => {
   const sentAt = "2026-07-24T00:00:00.000Z";
@@ -158,7 +159,10 @@ test("QQ adapter enforces the direct-message four-reply limit", async () => {
       "reply",
     );
   }
-  await assert.rejects(adapter.send({ ...base, idempotencyKey: "reply-5" }), /四-reply|上限|4/);
+  await assert.rejects(
+    adapter.send({ ...base, idempotencyKey: "reply-5" }),
+    (error: unknown) => error instanceof IMGentError && error.code === "OUTBOUND_CONTEXT_EXPIRED",
+  );
 });
 
 test("WeChat persists an empty long-poll cursor and probes with ilink_user_id", async () => {
@@ -211,4 +215,120 @@ test("WeChat persists an empty long-poll cursor and probes with ilink_user_id", 
   });
   assert.equal((await readiness.checkReady()).ready, true);
   assert.equal(readinessBodies[0]?.ilink_user_id, "scanner-user-id");
+});
+
+test("adapter authentication and rate-limit failures expose stable recovery policy", async () => {
+  const unauthorized = new QqAdapter({
+    botInstanceId: "qq-main",
+    appId: "app",
+    credential: { appSecret: "secret" },
+    fetch: async () => new Response("", { status: 401 }),
+  });
+  const readiness = await unauthorized.checkReady();
+  assert.equal(readiness.ready, false);
+  assert.equal(
+    readiness.issues.some((issue) => issue.code === "ADAPTER_AUTH_REQUIRED"),
+    true,
+  );
+
+  let calls = 0;
+  const limited = new QqAdapter({
+    botInstanceId: "qq-main",
+    appId: "app",
+    credential: { appSecret: "secret" },
+    fetch: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return Response.json({ access_token: "access", expires_in: 3600 });
+      }
+      return new Response("", {
+        status: 429,
+        headers: { "Retry-After": "9999" },
+      });
+    },
+  });
+  await assert.rejects(
+    limited.send({
+      botInstanceId: "qq-main",
+      conversation: { kind: "direct", platformConversationId: "user" },
+      parts: [{ type: "text", text: "hello" }],
+      idempotencyKey: "limited",
+    }),
+    (error: unknown) =>
+      error instanceof IMGentError &&
+      error.code === "ADAPTER_RATE_LIMITED" &&
+      error.descriptor.retry.retryAfterMs === 300_000,
+  );
+});
+
+test("WeChat invalid sessions stop polling and transient disconnects recover", async () => {
+  let invalidMessage = "";
+  let invalidResolve: (() => void) | undefined;
+  const invalidObserved = new Promise<void>((resolve) => {
+    invalidResolve = resolve;
+  });
+  const invalid = new WechatIlinkAdapter({
+    botInstanceId: "wechat-main",
+    platformBotId: "bot-id",
+    credential: { botToken: "token" },
+    baseUrl: "https://example.test",
+    fetch: async () =>
+      Response.json({ ret: 0, errcode: -14, errmsg: "raw session invalid response" }),
+    onSessionInvalid: async (message) => {
+      invalidMessage = message;
+      invalidResolve?.();
+    },
+  });
+  await invalid.start(async () => undefined);
+  await invalidObserved;
+  assert.match(invalidMessage, /session invalid/);
+  assert.equal(
+    (await invalid.checkReady()).issues.some((issue) => issue.code === "ADAPTER_SESSION_INVALID"),
+    true,
+  );
+  await invalid.stop();
+
+  let calls = 0;
+  let messageResolve: (() => void) | undefined;
+  const messageObserved = new Promise<void>((resolve) => {
+    messageResolve = resolve;
+  });
+  const recovering = new WechatIlinkAdapter({
+    botInstanceId: "wechat-main",
+    platformBotId: "bot-id",
+    credential: { botToken: "token" },
+    baseUrl: "https://example.test",
+    fetch: async (_input, init) => {
+      calls += 1;
+      if (calls === 1) {
+        throw Object.assign(new Error("temporary disconnect"), { code: "ECONNRESET" });
+      }
+      if (calls === 2) {
+        return Response.json({
+          ret: 0,
+          msgs: [
+            {
+              from_user_id: "user",
+              message_id: "recovered",
+              seq: 1,
+              item_list: [{ type: 1, text_item: { text: "hello" } }],
+              context_token: "reply-context",
+            },
+          ],
+          get_updates_buf: "after-recovery",
+        });
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+          once: true,
+        });
+      });
+    },
+  });
+  await recovering.start(async () => {
+    messageResolve?.();
+  });
+  await messageObserved;
+  assert.ok(calls >= 2);
+  await recovering.stop();
 });

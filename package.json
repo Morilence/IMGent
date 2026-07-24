@@ -34,6 +34,7 @@
     "@imgent/driver-codex": "workspace:*",
     "commander": "^15.0.0",
     "fastify": "^5.10.0",
+    "intl-messageformat": "^10.7.18",
     "qrcode-terminal": "^0.12.0",
     "zod": "^4.4.3"
   },

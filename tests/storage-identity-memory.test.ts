@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { test } from "node:test";
-import { conversationKey } from "@imgent/contracts";
+import { conversationKey, IMGentError } from "@imgent/contracts";
 import { ApprovalService } from "../src/approvals/service.js";
 import { IdentityService } from "../src/identity/service.js";
 import { MemoryCurator } from "../src/memory/curator.js";
@@ -112,7 +112,7 @@ test("restart recovery requeues safe work and dead-letters possibly executed wor
   store = await IMGentStore.open(path, new SecretBox(key));
   const recovered = store.recoverAfterRestart();
   assert.deepEqual(recovered, { requeued: 1, deadLettered: 1 });
-  assert.equal(store.task(first.taskId!)?.status, "queued");
+  assert.equal(store.task(first.taskId!)?.status, "retry_wait");
   assert.equal(store.task(second.taskId!)?.status, "dead_letter");
   store.close();
   await (
@@ -156,6 +156,7 @@ test("pairing and explicit cross-platform binding merge principals without displ
     );
     assert.notEqual(first.principalId, second.principalId);
     const identities = new IdentityService(fixture.store);
+    identities.setLocale(second.principalId, "en-US");
     identities.confirmPairing(identities.createPairingCode(first.platformIdentityId));
     const code = identities.createBindingCode(first.platformIdentityId);
     const result = identities.consumeBindingCode(code, second.platformIdentityId);
@@ -168,6 +169,7 @@ test("pairing and explicit cross-platform binding merge principals without displ
       first.principalId,
     );
     assert.equal(identities.isPaired(second.platformIdentityId), true);
+    assert.equal(identities.locale(first.principalId), "en-US");
   } finally {
     await fixture.cleanup();
   }
@@ -383,13 +385,34 @@ test("approvals are idempotent and bound to principal and conversation", async (
     const task = fixture.store.claimNextTask();
     assert.equal(task?.id, ingested.taskId);
     const approvals = new ApprovalService(fixture.store);
-    approvals.create(task!.id, "main", "conversation-one", ingested.principalId, {
-      requestId: "approval-1",
-      toolName: "shell",
-      sanitizedInput: { command: "pwd" },
-      risk: "high",
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-    });
+    approvals.create(
+      task!.id,
+      "main",
+      "conversation-one",
+      ingested.principalId,
+      {
+        requestId: "approval-1",
+        toolName: "shell",
+        sanitizedInput: { command: "pwd" },
+        risk: "high",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+      {
+        botInstanceId: "qq-main",
+        conversation: { kind: "direct", platformConversationId: "user-1" },
+        parts: [{ type: "text", text: "approval required" }],
+        idempotencyKey: "approval:approval-1",
+      },
+    );
+    assert.equal(fixture.store.task(task!.id)?.status, "waiting_approval");
+    assert.equal(
+      fixture.store.get<{ count: number }>(
+        `SELECT count(*) AS count FROM outbound_messages
+         WHERE task_id = ? AND idempotency_key = 'approval:approval-1'`,
+        task!.id,
+      )?.count,
+      1,
+    );
     assert.throws(
       () =>
         approvals.decide(
@@ -398,7 +421,7 @@ test("approvals are idempotent and bound to principal and conversation", async (
           { decision: "allow" },
           "another-conversation",
         ),
-      /原会话/,
+      (error: unknown) => error instanceof IMGentError && error.code === "APPROVAL_FORBIDDEN",
     );
     const allowed = approvals.decide(
       "approval-1",
@@ -674,7 +697,12 @@ test("curator retry is idempotent after a successful tool write", async () => {
       });
       assert.equal(result.success, true);
       return attempts === 1
-        ? [{ type: "error", code: "TRANSIENT", retryable: true, message: "retry" }]
+        ? [
+            {
+              type: "error",
+              error: new IMGentError("MEMORY_CURATION_FAILED").descriptor,
+            },
+          ]
         : [{ type: "completed", result: "success" }];
     });
     const curator = new MemoryCurator({
@@ -781,7 +809,7 @@ function fakeDriver(
 ): AgentDriver {
   return {
     id: "codex",
-    checkReady: async (): Promise<DriverReadiness> => ({ ready: true, details: [] }),
+    checkReady: async (): Promise<DriverReadiness> => ({ ready: true, issues: [] }),
     async *runTurn(input: AgentTurnInput): AsyncIterable<AgentEvent> {
       for (const event of await run(input)) yield event;
     },

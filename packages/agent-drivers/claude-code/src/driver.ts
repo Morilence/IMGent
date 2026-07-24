@@ -12,6 +12,7 @@ import {
   type Query,
   type SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { IMGentError, normalizeError } from "@imgent/contracts";
 import { z } from "zod";
 import { AsyncQueue } from "./async-queue.js";
 import type {
@@ -128,13 +129,15 @@ export class ClaudeCodeDriver implements AgentDriver {
   }
 
   async checkReady(profile: AgentProfile): Promise<DriverReadiness> {
-    const details: string[] = [];
+    const issues: DriverReadiness["issues"] = [];
     let version: string | undefined;
     try {
       const info = await stat(profile.workspace);
-      if (!info.isDirectory()) details.push("工作区不是目录");
+      if (!info.isDirectory()) {
+        issues.push(new IMGentError("CONFIG_WORKSPACE_INVALID").descriptor);
+      }
     } catch {
-      details.push(`工作区不存在或不可访问: ${profile.workspace}`);
+      issues.push(new IMGentError("CONFIG_WORKSPACE_INVALID").descriptor);
     }
     try {
       const result = await execute(profile.command, ["--version"], {
@@ -144,12 +147,16 @@ export class ClaudeCodeDriver implements AgentDriver {
       version = result.stdout.trim() || result.stderr.trim();
       const tuple = versionTuple(version);
       if (!tuple || !versionAtLeast(tuple, MINIMUM_VERSION)) {
-        details.push(`Claude Code 版本不兼容: ${version || "unknown"}，要求 >= 2.1.89`);
+        issues.push(new IMGentError("AGENT_VERSION_UNSUPPORTED").descriptor);
       }
     } catch (error) {
-      details.push(`Claude Code CLI 不可用: ${errorMessage(error)}`);
+      issues.push(
+        normalizeError(error, "AGENT_UNAVAILABLE", {
+          diagnostic: { driver: "claude-code", operation: "version" },
+        }).descriptor,
+      );
     }
-    if (details.length === 0 && this.probeOnReady) {
+    if (issues.length === 0 && this.probeOnReady) {
       try {
         const probe = this.sdk.query({
           prompt: "Reply with exactly READY.",
@@ -171,15 +178,19 @@ export class ClaudeCodeDriver implements AgentDriver {
             ready = true;
           }
         }
-        if (!ready) details.push("Claude Agent SDK readiness 查询未成功");
+        if (!ready) issues.push(new IMGentError("AGENT_AUTH_REQUIRED").descriptor);
       } catch (error) {
-        details.push(`Claude Agent SDK 或登录态检查失败: ${errorMessage(error)}`);
+        issues.push(
+          normalizeError(error, "AGENT_UNAVAILABLE", {
+            diagnostic: { driver: "claude-code", operation: "readiness" },
+          }).descriptor,
+        );
       }
     }
     return {
-      ready: details.length === 0,
+      ready: issues.length === 0,
       ...(version ? { version } : {}),
-      details,
+      issues,
     };
   }
 
@@ -358,9 +369,13 @@ export class ClaudeCodeDriver implements AgentDriver {
           } else {
             active.queue.push({
               type: "error",
-              code: "CLAUDE_TURN_FAILED",
-              retryable: message.subtype === "error_during_execution",
-              message: message.errors.join("; ") || message.subtype,
+              error: new IMGentError("AGENT_TURN_FAILED", {
+                diagnostic: {
+                  driver: "claude-code",
+                  subtype: message.subtype,
+                  vendorErrors: message.errors,
+                },
+              }).descriptor,
             });
           }
         }
@@ -371,9 +386,9 @@ export class ClaudeCodeDriver implements AgentDriver {
       } else {
         active.queue.push({
           type: "error",
-          code: "CLAUDE_PROCESS_FAILED",
-          retryable: true,
-          message: errorMessage(error),
+          error: normalizeError(error, "AGENT_TURN_FAILED", {
+            diagnostic: { driver: "claude-code", operation: "query" },
+          }).descriptor,
         });
       }
     } finally {
@@ -383,7 +398,7 @@ export class ClaudeCodeDriver implements AgentDriver {
 
   async answerRequest(requestId: string, answer: AgentRequestAnswer): Promise<void> {
     const pending = this.pending.get(requestId);
-    if (!pending) throw new Error("Claude 审批/问题请求不存在或已结束");
+    if (!pending) throw new IMGentError("APPROVAL_NOT_FOUND");
     clearTimeout(pending.timer);
     this.pending.delete(requestId);
     if (pending.kind === "question") {
@@ -482,8 +497,4 @@ function schemaShape(schema: Record<string, unknown>): Record<string, z.ZodType>
       return [name, required.has(name) ? validator : validator.optional()];
     }),
   );
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

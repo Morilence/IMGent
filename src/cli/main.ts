@@ -5,24 +5,41 @@ import { dirname, relative, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { authorizeWechatIlink } from "@imgent/adapter-wechat-ilink";
-import { Command, Option } from "commander";
+import { IMGentError, normalizeError } from "@imgent/contracts";
+import { Command, CommanderError, Option } from "commander";
 import qrcode from "qrcode-terminal";
 import { createBackup, restoreBackup } from "../backup/service.js";
 import { defaultConfig } from "../config/index.js";
 import { readRawConfig, updateConfig, writeConfig } from "../config/write.js";
-import { IMGentApplication } from "../runtime/application.js";
+import { normalizeLocale, renderError, renderErrorText, resolveLocale } from "../i18n/index.js";
+import { IMGentApplication, renderReadiness } from "../runtime/application.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
 import { CURATION_SKILL, SkillRegistry } from "../skills/registry.js";
 import { openAdminContext } from "./context.js";
-import type { AgentProfile, BotInstance } from "@imgent/contracts";
+import { cliErrorEnvelope, cliExitCode, cliSuccessEnvelope } from "./presentation.js";
+import type {
+  AgentProfile,
+  BotInstance,
+  ErrorDescriptor,
+  SupportedLocale,
+} from "@imgent/contracts";
 
 const program = new Command();
+let activeLocale: SupportedLocale = "zh-CN";
+let jsonOutput = false;
 
 program
   .name("imgent")
   .description("将 QQ 与微信 iLink 安全桥接到本地 Codex / Claude Code")
   .version("0.1.0")
-  .option("-c, --config <path>", "配置文件路径", resolve("imgent.json"));
+  .option("-c, --config <path>", "配置文件路径", resolve("imgent.json"))
+  .option("--locale <locale>", "输出语言：zh-CN 或 en-US")
+  .option("--json", "输出稳定 JSON envelope", false)
+  .exitOverride()
+  .showHelpAfterError(false)
+  .configureOutput({
+    writeErr: () => undefined,
+  });
 
 program
   .command("init")
@@ -89,7 +106,7 @@ profile
       };
       await updateConfig(configPath, (config) => {
         if (config.agentProfiles.some((value) => value.id === id)) {
-          throw new Error(`AgentProfile 已存在: ${id}`);
+          throw new IMGentError("CLI_USAGE_INVALID");
         }
         return {
           ...config,
@@ -145,7 +162,7 @@ skillsCommand
   .option("--description <text>", "skill 用途描述")
   .action(async (name: string, options: { description?: string }) => {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name) || name.length > 63) {
-      throw new Error("skill 名称必须是最长 63 字符的小写 kebab-case");
+      throw new IMGentError("CLI_USAGE_INVALID");
     }
     const configPath = configPathOf();
     const config = await readRawConfig(configPath);
@@ -153,7 +170,7 @@ skillsCommand
     const skillRoot = resolve(userSkillsRoot, name);
     const description = options.description ?? `Describe when the ${name} skill should be used.`;
     if (description.length < 1 || description.length > 1_000) {
-      throw new Error("skill description 长度必须为 1 到 1000 字符");
+      throw new IMGentError("CLI_USAGE_INVALID");
     }
     await mkdir(userSkillsRoot, { recursive: true, mode: 0o700 });
     await mkdir(skillRoot, { recursive: false, mode: 0o700 });
@@ -204,23 +221,21 @@ bot
       },
     ) => {
       if (adapter !== "qq" && adapter !== "wechat-ilink") {
-        throw new Error("v1 只支持 qq 与 wechat-ilink");
+        throw new IMGentError("CLI_USAGE_INVALID");
       }
       const configPath = configPathOf();
       const current = await readRawConfig(configPath);
       if (!current.agentProfiles.some((entry) => entry.id === options.profile)) {
-        throw new Error(`AgentProfile 不存在: ${options.profile}`);
+        throw new IMGentError("CONFIG_FILE_INVALID");
       }
       let entry: BotInstance;
       if (adapter === "qq") {
         if (!options.appId && !options.appIdEnv) {
-          throw new Error("QQ 必须提供 --app-id 或 --app-id-env");
+          throw new IMGentError("CLI_USAGE_INVALID");
         }
         const secret = process.env[options.appSecretEnv];
         if (!secret) {
-          throw new Error(
-            `环境变量 ${options.appSecretEnv} 为空；拒绝把 secret 写入命令行或明文配置`,
-          );
+          throw new IMGentError("CONFIG_FILE_INVALID");
         }
         const context = await openAdminContext(configPath);
         try {
@@ -248,7 +263,7 @@ bot
       }
       await updateConfig(configPath, (config) => {
         if (config.bots.some((value) => value.id === id)) {
-          throw new Error(`BotInstance 已存在: ${id}`);
+          throw new IMGentError("CLI_USAGE_INVALID");
         }
         return {
           ...config,
@@ -269,7 +284,7 @@ bot
     const config = await readRawConfig(configPath);
     const selected = config.bots.find((entry) => entry.id === id);
     if (!selected || selected.adapter !== "wechat-ilink") {
-      throw new Error(`微信 BotInstance 不存在: ${id}`);
+      throw new IMGentError("CLI_USAGE_INVALID");
     }
     const terminal = createInterface({ input: stdin, output: stdout });
     try {
@@ -404,6 +419,7 @@ program
   .command("doctor")
   .description("检查 Node、SQLite、平台和 Agent readiness")
   .action(async () => {
+    const failures: ErrorDescriptor[] = [];
     const checks: Array<{
       check: string;
       ok: boolean;
@@ -412,8 +428,13 @@ program
     checks.push({
       check: "node",
       ok: nodeSupported(),
-      details: process.versions.node,
+      details: nodeSupported()
+        ? process.versions.node
+        : renderError(new IMGentError("RUNTIME_NODE_UNSUPPORTED").descriptor, activeLocale),
     });
+    if (!nodeSupported()) {
+      failures.push(new IMGentError("RUNTIME_NODE_UNSUPPORTED").descriptor);
+    }
     let application: IMGentApplication | undefined;
     try {
       application = await IMGentApplication.create(configPathOf());
@@ -421,19 +442,30 @@ program
       checks.push({
         check: "runtime",
         ok: readiness.ready,
-        details: readiness,
+        details: renderReadiness(readiness, activeLocale),
       });
+      if (!readiness.ready) {
+        failures.push(
+          ...readiness.issues,
+          ...Object.values(readiness.bots).flatMap((entry) => entry.issues),
+          ...Object.values(readiness.profiles).flatMap((entry) => entry.issues),
+        );
+      }
     } catch (error) {
+      const normalized = normalizeError(error);
+      failures.push(normalized.descriptor);
       checks.push({
         check: "runtime",
         ok: false,
-        details: errorMessage(error),
+        details: renderError(normalized.descriptor, activeLocale),
       });
     } finally {
       await application?.stop();
     }
     print(checks);
-    if (checks.some((check) => !check.ok)) process.exitCode = 1;
+    if (failures.length > 0) {
+      process.exitCode = Math.max(...failures.map((failure) => cliExitCode(failure)));
+    }
   });
 
 program
@@ -471,10 +503,10 @@ program
             `SELECT id, conversation_key AS conversationKey, status,
                   created_at AS createdAt
            FROM tasks
-           WHERE status IN ('queued', 'active', 'waiting_approval')
+           WHERE status IN ('queued', 'active', 'retry_wait', 'waiting_approval')
            ORDER BY created_at LIMIT 1`,
           ) ?? null,
-        readiness: await application.checkReady(),
+        readiness: renderReadiness(await application.checkReady(), activeLocale),
       });
     } finally {
       await application.stop();
@@ -513,15 +545,7 @@ program
     print(await restoreBackup(file, options.dataDir, configPathOf(), options.force));
   });
 
-if (!nodeSupported()) {
-  process.stderr.write(`IMGent 需要 Node.js >= 24.18.0；当前为 ${process.versions.node}\n`);
-  process.exitCode = 1;
-} else {
-  program.parseAsync().catch((error) => {
-    process.stderr.write(`${errorMessage(error)}\n`);
-    process.exitCode = 1;
-  });
-}
+void main();
 
 function configPathOf(): string {
   return resolve(program.opts<{ config: string }>().config);
@@ -552,9 +576,89 @@ function nodeSupported(): boolean {
 }
 
 function print(value: unknown): void {
-  stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  const output = jsonOutput ? cliSuccessEnvelope(value, activeLocale) : value;
+  stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+async function main(): Promise<void> {
+  try {
+    jsonOutput = hasArgument("--json");
+    activeLocale = await cliLocale();
+    if (!nodeSupported()) {
+      throw new IMGentError("RUNTIME_NODE_UNSUPPORTED");
+    }
+    await program.parseAsync();
+  } catch (error) {
+    if (
+      error instanceof CommanderError &&
+      (error.code === "commander.helpDisplayed" || error.code === "commander.version")
+    ) {
+      return;
+    }
+    const normalized =
+      error instanceof CommanderError
+        ? new IMGentError("CLI_USAGE_INVALID", {
+            diagnostic: { commanderCode: error.code },
+          })
+        : normalizeError(error);
+    if (jsonOutput) {
+      stdout.write(`${JSON.stringify(cliErrorEnvelope(normalized.descriptor, activeLocale))}\n`);
+    } else {
+      process.stderr.write(`${renderErrorText(normalized.descriptor, activeLocale)}\n`);
+    }
+    process.exitCode = cliExitCode(normalized.descriptor);
+  }
+}
+
+async function cliLocale(): Promise<SupportedLocale> {
+  const explicit = argumentValue("--locale");
+  if (explicit !== undefined) {
+    if (explicit !== "zh-CN" && explicit !== "en-US") {
+      throw new IMGentError("LANGUAGE_UNSUPPORTED");
+    }
+    return explicit;
+  }
+  const environment = resolveLocale(
+    [process.env.LC_ALL, process.env.LC_MESSAGES, process.env.LANG],
+    "zh-CN",
+  );
+  if (
+    process.env.LC_ALL !== undefined ||
+    process.env.LC_MESSAGES !== undefined ||
+    process.env.LANG !== undefined
+  ) {
+    const matched = [process.env.LC_ALL, process.env.LC_MESSAGES, process.env.LANG].find((value) =>
+      normalizeLocale(value),
+    );
+    if (matched) {
+      return normalizeLocale(matched) ?? environment;
+    }
+  }
+  try {
+    const config = await readRawConfig(configArgument());
+    return config.defaultLocale;
+  } catch {
+    return "zh-CN";
+  }
+}
+
+function configArgument(): string {
+  return resolve(argumentValue("--config") ?? argumentValue("-c") ?? "imgent.json");
+}
+
+function argumentValue(name: string): string | undefined {
+  const args = process.argv.slice(2);
+  const prefix = `${name}=`;
+  const inline = args.find((argument) => argument.startsWith(prefix));
+  if (inline) {
+    return inline.slice(prefix.length);
+  }
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : undefined;
+}
+
+function hasArgument(name: string): boolean {
+  return process.argv
+    .slice(2)
+    .some((argument) => argument === name || argument.startsWith(`${name}=`));
 }

@@ -2,10 +2,16 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
+import { IMGentError, normalizeError, redactSensitive } from "@imgent/contracts";
 import { memorySearchText } from "../memory/search-text.js";
-import { MIGRATION_1, MIGRATION_2, SCHEMA_VERSION } from "./migrations.js";
+import { MIGRATION_1, MIGRATION_2, MIGRATION_3, SCHEMA_VERSION } from "./migrations.js";
 import type { SecretBox } from "../security/secret-box.js";
-import type { InboundMessage, ReplyContext } from "@imgent/contracts";
+import type {
+  ErrorDescriptor,
+  InboundMessage,
+  OutboundMessage,
+  ReplyContext,
+} from "@imgent/contracts";
 
 type SqlValue = null | number | bigint | string | Uint8Array;
 
@@ -33,13 +39,23 @@ export interface StoredTask {
   idempotencyKey: string;
   status: TaskStatus;
   attempt: number;
+  dangerousSideEffectStarted: boolean;
   message: InboundMessage;
   finalText?: string;
+  error?: ErrorDescriptor;
+  nextAttemptAt?: string;
   createdAt: string;
 }
 
 export type TaskStatus =
-  "queued" | "active" | "waiting_approval" | "succeeded" | "cancelled" | "failed" | "dead_letter";
+  | "queued"
+  | "active"
+  | "retry_wait"
+  | "waiting_approval"
+  | "succeeded"
+  | "cancelled"
+  | "failed"
+  | "dead_letter";
 
 interface CountRow {
   count: number;
@@ -59,6 +75,12 @@ function stripReplyContext(message: InboundMessage): InboundMessage {
   return copy;
 }
 
+function withoutReplyContext(message: OutboundMessage): OutboundMessage {
+  const copy = structuredClone(message);
+  delete copy.replyContext;
+  return copy;
+}
+
 export class IMGentStore {
   private constructor(
     readonly database: DatabaseSync,
@@ -67,14 +89,26 @@ export class IMGentStore {
   ) {}
 
   static async open(path: string, secretBox: SecretBox): Promise<IMGentStore> {
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    const database = new DatabaseSync(path, {
-      enableForeignKeyConstraints: true,
-      defensive: true,
-      timeout: 5_000,
-    });
-    await chmod(path, 0o600);
-    database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
+    let database: DatabaseSync | undefined;
+    try {
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      database = new DatabaseSync(path, {
+        enableForeignKeyConstraints: true,
+        defensive: true,
+        timeout: 5_000,
+      });
+      await chmod(path, 0o600);
+      database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
+    } catch (error) {
+      database?.close();
+      throw new IMGentError("STORAGE_UNAVAILABLE", {
+        cause: error,
+        diagnostic: { path },
+      });
+    }
+    if (!database) {
+      throw new IMGentError("STORAGE_UNAVAILABLE");
+    }
 
     const tables = database
       .prepare(
@@ -91,15 +125,34 @@ export class IMGentStore {
       } catch (error) {
         database.exec("ROLLBACK");
         database.close();
-        throw error;
+        throw new IMGentError("STORAGE_UNAVAILABLE", {
+          cause: error,
+          diagnostic: { operation: "initialize schema" },
+        });
       }
     } else {
-      const version = database.prepare("SELECT version FROM schema_meta").get() as
+      let version = database.prepare("SELECT version FROM schema_meta").get() as
         { version: number } | undefined;
-      if (version?.version === 1) {
+      if (!version || ![1, 2, SCHEMA_VERSION].includes(version.version)) {
         const backupPath = `${path}.pre-migrate-${Date.now()}.backup`;
         await backup(database, backupPath);
         await chmod(backupPath, 0o600);
+        database.close();
+        throw new IMGentError("STORAGE_MIGRATION_FAILED", {
+          diagnostic: {
+            databaseVersion: version?.version ?? "unknown",
+            supportedVersion: SCHEMA_VERSION,
+            backupPath,
+          },
+        });
+      }
+      const backupPath =
+        version.version < SCHEMA_VERSION ? `${path}.pre-migrate-${Date.now()}.backup` : undefined;
+      if (backupPath) {
+        await backup(database, backupPath);
+        await chmod(backupPath, 0o600);
+      }
+      if (version.version === 1) {
         database.exec("BEGIN IMMEDIATE");
         try {
           database.exec(MIGRATION_2);
@@ -108,21 +161,30 @@ export class IMGentStore {
         } catch (error) {
           database.exec("ROLLBACK");
           database.close();
-          throw new Error(
-            `数据库 schema v2 迁移失败；已备份到 ${backupPath}: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-            { cause: error },
-          );
+          throw new IMGentError("STORAGE_MIGRATION_FAILED", {
+            cause: error,
+            diagnostic: { fromVersion: 1, toVersion: 2, backupPath },
+          });
         }
-      } else if (!version || version.version !== SCHEMA_VERSION) {
-        const backupPath = `${path}.pre-migrate-${Date.now()}.backup`;
-        await backup(database, backupPath);
-        await chmod(backupPath, 0o600);
-        database.close();
-        throw new Error(
-          `数据库 schema version ${version?.version ?? "unknown"} 不受支持；已备份到 ${backupPath}`,
-        );
+        version = { version: 2 };
+      }
+      if (version.version === 2) {
+        database.exec("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE");
+        try {
+          database.exec(MIGRATION_3);
+          const violations = database.prepare("PRAGMA foreign_key_check").all();
+          if (violations.length > 0) {
+            throw new Error("foreign key validation failed after schema migration");
+          }
+          database.exec("COMMIT; PRAGMA foreign_keys = ON");
+        } catch (error) {
+          database.exec("ROLLBACK; PRAGMA foreign_keys = ON");
+          database.close();
+          throw new IMGentError("STORAGE_MIGRATION_FAILED", {
+            cause: error,
+            diagnostic: { fromVersion: 2, toVersion: 3, backupPath },
+          });
+        }
       }
     }
 
@@ -131,7 +193,9 @@ export class IMGentStore {
       .get() as unknown as { enabled: number };
     if (fts.enabled !== 1) {
       database.close();
-      throw new Error("当前 SQLite 未启用 FTS5");
+      throw new IMGentError("STORAGE_UNAVAILABLE", {
+        diagnostic: { reason: "FTS5 unavailable" },
+      });
     }
     database.prepare("INSERT INTO memory_fts(search_text) VALUES (?)").run("tokenizer-check");
     database.prepare("DELETE FROM memory_fts WHERE search_text = ?").run("tokenizer-check");
@@ -517,25 +581,38 @@ export class IMGentStore {
         idempotency_key: string;
         status: TaskStatus;
         attempt: number;
+        dangerous_side_effect_started: number;
         message_json: string;
         reply_context_cipher: Uint8Array | null;
         created_at: string;
       }>(
         `SELECT t.*, e.message_json, e.reply_context_cipher
          FROM tasks t JOIN inbound_events e ON e.id = t.inbound_event_id
-         WHERE t.status = 'queued'
+         WHERE t.status IN ('queued', 'retry_wait')
+           AND (t.status = 'queued' OR t.next_attempt_at <= ?)
            AND NOT EXISTS (
              SELECT 1 FROM tasks active
              WHERE active.conversation_key = t.conversation_key
                AND active.status IN ('active', 'waiting_approval')
            )
+           AND NOT EXISTS (
+             SELECT 1 FROM tasks earlier
+             WHERE earlier.conversation_key = t.conversation_key
+               AND earlier.status IN ('queued', 'retry_wait', 'active', 'waiting_approval')
+               AND (
+                 earlier.created_at < t.created_at
+                 OR (earlier.created_at = t.created_at AND earlier.rowid < t.rowid)
+               )
+           )
          ORDER BY t.created_at, t.rowid
          LIMIT 1`,
+        now(),
       );
       if (!row) return undefined;
       this.run(
-        `UPDATE tasks SET status = 'active', attempt = attempt + 1, updated_at = ?
-         WHERE id = ? AND status = 'queued'`,
+        `UPDATE tasks SET status = 'active', attempt = attempt + 1,
+           next_attempt_at = NULL, updated_at = ?
+         WHERE id = ? AND status IN ('queued', 'retry_wait')`,
         now(),
         row.id,
       );
@@ -552,6 +629,7 @@ export class IMGentStore {
         idempotencyKey: row.idempotency_key,
         status: "active",
         attempt: row.attempt + 1,
+        dangerousSideEffectStarted: row.dangerous_side_effect_started === 1,
         message,
         createdAt: row.created_at,
       };
@@ -562,20 +640,25 @@ export class IMGentStore {
     taskId: string,
     from: readonly TaskStatus[],
     to: TaskStatus,
-    fields: { finalText?: string; errorCode?: string; errorMessage?: string } = {},
+    fields: {
+      finalText?: string;
+      error?: ErrorDescriptor;
+      nextAttemptAt?: string | null;
+    } = {},
   ): boolean {
     const placeholders = from.map(() => "?").join(", ");
     const result = this.database
       .prepare(
         `UPDATE tasks SET status = ?, final_text = COALESCE(?, final_text),
-          error_code = ?, error_message = ?, updated_at = ?
+          error_json = ?, incident_id = ?, next_attempt_at = ?, updated_at = ?
          WHERE id = ? AND status IN (${placeholders})`,
       )
       .run(
         to,
         fields.finalText ?? null,
-        fields.errorCode ?? null,
-        fields.errorMessage ?? null,
+        fields.error ? JSON.stringify(fields.error) : null,
+        fields.error?.incidentId ?? null,
+        fields.nextAttemptAt ?? null,
         now(),
         taskId,
         ...from,
@@ -588,6 +671,47 @@ export class IMGentStore {
       const changed = this.transitionTask(taskId, ["active"], "succeeded", { finalText });
       if (changed && curate) this.enqueueMemoryOutbox(taskId);
       return changed;
+    });
+  }
+
+  enqueueOutbound(message: OutboundMessage, taskId?: string): string {
+    const timestamp = now();
+    const existing = this.get<{ id: string }>(
+      "SELECT id FROM outbound_messages WHERE idempotency_key = ?",
+      message.idempotencyKey,
+    );
+    if (existing) return existing.id;
+    const id = rowId("out");
+    this.run(
+      `INSERT INTO outbound_messages(
+        id, task_id, bot_instance_id, idempotency_key, status, payload_json,
+        reply_context_cipher, next_attempt_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
+      id,
+      taskId ?? null,
+      message.botInstanceId,
+      message.idempotencyKey,
+      JSON.stringify(withoutReplyContext(message)),
+      message.replyContext ? this.encryptReplyContext(message.replyContext) : null,
+      timestamp,
+      timestamp,
+      timestamp,
+    );
+    return id;
+  }
+
+  completeTaskWithOutbound(
+    taskId: string,
+    finalText: string,
+    curate: boolean,
+    message: OutboundMessage,
+  ): boolean {
+    return this.transaction(() => {
+      const changed = this.transitionTask(taskId, ["active"], "succeeded", { finalText });
+      if (!changed) return false;
+      this.enqueueOutbound(message, taskId);
+      if (curate) this.enqueueMemoryOutbox(taskId);
+      return true;
     });
   }
 
@@ -606,7 +730,8 @@ export class IMGentStore {
       const cancelledQueued = this.database
         .prepare(
           `UPDATE tasks SET status = 'cancelled', updated_at = ?
-           WHERE conversation_key = ? AND principal_id = ? AND status = 'queued'`,
+           WHERE conversation_key = ? AND principal_id = ?
+             AND status IN ('queued', 'retry_wait')`,
         )
         .run(now(), conversationKey, principalId).changes;
       return {
@@ -627,9 +752,12 @@ export class IMGentStore {
       idempotency_key: string;
       status: TaskStatus;
       attempt: number;
+      dangerous_side_effect_started: number;
       message_json: string;
       reply_context_cipher: Uint8Array | null;
       final_text: string | null;
+      error_json: string | null;
+      next_attempt_at: string | null;
       created_at: string;
     }>(
       `SELECT t.*, e.message_json, e.reply_context_cipher
@@ -651,27 +779,38 @@ export class IMGentStore {
       idempotencyKey: row.idempotency_key,
       status: row.status,
       attempt: row.attempt,
+      dangerousSideEffectStarted: row.dangerous_side_effect_started === 1,
       message,
       ...(row.final_text ? { finalText: row.final_text } : {}),
+      ...(row.error_json ? { error: JSON.parse(row.error_json) as ErrorDescriptor } : {}),
+      ...(row.next_attempt_at ? { nextAttemptAt: row.next_attempt_at } : {}),
       createdAt: row.created_at,
     };
   }
 
   addDeadLetter(
     category: string,
+    error: unknown,
     diagnostic: Record<string, unknown>,
     botInstanceId?: string,
     referenceId?: string,
   ): void {
+    const normalized = normalizeError(error);
     this.run(
       `INSERT INTO dead_letters(
-        id, category, bot_instance_id, reference_id, diagnostic_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
+        id, category, bot_instance_id, reference_id, error_json,
+        diagnostic_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       rowId("dead"),
       category,
       botInstanceId ?? null,
       referenceId ?? null,
-      JSON.stringify(diagnostic),
+      JSON.stringify(normalized.descriptor),
+      JSON.stringify(
+        redactSensitive(
+          normalized.diagnostic ? { ...diagnostic, ...normalized.diagnostic } : diagnostic,
+        ),
+      ),
       now(),
     );
   }
@@ -694,22 +833,24 @@ export class IMGentStore {
            )`,
         now(),
       );
+      const recoveryError = new IMGentError("PROCESS_RESTART_RECOVERY").descriptor;
       const requeued = this.database
         .prepare(
-          `UPDATE tasks SET status = 'queued', error_code = 'PROCESS_RESTART',
-            error_message = '进程重启后等待恢复', updated_at = ?
+          `UPDATE tasks SET status = 'retry_wait', error_json = ?,
+            incident_id = ?, next_attempt_at = ?, updated_at = ?
            WHERE status IN ('active', 'waiting_approval')
              AND dangerous_side_effect_started = 0`,
         )
-        .run(now()).changes;
+        .run(JSON.stringify(recoveryError), recoveryError.incidentId ?? null, now(), now()).changes;
+      const unsafeError = new IMGentError("TASK_UNSAFE_REPLAY").descriptor;
       const deadLettered = this.database
         .prepare(
-          `UPDATE tasks SET status = 'dead_letter', error_code = 'UNSAFE_REPLAY',
-            error_message = '危险操作可能已开始，禁止自动重放', updated_at = ?
+          `UPDATE tasks SET status = 'dead_letter', error_json = ?,
+            incident_id = ?, next_attempt_at = NULL, updated_at = ?
            WHERE status IN ('active', 'waiting_approval')
              AND dangerous_side_effect_started = 1`,
         )
-        .run(now()).changes;
+        .run(JSON.stringify(unsafeError), unsafeError.incidentId ?? null, now()).changes;
       return {
         requeued: Number(requeued),
         deadLettered: Number(deadLettered),
@@ -794,7 +935,7 @@ export class IMGentStore {
       this.get<CountRow>(
         `SELECT count(*) AS count FROM memory_outbox
        WHERE status IN ('pending', 'processing')
-          OR (status = 'failed' AND attempt < 3)`,
+          OR (status = 'retry_wait' AND attempt < 3)`,
       )?.count ?? 0;
     const deadLetters =
       this.get<CountRow>("SELECT count(*) AS count FROM dead_letters WHERE resolved_at IS NULL")

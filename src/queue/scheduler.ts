@@ -1,21 +1,24 @@
-import { textOf } from "@imgent/contracts";
+import { IMGentError, normalizeError, textOf } from "@imgent/contracts";
+import { renderErrorText } from "../i18n/index.js";
 import {
   MEMORY_HOST_TOOL_IDS,
   SKILL_HOST_TOOL_IDS,
   type IMGentHostTools,
 } from "../runtime/host-tools.js";
 import { Logger } from "../runtime/logger.js";
-import type { ApprovalService } from "../approvals/service.js";
+import type { ApprovalDecision, ApprovalService } from "../approvals/service.js";
 import type { MemoryContext, MemoryService } from "../memory/service.js";
 import type { OutboundDispatcher } from "../runtime/outbound.js";
 import type { SkillRegistry } from "../skills/registry.js";
-import type { IMGentStore, StoredTask } from "../storage/store.js";
+import type { IMGentStore, StoredTask, TaskStatus } from "../storage/store.js";
 import type {
   AgentDriver,
   AgentProfile,
   AgentRequestAnswer,
+  ErrorDescriptor,
   ImAdapter,
   OutboundMessage,
+  SupportedLocale,
 } from "@imgent/contracts";
 
 export interface SchedulerOptions {
@@ -28,6 +31,7 @@ export interface SchedulerOptions {
   hostTools: IMGentHostTools;
   skills: SkillRegistry;
   outbound: OutboundDispatcher;
+  localeFor?: (principalId: string, botInstanceId: string) => SupportedLocale;
   maxConcurrency?: number;
   logger?: Logger;
 }
@@ -59,28 +63,34 @@ export class ConversationScheduler {
     while (this.running.size < this.maxConcurrency) {
       const task = this.options.store.claimNextTask();
       if (!task) break;
-      const promise = this.execute(task)
-        .catch((error) => {
-          this.logger.error("task.unhandled", {
-            taskId: task.id,
-            errorCode: "UNHANDLED_TASK_ERROR",
-            message: errorMessage(error),
-          });
-        })
-        .finally(async () => {
-          this.running.delete(task.id);
-          this.taskDrivers.delete(task.id);
-          try {
-            await this.options.hostTools.unregister(task.id);
-          } catch (error) {
-            this.logger.error("host-tools.cleanup-failed", {
-              taskId: task.id,
-              message: errorMessage(error),
-            });
-          }
-          queueMicrotask(() => this.pump());
-        });
+      const promise = this.runTask(task);
       this.running.set(task.id, promise);
+    }
+  }
+
+  async processOnce(): Promise<boolean> {
+    const task = this.options.store.claimNextTask();
+    if (!task) return false;
+    await this.runTask(task);
+    return true;
+  }
+
+  private async runTask(task: StoredTask): Promise<void> {
+    try {
+      await this.execute(task);
+    } catch (error) {
+      this.logger.errorFrom("task.unhandled", error, { taskId: task.id });
+    } finally {
+      this.running.delete(task.id);
+      this.taskDrivers.delete(task.id);
+      try {
+        await this.options.hostTools.unregister(task.id);
+      } catch (error) {
+        this.logger.errorFrom("host-tools.cleanup-failed", error, {
+          taskId: task.id,
+        });
+      }
+      queueMicrotask(() => this.pump());
     }
   }
 
@@ -88,10 +98,11 @@ export class ConversationScheduler {
     const profile = this.options.profiles.get(task.agentProfileId);
     const driver = this.options.drivers.get(task.agentProfileId);
     if (!profile || !driver) {
-      this.options.store.transitionTask(task.id, ["active"], "dead_letter", {
-        errorCode: "PROFILE_OR_DRIVER_MISSING",
-        errorMessage: "AgentProfile 或 AgentDriver 不存在",
-      });
+      await this.finishWithError(
+        task,
+        new IMGentError("PROFILE_OR_DRIVER_MISSING").descriptor,
+        "dead_letter",
+      );
       return;
     }
     this.taskDrivers.set(task.id, driver);
@@ -121,14 +132,10 @@ export class ConversationScheduler {
       existingSession &&
       (existingSession.driver !== profile.driver || existingSession.workspace !== profile.workspace)
     ) {
-      this.options.store.transitionTask(task.id, ["active"], "failed", {
-        errorCode: "SESSION_WORKSPACE_MISMATCH",
-        errorMessage: "Agent session 的 driver 或工作目录不匹配",
-      });
-      await this.reply(
+      await this.finishWithError(
         task,
-        "会话工作目录或驱动已变化，请由部署者重置该会话。",
-        "session-mismatch",
+        new IMGentError("AGENT_SESSION_MISMATCH").descriptor,
+        "failed",
       );
       return;
     }
@@ -167,27 +174,31 @@ export class ConversationScheduler {
           case "output-final":
             finalText = event.text;
             break;
-          case "approval-request":
+          case "approval-request": {
+            const approvalText = [
+              `需要审批：${event.request.toolName}`,
+              `风险：${event.request.risk}`,
+              `请求：${JSON.stringify(event.request.sanitizedInput)}`,
+              `允许：/imgent allow ${event.request.requestId}`,
+              `拒绝：/imgent deny ${event.request.requestId}`,
+            ].join("\n");
             this.options.approvals.create(
               task.id,
               profile.id,
               task.conversationKey,
               task.principalId,
               event.request,
+              this.replyMessage(task, approvalText, `approval:${event.request.requestId}`),
             );
-            await this.reply(
-              task,
-              [
-                `需要审批：${event.request.toolName}`,
-                `风险：${event.request.risk}`,
-                `请求：${JSON.stringify(event.request.sanitizedInput)}`,
-                `允许：/imgent allow ${event.request.requestId}`,
-                `拒绝：/imgent deny ${event.request.requestId}`,
-              ].join("\n"),
-              `approval:${event.request.requestId}`,
-            );
+            void this.options.outbound.drain(this.options.adapters);
             break;
-          case "question":
+          }
+          case "question": {
+            const questionText = [
+              event.request.prompt,
+              ...(event.request.choices?.map((choice) => `- ${choice}`) ?? []),
+              `回答：/imgent answer ${event.request.requestId} <内容>`,
+            ].join("\n");
             this.options.approvals.create(
               task.id,
               profile.id,
@@ -203,17 +214,11 @@ export class ConversationScheduler {
                 risk: "low",
                 expiresAt: event.request.expiresAt,
               },
+              this.replyMessage(task, questionText, `question:${event.request.requestId}`),
             );
-            await this.reply(
-              task,
-              [
-                event.request.prompt,
-                ...(event.request.choices?.map((choice) => `- ${choice}`) ?? []),
-                `回答：/imgent answer ${event.request.requestId} <内容>`,
-              ].join("\n"),
-              `question:${event.request.requestId}`,
-            );
+            void this.options.outbound.drain(this.options.adapters);
             break;
+          }
           case "completed":
             completed = event.result === "success";
             if (event.result === "cancelled") {
@@ -225,25 +230,31 @@ export class ConversationScheduler {
             }
             break;
           case "error":
-            this.options.store.transitionTask(task.id, ["active", "waiting_approval"], "failed", {
-              errorCode: event.code,
-              errorMessage: event.message,
-            });
-            await this.reply(task, `任务失败：${event.message}`, `error:${event.code}`);
+            await this.handleDriverError(task, event.error);
             return;
         }
       }
-      if (!completed) return;
+      if (!completed) {
+        await this.handleDriverError(
+          task,
+          new IMGentError("DRIVER_PROTOCOL_INCOMPLETE").descriptor,
+        );
+        return;
+      }
       const answer = finalText || streamed || "任务已完成。";
-      await this.reply(task, answer, "final");
-      this.options.store.completeTask(task.id, answer, profile.memory.enabled);
+      const message = this.replyMessage(task, answer, "final");
+      this.options.store.completeTaskWithOutbound(task.id, answer, profile.memory.enabled, message);
+      void this.options.outbound.drain(this.options.adapters);
     } catch (error) {
       await driver.interrupt(task.id).catch(() => undefined);
-      this.options.store.transitionTask(task.id, ["active", "waiting_approval"], "failed", {
-        errorCode: "TASK_EXECUTION_FAILED",
-        errorMessage: errorMessage(error),
+      const normalized = normalizeError(error, "TASK_EXECUTION_FAILED", {
+        diagnostic: { taskId: task.id, agentProfileId: task.agentProfileId },
       });
-      throw error;
+      await this.handleDriverError(task, normalized.descriptor);
+      this.logger.errorFrom("task.execution-failed", normalized, {
+        taskId: task.id,
+        agentProfileId: task.agentProfileId,
+      });
     }
   }
 
@@ -252,17 +263,21 @@ export class ConversationScheduler {
     principalId: string,
     answer: AgentRequestAnswer,
     conversationKey?: string,
-  ): Promise<void> {
+  ): Promise<ApprovalDecision> {
     const decision = this.options.approvals.decide(requestId, principalId, answer, conversationKey);
-    if (!decision.changed || decision.status === "expired") return;
+    if (decision.status === "expired") {
+      throw new IMGentError("APPROVAL_EXPIRED");
+    }
+    if (!decision.changed) return decision;
     const task = this.options.store.task(decision.taskId);
-    if (!task) throw new Error("审批对应任务不存在");
+    if (!task) throw new IMGentError("APPROVAL_NOT_FOUND");
     if (answer.decision === "allow") {
       this.options.store.markDangerousSideEffect(task.id);
     }
     const driver = this.taskDrivers.get(task.id) ?? this.options.drivers.get(task.agentProfileId);
-    if (!driver) throw new Error("审批对应 AgentDriver 不存在");
+    if (!driver) throw new IMGentError("PROFILE_OR_DRIVER_MISSING");
     await driver.answerRequest(requestId, answer);
+    return decision;
   }
 
   async cancelConversation(
@@ -306,10 +321,8 @@ export class ConversationScheduler {
     };
   }
 
-  private async reply(task: StoredTask, text: string, suffix: string): Promise<void> {
-    const adapter = this.options.adapters.get(task.message.botInstanceId);
-    if (!adapter) throw new Error("BotInstance adapter 不存在");
-    const message: OutboundMessage = {
+  private replyMessage(task: StoredTask, text: string, suffix: string): OutboundMessage {
+    return {
       botInstanceId: task.message.botInstanceId,
       conversation: task.message.conversation,
       parts: [{ type: "text", text }],
@@ -317,10 +330,75 @@ export class ConversationScheduler {
       ...(task.message.replyContext ? { replyContext: task.message.replyContext } : {}),
       idempotencyKey: `${task.id}:${suffix}`,
     };
-    await this.options.outbound.send(adapter, message, task.id);
   }
-}
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  private async reply(task: StoredTask, text: string, suffix: string): Promise<void> {
+    this.options.outbound.enqueue(this.replyMessage(task, text, suffix), task.id);
+    void this.options.outbound.drain(this.options.adapters);
+  }
+
+  private locale(task: StoredTask): SupportedLocale {
+    return this.options.localeFor?.(task.principalId, task.message.botInstanceId) ?? "zh-CN";
+  }
+
+  private async handleDriverError(task: StoredTask, descriptor: ErrorDescriptor): Promise<void> {
+    const canonical = normalizeError(descriptor).descriptor;
+    const currentTask = this.options.store.task(task.id) ?? task;
+    const canRetry =
+      canonical.retry.strategy === "backoff" &&
+      canonical.retry.replay === "safe" &&
+      !currentTask.dangerousSideEffectStarted &&
+      currentTask.attempt < 3;
+    if (canRetry) {
+      const delayMs = currentTask.attempt <= 1 ? 2_000 : 10_000;
+      this.options.store.transitionTask(task.id, ["active", "waiting_approval"], "retry_wait", {
+        error: canonical,
+        nextAttemptAt: new Date(
+          Date.now() + Math.min(canonical.retry.retryAfterMs ?? delayMs, 300_000),
+        ).toISOString(),
+      });
+      this.logger.warn("task.retry-scheduled", {
+        taskId: task.id,
+        attempt: currentTask.attempt,
+        errorCode: canonical.code,
+        incidentId: canonical.incidentId,
+      });
+      return;
+    }
+    if (currentTask.dangerousSideEffectStarted || canonical.retry.replay !== "safe") {
+      const unsafe = new IMGentError("TASK_UNSAFE_REPLAY").descriptor;
+      this.options.store.addDeadLetter(
+        "task.unsafe-replay",
+        unsafe,
+        { sourceErrorCode: canonical.code, attempt: currentTask.attempt },
+        task.message.botInstanceId,
+        task.id,
+      );
+      await this.finishWithError(task, unsafe, "dead_letter");
+      return;
+    }
+    const finalDescriptor =
+      canonical.retry.strategy === "backoff" && currentTask.attempt >= 3
+        ? new IMGentError("TASK_RETRY_EXHAUSTED").descriptor
+        : canonical;
+    await this.finishWithError(task, finalDescriptor, "failed");
+  }
+
+  private async finishWithError(
+    task: StoredTask,
+    descriptor: ErrorDescriptor,
+    status: Extract<TaskStatus, "failed" | "dead_letter">,
+  ): Promise<void> {
+    this.options.store.transitionTask(
+      task.id,
+      ["active", "waiting_approval", "retry_wait"],
+      status,
+      { error: descriptor },
+    );
+    await this.reply(
+      task,
+      renderErrorText(descriptor, this.locale(task)),
+      `error:${descriptor.code}`,
+    );
+  }
 }

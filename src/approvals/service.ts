@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { IMGentError } from "@imgent/contracts";
 import type { IMGentStore } from "../storage/store.js";
-import type { AgentRequestAnswer, ApprovalRequest } from "@imgent/contracts";
+import type { AgentRequestAnswer, ApprovalRequest, OutboundMessage } from "@imgent/contracts";
 
 function now(): string {
   return new Date().toISOString();
@@ -23,6 +24,7 @@ export class ApprovalService {
     conversationKey: string,
     principalId: string,
     request: ApprovalRequest,
+    outbound?: OutboundMessage,
   ): void {
     this.store.transaction(() => {
       this.store.run(
@@ -43,6 +45,7 @@ export class ApprovalService {
         request.expiresAt,
       );
       this.store.transitionTask(taskId, ["active"], "waiting_approval");
+      if (outbound) this.store.enqueueOutbound(outbound, taskId);
     });
   }
 
@@ -65,12 +68,12 @@ export class ApprovalService {
          FROM approvals WHERE request_id = ?`,
         requestId,
       );
-      if (!approval) throw new Error("审批请求不存在");
+      if (!approval) throw new IMGentError("APPROVAL_NOT_FOUND");
       if (approval.principal_id !== principalId) {
-        throw new Error("审批只能由原请求对应的 Principal 完成");
+        throw new IMGentError("APPROVAL_FORBIDDEN");
       }
       if (conversationKey && approval.conversation_key !== conversationKey) {
-        throw new Error("审批只能在原会话中完成");
+        throw new IMGentError("APPROVAL_FORBIDDEN");
       }
       if (approval.status !== "pending") {
         return {
@@ -95,8 +98,7 @@ export class ApprovalService {
       );
       if (status === "expired") {
         this.store.transitionTask(approval.task_id, ["waiting_approval"], "failed", {
-          errorCode: "APPROVAL_EXPIRED",
-          errorMessage: "审批已过期",
+          error: new IMGentError("APPROVAL_EXPIRED").descriptor,
         });
       } else {
         this.store.transitionTask(approval.task_id, ["waiting_approval"], "active");
@@ -125,8 +127,7 @@ export class ApprovalService {
           approval.request_id,
         );
         this.store.transitionTask(approval.task_id, ["waiting_approval"], "failed", {
-          errorCode: "APPROVAL_EXPIRED",
-          errorMessage: "审批已过期",
+          error: new IMGentError("APPROVAL_EXPIRED").descriptor,
         });
       }
       return pending.length;

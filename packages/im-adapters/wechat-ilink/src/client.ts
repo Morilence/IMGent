@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { IMGentError, normalizeError } from "@imgent/contracts";
 import { attachmentToWechatItem, type WechatHttpClient } from "./media.js";
 import { normalizeWechatMessage, WechatCompatibilityError } from "./normalize.js";
 import {
@@ -9,6 +10,7 @@ import {
 } from "./protocol.js";
 import type {
   AdapterReadiness,
+  ErrorDescriptor,
   ImAdapter,
   InboundMessage,
   OutboundMessage,
@@ -36,8 +38,6 @@ export interface WechatIlinkAdapterOptions {
   onSessionInvalid?: (message: string) => Promise<void>;
   onCheckpoint?: (checkpoint: { key: string; value: string }) => Promise<void>;
 }
-
-class SessionInvalidError extends Error {}
 
 function delay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -73,6 +73,7 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
   private abort?: AbortController;
   private runPromise: Promise<void> | undefined;
   private sentKeys = new Map<string, SendResult>();
+  private blockedIssue: ErrorDescriptor | undefined;
 
   constructor(private readonly options: WechatIlinkAdapterOptions) {
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -80,12 +81,15 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
   }
 
   async checkReady(): Promise<AdapterReadiness> {
-    const details: string[] = [];
-    if (!this.options.platformBotId) details.push("微信 ilink_bot_id 缺失");
-    if (!this.options.authorizingPlatformUserId) {
-      details.push("微信授权扫码者 ilink_user_id 缺失");
+    const issues: ErrorDescriptor[] = [];
+    if (
+      !this.options.platformBotId ||
+      !this.options.authorizingPlatformUserId ||
+      !this.options.credential.botToken
+    ) {
+      issues.push(new IMGentError("ADAPTER_AUTH_REQUIRED").descriptor);
     }
-    if (!this.options.credential.botToken) details.push("微信 bot token 缺失");
+    if (this.blockedIssue) issues.push(this.blockedIssue);
     try {
       await this.post(
         "ilink/bot/getconfig",
@@ -95,9 +99,9 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
         10_000,
       );
     } catch (error) {
-      details.push(`微信认证检查失败: ${errorMessage(error)}`);
+      issues.push(normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor);
     }
-    return { ready: details.length === 0, details };
+    return { ready: issues.length === 0, issues };
   }
 
   async start(
@@ -130,15 +134,24 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
           signal,
         );
         if (response.errcode === -14) {
+          const invalidSession = new IMGentError("ADAPTER_SESSION_INVALID", {
+            diagnostic: { platform: "wechat-ilink", errcode: response.errcode },
+          });
+          this.blockedIssue = invalidSession.descriptor;
           await this.options.onSessionInvalid?.(
             response.errmsg ?? "微信 iLink session 已失效，请重新扫码授权",
           );
-          throw new SessionInvalidError(response.errmsg ?? "微信 session 失效");
+          throw invalidSession;
         }
         if (response.ret && response.ret !== 0) {
-          throw new Error(
-            `微信 getupdates 失败: ret=${response.ret} errcode=${response.errcode ?? ""}`,
-          );
+          throw new IMGentError("ADAPTER_REQUEST_REJECTED", {
+            diagnostic: {
+              platform: "wechat-ilink",
+              operation: "getupdates",
+              ret: response.ret,
+              errcode: response.errcode,
+            },
+          });
         }
         timeoutMs = Math.max(5_000, Math.min(response.longpolling_timeout_ms ?? 35_000, 120_000));
         const messages = response.msgs ?? [];
@@ -175,10 +188,18 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
         attempt = 0;
       } catch (error) {
         if (signal.aborted) return;
-        if (error instanceof SessionInvalidError) return;
+        const normalized = normalizeError(error, "ADAPTER_CONNECTION_FAILED");
+        if (normalized.descriptor.retry.strategy !== "backoff") {
+          this.blockedIssue = normalized.descriptor;
+          return;
+        }
         attempt += 1;
         try {
-          await delay(Math.min(30_000, 500 * 2 ** Math.min(attempt, 6)), signal);
+          await delay(
+            normalized.descriptor.retry.retryAfterMs ??
+              Math.min(30_000, 500 * 2 ** Math.min(attempt, 6)),
+            signal,
+          );
         } catch {
           if (signal.aborted) return;
           throw error;
@@ -198,13 +219,17 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
     if (existing) return existing;
     const contextToken = message.replyContext?.opaque.contextToken;
     if (typeof contextToken !== "string" || !contextToken) {
-      throw new Error("微信回复缺少有效 context_token，不能伪装主动发送");
+      throw new IMGentError("ADAPTER_REPLY_CONTEXT_INVALID", {
+        diagnostic: { platform: "wechat-ilink", reason: "missing context token" },
+      });
     }
     if (
       message.replyContext?.expiresAt &&
       message.replyContext.expiresAt <= new Date().toISOString()
     ) {
-      throw new Error("微信 replyContext 已过期");
+      throw new IMGentError("ADAPTER_REPLY_CONTEXT_INVALID", {
+        diagnostic: { platform: "wechat-ilink", reason: "expired context" },
+      });
     }
     const items: MessageItem[] = [];
     for (const part of message.parts) {
@@ -237,7 +262,11 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
         });
       }
     }
-    if (items.length === 0) throw new Error("微信出站消息没有可发送内容");
+    if (items.length === 0) {
+      throw new IMGentError("ADAPTER_REQUEST_REJECTED", {
+        diagnostic: { platform: "wechat-ilink", reason: "empty outbound message" },
+      });
+    }
     const clientId = `imgent-${randomUUID()}`;
     const raw: WechatMessage = {
       from_user_id: "",
@@ -261,7 +290,10 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
     signal?: AbortSignal,
   ): Promise<T> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error("request timeout")), timeoutMs);
+    const timer = setTimeout(
+      () => controller.abort(new IMGentError("ADAPTER_REQUEST_TIMEOUT")),
+      timeoutMs,
+    );
     const abort = () => controller.abort(signal?.reason);
     signal?.addEventListener("abort", abort, { once: true });
     try {
@@ -287,11 +319,17 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
         },
       );
       if (!response.ok) {
-        throw new Error(`微信 API ${path} 失败: HTTP ${response.status}`);
+        throw platformHttpError(response, path);
       }
       const result = (await response.json()) as T & { ret?: number; errmsg?: string };
       if (path.endsWith("sendmessage") && result.ret && result.ret !== 0) {
-        throw new Error(`微信 sendmessage 失败: ret=${result.ret} ${result.errmsg ?? ""}`);
+        throw new IMGentError("ADAPTER_REQUEST_REJECTED", {
+          diagnostic: {
+            platform: "wechat-ilink",
+            operation: "sendmessage",
+            ret: result.ret,
+          },
+        });
       }
       return result;
     } finally {
@@ -301,6 +339,29 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function platformHttpError(response: Response, operation: string): IMGentError {
+  const diagnostic = { platform: "wechat-ilink", operation, status: response.status };
+  if (response.status === 401) return new IMGentError("ADAPTER_AUTH_REQUIRED", { diagnostic });
+  if (response.status === 403) return new IMGentError("ADAPTER_PERMISSION_DENIED", { diagnostic });
+  if (response.status === 429) {
+    const value = response.headers.get("retry-after");
+    const seconds = value ? Number(value) : Number.NaN;
+    const date = value ? Date.parse(value) : Number.NaN;
+    const retryAfterMs = Number.isFinite(seconds)
+      ? Math.max(0, seconds * 1_000)
+      : Number.isFinite(date)
+        ? Math.max(0, date - Date.now())
+        : undefined;
+    return new IMGentError("ADAPTER_RATE_LIMITED", {
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs: Math.min(300_000, retryAfterMs) }),
+      diagnostic,
+    });
+  }
+  if (response.status === 408) {
+    return new IMGentError("ADAPTER_REQUEST_TIMEOUT", { diagnostic });
+  }
+  if (response.status >= 500) {
+    return new IMGentError("ADAPTER_SERVICE_UNAVAILABLE", { diagnostic });
+  }
+  return new IMGentError("ADAPTER_REQUEST_REJECTED", { diagnostic });
 }

@@ -1,4 +1,5 @@
-import { textOf } from "@imgent/contracts";
+import { normalizeError, textOf } from "@imgent/contracts";
+import { Logger } from "../runtime/logger.js";
 import { CURATION_SKILL, type SkillRegistry } from "../skills/registry.js";
 import type { MemoryContext, MemoryService } from "./service.js";
 import type { IMGentHostTools } from "../runtime/host-tools.js";
@@ -23,16 +24,21 @@ export interface MemoryCuratorOptions {
 export class MemoryCurator {
   private timer: NodeJS.Timeout | undefined;
   private running = false;
+  private readonly logger = new Logger("memory-curator");
 
   constructor(private readonly options: MemoryCuratorOptions) {}
 
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.processOnce();
+      void this.processOnce().catch((error: unknown) => {
+        this.logger.errorFrom("curation.unhandled", error);
+      });
     }, 1_000);
     this.timer.unref();
-    void this.processOnce();
+    void this.processOnce().catch((error: unknown) => {
+      this.logger.errorFrom("curation.unhandled", error);
+    });
   }
 
   async processOnce(): Promise<boolean> {
@@ -46,7 +52,7 @@ export class MemoryCurator {
           attempt: number;
         }>(
           `SELECT id, task_id, attempt FROM memory_outbox
-           WHERE status IN ('pending', 'failed') AND attempt < 3
+           WHERE status IN ('pending', 'retry_wait') AND attempt < 3
              AND next_attempt_at <= ?
            ORDER BY created_at LIMIT 1`,
           now(),
@@ -65,23 +71,36 @@ export class MemoryCurator {
         await this.curate(row.id, row.task_id);
         this.options.store.run(
           `UPDATE memory_outbox SET status = 'succeeded',
-             error_message = NULL, updated_at = ? WHERE id = ?`,
+             last_error_json = NULL, updated_at = ? WHERE id = ?`,
           now(),
           row.id,
         );
       } catch (error) {
         const attempts = row.attempt + 1;
+        const normalized = normalizeError(error, "MEMORY_CURATION_FAILED", {
+          diagnostic: { taskId: row.task_id, outboxId: row.id },
+        });
         const retryAt = new Date(
           Date.now() + Math.min(60_000, 1_000 * 2 ** attempts),
         ).toISOString();
         this.options.store.run(
-          `UPDATE memory_outbox SET status = 'failed', error_message = ?,
+          `UPDATE memory_outbox SET status = ?, last_error_json = ?,
              next_attempt_at = ?, updated_at = ? WHERE id = ?`,
-          error instanceof Error ? error.message : String(error),
+          attempts >= 3 ? "dead_letter" : "retry_wait",
+          JSON.stringify(normalized.descriptor),
           retryAt,
           now(),
           row.id,
         );
+        if (attempts >= 3) {
+          this.options.store.addDeadLetter(
+            "memory.curation",
+            normalized,
+            { attempt: attempts },
+            taskBotInstance(this.options.store, row.task_id),
+            row.id,
+          );
+        }
       }
       return true;
     } finally {
@@ -145,7 +164,7 @@ export class MemoryCurator {
         builtInTools: "none",
       })) {
         if (event.type === "completed") completed = event.result === "success";
-        if (event.type === "error") throw new Error(event.message);
+        if (event.type === "error") throw event.error;
         if (event.type === "approval-request" || event.type === "question") {
           throw new Error("后台策展不得请求审批或用户输入");
         }
@@ -163,6 +182,10 @@ export class MemoryCurator {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
   }
+}
+
+function taskBotInstance(store: IMGentStore, taskId: string): string | undefined {
+  return store.task(taskId)?.message.botInstanceId;
 }
 
 function curationPrompt(

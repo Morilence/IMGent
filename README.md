@@ -108,6 +108,8 @@ imgent group authorize <conversation-space-id> \
 
 ```bash
 imgent status
+imgent --locale en-US doctor
+imgent --json status
 imgent backup --output ./state.backup
 imgent restore ./state.backup \
   --config ./restored.json \
@@ -124,7 +126,14 @@ imgent restore ./state.backup \
 /imgent answer <requestId> <内容>
 /imgent group full
 /imgent group triggered
+/imgent language zh-CN
+/imgent language en-US
 ```
+
+错误由稳定 `ErrorCode` 驱动。CLI 默认显示本地化的安全原因和恢复动作；
+`--json` 返回稳定 envelope，不包含 cause、stack、本机路径或原始平台响应。
+CLI locale 顺序为 `--locale`、系统 locale、配置默认值、`zh-CN`；IM 使用
+Principal、BotInstance、全局默认值、`zh-CN` 的顺序。
 
 ## 开发与验证
 

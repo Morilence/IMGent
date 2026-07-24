@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { IMGentStore } from "../storage/store.js";
-import type { ActorRole } from "@imgent/contracts";
+import type { ActorRole, SupportedLocale } from "@imgent/contracts";
 
 function now(): string {
   return new Date().toISOString();
@@ -16,6 +16,22 @@ function shortCode(): string {
 
 export class IdentityService {
   constructor(private readonly store: IMGentStore) {}
+
+  locale(principalId: string): SupportedLocale | undefined {
+    return (
+      this.store.get<{ locale: SupportedLocale | null }>(
+        "SELECT locale FROM principals WHERE id = ?",
+        principalId,
+      )?.locale ?? undefined
+    );
+  }
+
+  setLocale(principalId: string, locale: SupportedLocale): void {
+    const changed = this.store.database
+      .prepare("UPDATE principals SET locale = ? WHERE id = ?")
+      .run(locale, principalId).changes;
+    if (changed !== 1) throw new Error("Principal 不存在");
+  }
 
   isPaired(platformIdentityId: string): boolean {
     return (
@@ -185,6 +201,23 @@ export class IdentityService {
   }
 
   private mergePrincipal(fromPrincipalId: string, toPrincipalId: string): void {
+    const locales = this.store.get<{
+      from_locale: SupportedLocale | null;
+      to_locale: SupportedLocale | null;
+    }>(
+      `SELECT source.locale AS from_locale, target.locale AS to_locale
+       FROM principals source, principals target
+       WHERE source.id = ? AND target.id = ?`,
+      fromPrincipalId,
+      toPrincipalId,
+    );
+    if (locales?.to_locale === null && locales.from_locale) {
+      this.store.run(
+        "UPDATE principals SET locale = ? WHERE id = ?",
+        locales.from_locale,
+        toPrincipalId,
+      );
+    }
     const activeFacts = this.store.all<{
       id: string;
       agent_profile_id: string;

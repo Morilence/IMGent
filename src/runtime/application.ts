@@ -1,12 +1,13 @@
 import { join } from "node:path";
 import { QqAdapter, type QqCredential } from "@imgent/adapter-qq";
 import { WechatIlinkAdapter, type WechatCredential } from "@imgent/adapter-wechat-ilink";
-import { conversationKey, textOf } from "@imgent/contracts";
+import { conversationKey, IMGentError, normalizeError, textOf } from "@imgent/contracts";
 import { ClaudeCodeDriver } from "@imgent/driver-claude-code";
 import { CodexDriver } from "@imgent/driver-codex";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ApprovalService } from "../approvals/service.js";
 import { loadConfig } from "../config/index.js";
+import { renderError, renderErrorText, resolveLocale } from "../i18n/index.js";
 import { IdentityService } from "../identity/service.js";
 import { MemoryCurator } from "../memory/curator.js";
 import { MemoryHostTools } from "../memory/host-tools.js";
@@ -22,20 +23,22 @@ import { Logger } from "./logger.js";
 import { OutboundDispatcher } from "./outbound.js";
 import type {
   AgentDriver,
+  ErrorDescriptor,
   IMGentConfig,
   AgentProfile,
   ImAdapter,
   InboundMessage,
   OutboundMessage,
+  SupportedLocale,
 } from "@imgent/contracts";
 
 const WECHAT_BASE_URL = "https://ilinkai.weixin.qq.com";
 
 export interface ReadinessReport {
   ready: boolean;
-  details: string[];
-  bots: Record<string, { ready: boolean; details: string[] }>;
-  profiles: Record<string, { ready: boolean; details: string[] }>;
+  issues: ErrorDescriptor[];
+  bots: Record<string, { ready: boolean; issues: ErrorDescriptor[] }>;
+  profiles: Record<string, { ready: boolean; version?: string; issues: ErrorDescriptor[] }>;
 }
 
 export class IMGentApplication {
@@ -96,6 +99,7 @@ export class IMGentApplication {
       hostTools: this.hostTools,
       skills: this.skills,
       outbound: this.outbound,
+      localeFor: (principalId, botInstanceId) => this.localeFor(principalId, botInstanceId),
     });
   }
 
@@ -143,13 +147,17 @@ export class IMGentApplication {
       if (bot.adapter === "qq") {
         const credential = await this.credentials.get<QqCredential>(bot.credentialRef);
         if (!credential?.appSecret) {
-          throw new Error(`QQ BotInstance ${bot.id} 缺少本地 AppSecret 凭据`);
+          throw new IMGentError("ADAPTER_AUTH_REQUIRED", {
+            diagnostic: { botInstanceId: bot.id, credential: "appSecret" },
+          });
         }
         const appId =
           bot.platformBotId ??
           (bot.platformBotIdEnv ? process.env[bot.platformBotIdEnv] : undefined);
         if (!appId) {
-          throw new Error(`QQ BotInstance ${bot.id} 无法解析 AppID`);
+          throw new IMGentError("CONFIG_FILE_INVALID", {
+            diagnostic: { botInstanceId: bot.id, setting: "platformBotId" },
+          });
         }
         const resume = parseQqResume(this.store.checkpoint(bot.id, "gateway_resume"));
         const fullGroupEventPermission = Boolean(
@@ -175,8 +183,8 @@ export class IMGentApplication {
               this.store.transaction(() => {
                 this.store.addDeadLetter(
                   "qq.compatibility",
+                  new IMGentError("ADAPTER_COMPATIBILITY_ERROR"),
                   {
-                    message: error.message,
                     opcode: payload.op,
                     eventType: error.eventType ?? payload.t,
                   },
@@ -190,7 +198,9 @@ export class IMGentApplication {
       } else {
         const credential = await this.credentials.get<WechatCredential>(bot.credentialRef);
         if (!credential?.botToken || !bot.platformBotId) {
-          throw new Error(`微信 BotInstance ${bot.id} 尚未完成 QR 授权或缺少本地凭据`);
+          throw new IMGentError("ADAPTER_AUTH_REQUIRED", {
+            diagnostic: { botInstanceId: bot.id, credential: "wechat authorization" },
+          });
         }
         const cursor = this.store.checkpoint(bot.id, "get_updates_buf");
         this.adapters.set(
@@ -210,8 +220,8 @@ export class IMGentApplication {
               this.store.transaction(() => {
                 this.store.addDeadLetter(
                   "wechat-ilink.compatibility",
+                  new IMGentError("ADAPTER_COMPATIBILITY_ERROR"),
                   {
-                    message: error.message,
                     diagnostic: error.diagnostic,
                   },
                   bot.id,
@@ -220,10 +230,12 @@ export class IMGentApplication {
               });
             },
             onSessionInvalid: async (message) => {
-              this.store.addDeadLetter("wechat-ilink.session-invalid", { message }, bot.id);
-              this.logger.error("wechat.session-invalid", {
+              const error = new IMGentError("ADAPTER_SESSION_INVALID", {
+                diagnostic: { platform: "wechat-ilink", vendorMessage: message },
+              });
+              this.store.addDeadLetter("wechat-ilink.session-invalid", error, {}, bot.id);
+              this.logger.errorFrom("wechat.session-invalid", error, {
                 botInstanceId: bot.id,
-                message,
               });
             },
             onCheckpoint: async (checkpoint) => {
@@ -238,7 +250,7 @@ export class IMGentApplication {
   }
 
   async checkReady(): Promise<ReadinessReport> {
-    const details: string[] = [];
+    const issues: ErrorDescriptor[] = [];
     const bots: ReadinessReport["bots"] = {};
     const profiles: ReadinessReport["profiles"] = {};
     try {
@@ -246,23 +258,37 @@ export class IMGentApplication {
       this.store.database.exec("CREATE TEMP TABLE IF NOT EXISTS readiness_probe(value INTEGER)");
       this.store.database.exec("DELETE FROM readiness_probe");
     } catch (error) {
-      details.push(`SQLite 不可写: ${errorMessage(error)}`);
+      issues.push(normalizeError(error, "STORAGE_UNAVAILABLE").descriptor);
     }
     await Promise.all(
       [...this.drivers.entries()].map(async ([profileId, driver]) => {
         const profile = this.profiles.get(profileId);
         if (!profile) return;
-        const result = await driver.checkReady(profile);
-        profiles[profileId] = {
-          ready: result.ready,
-          details: result.details,
-        };
+        try {
+          const result = await driver.checkReady(profile);
+          profiles[profileId] = {
+            ready: result.ready,
+            ...(result.version ? { version: result.version } : {}),
+            issues: result.issues,
+          };
+        } catch (error) {
+          profiles[profileId] = {
+            ready: false,
+            issues: [normalizeError(error, "AGENT_UNAVAILABLE").descriptor],
+          };
+        }
       }),
     );
     await Promise.all(
       [...this.adapters.entries()].map(async ([botId, adapter]) => {
-        const result = await adapter.checkReady();
-        bots[botId] = result;
+        try {
+          bots[botId] = await adapter.checkReady();
+        } catch (error) {
+          bots[botId] = {
+            ready: false,
+            issues: [normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor],
+          };
+        }
       }),
     );
     const readyRoute = this.config.routes.some((route) => {
@@ -274,11 +300,11 @@ export class IMGentApplication {
       );
     });
     if (!readyRoute) {
-      details.push("没有同时 ready 的启用 BotInstance 与 AgentProfile 路由");
+      issues.push(new IMGentError("PROFILE_OR_DRIVER_MISSING").descriptor);
     }
     return {
-      ready: details.length === 0,
-      details,
+      ready: issues.length === 0,
+      issues,
       bots,
       profiles,
     };
@@ -289,7 +315,7 @@ export class IMGentApplication {
     if (!options.skipReadiness) {
       const readiness = await this.checkReady();
       if (!readiness.ready) {
-        throw new Error(`readiness 失败: ${readiness.details.join("; ")}`);
+        throw readiness.issues[0] ?? new IMGentError("INTERNAL_UNEXPECTED_ERROR");
       }
     }
     this.scheduler.start();
@@ -298,7 +324,9 @@ export class IMGentApplication {
     this.maintenanceTimer = setInterval(() => {
       this.approvals.expirePending();
       this.store.cleanupExpiredRawEvents();
-      void this.outbound.drain(this.adapters);
+      void this.outbound.drain(this.adapters).catch((error: unknown) => {
+        this.logger.errorFrom("outbound.drain-failed", error);
+      });
     }, 60_000);
     this.maintenanceTimer.unref();
     for (const [botId, adapter] of this.adapters) {
@@ -312,10 +340,19 @@ export class IMGentApplication {
       status: "ok",
       started: this.started,
     }));
-    this.server.get("/readyz", async (_request, reply) => {
+    this.server.get("/readyz", async (request, reply) => {
       const readiness = await this.checkReady();
       if (!readiness.ready) reply.code(503);
-      return readiness;
+      const locale = resolveLocale(
+        [
+          typeof request.headers["accept-language"] === "string"
+            ? request.headers["accept-language"]
+            : undefined,
+          this.config.defaultLocale,
+        ],
+        this.config.defaultLocale,
+      );
+      return renderReadiness(readiness, locale);
     });
     await this.server.listen(this.config.server);
     this.started = true;
@@ -350,6 +387,7 @@ export class IMGentApplication {
     if (!profileId) {
       this.store.addDeadLetter(
         "routing.missing",
+        new IMGentError("PROFILE_OR_DRIVER_MISSING"),
         { platform: message.platform },
         message.botInstanceId,
         message.messageId,
@@ -426,7 +464,8 @@ export class IMGentApplication {
     if (message.conversation.kind === "direct") {
       if (
         !this.identity.isPaired(ingested.platformIdentityId) &&
-        command?.name !== "bind-consume"
+        command?.name !== "bind-consume" &&
+        command?.name !== "language"
       ) {
         const code = this.identity.createPairingCode(ingested.platformIdentityId);
         await this.immediateReply(
@@ -469,7 +508,7 @@ export class IMGentApplication {
       this.store.get<{ count: number }>(
         `SELECT count(*) AS count FROM tasks
        WHERE conversation_key = ? AND id <> ?
-         AND status IN ('queued', 'active', 'waiting_approval')`,
+         AND status IN ('queued', 'active', 'retry_wait', 'waiting_approval')`,
         key,
         taskId,
       )?.count ?? 0;
@@ -492,6 +531,7 @@ export class IMGentApplication {
     eventId: string,
   ): Promise<void> {
     let response: string;
+    let responseLocale = this.localeFor(principalId, message.botInstanceId);
     try {
       switch (command.name) {
         case "cancel": {
@@ -552,6 +592,18 @@ export class IMGentApplication {
               : "已恢复 triggered 模式：新的普通群消息不再持久化，只有触发消息会运行 Agent。";
           break;
         }
+        case "language": {
+          if (command.locale !== "zh-CN" && command.locale !== "en-US") {
+            throw new IMGentError("LANGUAGE_UNSUPPORTED");
+          }
+          this.identity.setLocale(principalId, command.locale);
+          responseLocale = command.locale;
+          response =
+            command.locale === "zh-CN"
+              ? "错误与诊断信息将使用简体中文。"
+              : "Errors and diagnostics will use English.";
+          break;
+        }
         case "help":
           response = [
             "/imgent cancel",
@@ -560,11 +612,15 @@ export class IMGentApplication {
             "/imgent deny <requestId>",
             "/imgent answer <requestId> <内容>",
             "/imgent group full|triggered",
+            "/imgent language zh-CN|en-US",
           ].join("\n");
           break;
       }
     } catch (error) {
-      response = `操作失败：${errorMessage(error)}`;
+      response = renderErrorText(
+        normalizeError(error, "IDENTITY_OPERATION_REJECTED").descriptor,
+        responseLocale,
+      );
     }
     await this.immediateReply(message, response, `command:${eventId}`);
   }
@@ -574,8 +630,6 @@ export class IMGentApplication {
     text: string,
     idempotencyKey: string,
   ): Promise<void> {
-    const adapter = this.adapters.get(inbound.botInstanceId);
-    if (!adapter) throw new Error("BotInstance adapter 不存在");
     const outbound: OutboundMessage = {
       botInstanceId: inbound.botInstanceId,
       conversation: inbound.conversation,
@@ -584,7 +638,16 @@ export class IMGentApplication {
       ...(inbound.replyContext ? { replyContext: inbound.replyContext } : {}),
       idempotencyKey,
     };
-    await this.outbound.send(adapter, outbound);
+    this.outbound.enqueue(outbound);
+    void this.outbound.drain(this.adapters);
+  }
+
+  private localeFor(principalId: string, botInstanceId: string): SupportedLocale {
+    return (
+      this.identity.locale(principalId) ??
+      this.config.bots.find((bot) => bot.id === botInstanceId)?.locale ??
+      this.config.defaultLocale
+    );
   }
 }
 
@@ -595,6 +658,7 @@ export type IMGentCommand =
   | { name: "bind-create" }
   | { name: "bind-consume"; code: string }
   | { name: "group-mode"; mode: "triggered" | "full" }
+  | { name: "language"; locale: string }
   | { name: "help" };
 
 export function parseIMGentCommand(text: string): IMGentCommand | undefined {
@@ -621,7 +685,33 @@ export function parseIMGentCommand(text: string): IMGentCommand | undefined {
   if (action === "group" && (parts[2] === "full" || parts[2] === "triggered")) {
     return { name: "group-mode", mode: parts[2] };
   }
+  if (action === "language") {
+    return { name: "language", locale: parts[2] ?? "" };
+  }
   return { name: "help" };
+}
+
+export function renderReadiness(report: ReadinessReport, locale: SupportedLocale): unknown {
+  const renderComponent = (component: {
+    ready: boolean;
+    version?: string;
+    issues: ErrorDescriptor[];
+  }) => ({
+    ready: component.ready,
+    ...(component.version ? { version: component.version } : {}),
+    issues: component.issues.map((issue) => renderError(issue, locale)),
+  });
+  return {
+    ready: report.ready,
+    locale,
+    issues: report.issues.map((issue) => renderError(issue, locale)),
+    bots: Object.fromEntries(
+      Object.entries(report.bots).map(([id, component]) => [id, renderComponent(component)]),
+    ),
+    profiles: Object.fromEntries(
+      Object.entries(report.profiles).map(([id, component]) => [id, renderComponent(component)]),
+    ),
+  };
 }
 
 function parseQqResume(
@@ -636,8 +726,4 @@ function parseQqResume(
   } catch {
     return undefined;
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

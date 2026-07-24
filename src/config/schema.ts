@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const supportedLocaleSchema = z.enum(["zh-CN", "en-US"]);
+
 const id = z
   .string()
   .min(1)
@@ -62,6 +64,7 @@ const qqBotSchema = z
     platformBotId: z.string().min(1).optional(),
     platformBotIdEnv: z.string().min(1).optional(),
     credentialRef: id,
+    locale: supportedLocaleSchema.optional(),
     groupIngestionDefault: z.literal("triggered").default("triggered"),
     enabled: z.boolean().default(true),
   })
@@ -80,6 +83,7 @@ const wechatBotSchema = z
     id,
     adapter: z.literal("wechat-ilink"),
     credentialRef: id,
+    locale: supportedLocaleSchema.optional(),
     platformBotId: z.string().min(1).optional(),
     authorizingPlatformUserId: z.string().min(1).optional(),
     baseUrl: z.string().url().optional(),
@@ -92,6 +96,7 @@ export const botSchema = z.discriminatedUnion("adapter", [qqBotSchema, wechatBot
 export const configSchema = z
   .object({
     version: z.literal(1),
+    defaultLocale: supportedLocaleSchema.default("zh-CN"),
     dataDir: z.string().min(1).default("./data"),
     server: z
       .object({

@@ -1,3 +1,4 @@
+import { IMGentError, normalizeError } from "@imgent/contracts";
 import WebSocket from "ws";
 import { normalizeQqDispatch, QqCompatibilityError } from "./normalize.js";
 import {
@@ -8,6 +9,7 @@ import {
 } from "./protocol.js";
 import type {
   AdapterReadiness,
+  ErrorDescriptor,
   ImAdapter,
   InboundMessage,
   OutboundMessage,
@@ -75,6 +77,39 @@ function textParts(message: OutboundMessage): string {
     .join("\n");
 }
 
+function retryAfterMs(response: Response): number | undefined {
+  const value = response.headers.get("retry-after");
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.min(300_000, Math.max(0, seconds * 1_000));
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.min(300_000, Math.max(0, date - Date.now())) : undefined;
+}
+
+function platformHttpError(platform: string, response: Response, operation: string): IMGentError {
+  const diagnostic = { platform, operation, status: response.status };
+  if (response.status === 401) {
+    return new IMGentError("ADAPTER_AUTH_REQUIRED", { diagnostic });
+  }
+  if (response.status === 403) {
+    return new IMGentError("ADAPTER_PERMISSION_DENIED", { diagnostic });
+  }
+  if (response.status === 429) {
+    const retry = retryAfterMs(response);
+    return new IMGentError("ADAPTER_RATE_LIMITED", {
+      ...(retry === undefined ? {} : { retryAfterMs: retry }),
+      diagnostic,
+    });
+  }
+  if (response.status === 408) {
+    return new IMGentError("ADAPTER_REQUEST_TIMEOUT", { diagnostic });
+  }
+  if (response.status >= 500) {
+    return new IMGentError("ADAPTER_SERVICE_UNAVAILABLE", { diagnostic });
+  }
+  return new IMGentError("ADAPTER_REQUEST_REJECTED", { diagnostic });
+}
+
 export class QqAdapter implements ImAdapter {
   readonly id = "qq" as const;
   readonly capabilities: PlatformCapabilities = {
@@ -100,6 +135,7 @@ export class QqAdapter implements ImAdapter {
   private msgSequences = new Map<string, number>();
   private runPromise: Promise<void> | undefined;
   private fullGroupEventPermission: boolean;
+  private blockedIssue: ErrorDescriptor | undefined;
 
   constructor(private readonly options: QqAdapterOptions) {
     this.fetch = options.fetch ?? globalThis.fetch;
@@ -114,24 +150,40 @@ export class QqAdapter implements ImAdapter {
   }
 
   async checkReady(): Promise<AdapterReadiness> {
-    const details: string[] = [];
-    if (!this.options.appId) details.push("QQ AppID 缺失");
-    if (!this.options.credential.appSecret) details.push("QQ AppSecret 缺失");
+    const issues: ErrorDescriptor[] = [];
+    if (!this.options.appId || !this.options.credential.appSecret) {
+      issues.push(new IMGentError("ADAPTER_AUTH_REQUIRED").descriptor);
+    }
+    if (this.blockedIssue) issues.push(this.blockedIssue);
     try {
       const token = await this.token();
       const gateway = await this.gateway(token);
       if (!gateway.url.startsWith("wss://") && !gateway.url.startsWith("ws://")) {
-        details.push("QQ Gateway 返回了无效 WebSocket URL");
+        issues.push(
+          new IMGentError("ADAPTER_COMPATIBILITY_ERROR", {
+            diagnostic: { platform: "qq", reason: "invalid gateway URL" },
+          }).descriptor,
+        );
       }
     } catch (error) {
-      details.push(`QQ 鉴权或 Gateway 检查失败: ${errorMessage(error)}`);
+      issues.push(normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor);
     }
     if (!this.fullGroupEventPermission) {
-      details.push("未验证全量群消息事件权限；full 模式不可用");
+      issues.push(
+        new IMGentError("ADAPTER_PERMISSION_DENIED", {
+          diagnostic: { platform: "qq", capability: "full-group-events", optional: true },
+        }).descriptor,
+      );
     }
     return {
-      ready: details.every((detail) => detail.startsWith("未验证")),
-      details,
+      ready: issues.every(
+        (issue) =>
+          issue.code === "ADAPTER_PERMISSION_DENIED" &&
+          !this.blockedIssue &&
+          Boolean(this.options.appId) &&
+          Boolean(this.options.credential.appSecret),
+      ),
+      issues,
     };
   }
 
@@ -162,9 +214,18 @@ export class QqAdapter implements ImAdapter {
         attempt = 0;
       } catch (error) {
         if (signal.aborted) break;
+        const normalized = normalizeError(error, "ADAPTER_CONNECTION_FAILED");
+        if (normalized.descriptor.retry.strategy !== "backoff") {
+          this.blockedIssue = normalized.descriptor;
+          break;
+        }
         attempt += 1;
         try {
-          await delay(Math.min(30_000, 500 * 2 ** Math.min(attempt, 6)), signal);
+          await delay(
+            normalized.descriptor.retry.retryAfterMs ??
+              Math.min(30_000, 500 * 2 ** Math.min(attempt, 6)),
+            signal,
+          );
         } catch {
           if (signal.aborted) break;
           throw error;
@@ -198,8 +259,27 @@ export class QqAdapter implements ImAdapter {
       socket.once("close", (code) => {
         signal.removeEventListener("abort", onAbort);
         this.clearHeartbeat();
-        if (signal.aborted || code === 1000) resolve();
-        else reject(new Error(`QQ Gateway 断开: ${code}`));
+        if (signal.aborted || code === 1000) {
+          resolve();
+        } else if (code === 4004) {
+          reject(
+            new IMGentError("ADAPTER_AUTH_REQUIRED", {
+              diagnostic: { platform: "qq", closeCode: code },
+            }),
+          );
+        } else if (code === 4013 || code === 4014) {
+          reject(
+            new IMGentError("ADAPTER_PERMISSION_DENIED", {
+              diagnostic: { platform: "qq", closeCode: code },
+            }),
+          );
+        } else {
+          reject(
+            new IMGentError("ADAPTER_CONNECTION_FAILED", {
+              diagnostic: { platform: "qq", closeCode: code },
+            }),
+          );
+        }
       });
     });
   }
@@ -216,7 +296,9 @@ export class QqAdapter implements ImAdapter {
       case QqOpcode.HELLO: {
         const interval = Number((payload.d as { heartbeat_interval?: number }).heartbeat_interval);
         if (!Number.isFinite(interval) || interval < 1_000) {
-          throw new Error("QQ Gateway Hello 缺少有效 heartbeat_interval");
+          throw new IMGentError("ADAPTER_COMPATIBILITY_ERROR", {
+            diagnostic: { platform: "qq", event: "hello", reason: "heartbeat interval" },
+          });
         }
         this.startHeartbeat(interval);
         if (this.sessionId && this.sequence !== undefined) {
@@ -247,7 +329,11 @@ export class QqAdapter implements ImAdapter {
       case QqOpcode.DISPATCH: {
         if (payload.t === "READY") {
           const ready = payload.d as QqReadyEvent;
-          if (!ready.session_id) throw new Error("QQ READY 缺少 session_id");
+          if (!ready.session_id) {
+            throw new IMGentError("ADAPTER_COMPATIBILITY_ERROR", {
+              diagnostic: { platform: "qq", event: "ready", reason: "session id" },
+            });
+          }
           this.sessionId = ready.session_id;
         }
         const checkpoint =
@@ -320,7 +406,9 @@ export class QqAdapter implements ImAdapter {
 
   private sendGateway(payload: unknown): void {
     if (this.socket?.readyState !== WebSocket.OPEN) {
-      throw new Error("QQ Gateway 尚未连接");
+      throw new IMGentError("ADAPTER_CONNECTION_FAILED", {
+        diagnostic: { platform: "qq", reason: "gateway not connected" },
+      });
     }
     this.socket.send(JSON.stringify(payload));
   }
@@ -348,18 +436,18 @@ export class QqAdapter implements ImAdapter {
       message.conversation.kind === "direct"
         ? `/v2/users/${encodeURIComponent(message.conversation.platformConversationId)}/messages`
         : `/v2/groups/${encodeURIComponent(message.conversation.platformConversationId)}/messages`;
-    const mode = replyValid && replyMessageId ? "reply" : "proactive";
+    const mode: SendResult["mode"] = replyValid && replyMessageId ? "reply" : "proactive";
     const maxReplies = Number(
       context?.maxReplies ?? (message.conversation.kind === "direct" ? 4 : 5),
     );
     if (mode === "reply" && msgSeq > maxReplies) {
-      throw new Error(`QQ 被动回复次数已达到上限: ${message.conversation.kind} ${maxReplies}`);
+      throw new IMGentError("OUTBOUND_CONTEXT_EXPIRED");
     }
     const body = {
       content: textParts(message),
       msg_type: 0,
       msg_seq: msgSeq,
-      ...(mode === "reply" ? { msg_id: replyMessageId } : {}),
+      ...(mode === "reply" && replyMessageId ? { msg_id: replyMessageId } : {}),
       ...(typeof context?.eventId === "string" ? { event_id: context.eventId } : {}),
     };
     const response = await this.fetch(`${this.apiBaseUrl()}${path}`, {
@@ -372,7 +460,7 @@ export class QqAdapter implements ImAdapter {
       body: JSON.stringify(body),
     });
     if (!response.ok) {
-      throw new Error(`QQ 发送失败: HTTP ${response.status} ${await safeText(response)}`);
+      throw platformHttpError("qq", response, "send");
     }
     const resultBody = (await response.json()) as { id?: string };
     const result: SendResult = {
@@ -400,13 +488,17 @@ export class QqAdapter implements ImAdapter {
       },
     );
     if (!response.ok) {
-      throw new Error(`QQ AccessToken 获取失败: HTTP ${response.status}`);
+      throw platformHttpError("qq", response, "access-token");
     }
     const body = (await response.json()) as {
       access_token?: string;
       expires_in?: number | string;
     };
-    if (!body.access_token) throw new Error("QQ AccessToken 响应缺少 access_token");
+    if (!body.access_token) {
+      throw new IMGentError("ADAPTER_COMPATIBILITY_ERROR", {
+        diagnostic: { platform: "qq", operation: "access-token", reason: "missing token" },
+      });
+    }
     const expiresIn = Number(body.expires_in ?? 7_200);
     this.accessToken = {
       value: body.access_token,
@@ -423,25 +515,17 @@ export class QqAdapter implements ImAdapter {
         "X-Union-Appid": this.options.appId,
       },
     });
-    if (!response.ok) throw new Error(`QQ Gateway 获取失败: HTTP ${response.status}`);
+    if (!response.ok) throw platformHttpError("qq", response, "gateway");
     const body = (await response.json()) as GatewayInfo;
-    if (!body.url) throw new Error("QQ Gateway 响应缺少 URL");
+    if (!body.url) {
+      throw new IMGentError("ADAPTER_COMPATIBILITY_ERROR", {
+        diagnostic: { platform: "qq", operation: "gateway", reason: "missing URL" },
+      });
+    }
     return body;
   }
 
   private apiBaseUrl(): string {
     return (this.options.apiBaseUrl ?? "https://api.sgroup.qq.com").replace(/\/$/, "");
   }
-}
-
-async function safeText(response: Response): Promise<string> {
-  try {
-    return (await response.text()).slice(0, 300);
-  } catch {
-    return "";
-  }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

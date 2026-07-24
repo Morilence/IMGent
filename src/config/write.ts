@@ -1,11 +1,31 @@
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { IMGentError } from "@imgent/contracts";
 import { configSchema } from "./schema.js";
 import type { IMGentConfig } from "@imgent/contracts";
 
 export async function readRawConfig(path: string): Promise<IMGentConfig> {
-  const value = JSON.parse(await readFile(resolve(path), "utf8")) as unknown;
-  return configSchema.parse(value) as IMGentConfig;
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(resolve(path), "utf8")) as unknown;
+  } catch (error) {
+    throw new IMGentError("CONFIG_FILE_UNREADABLE", {
+      cause: error,
+      diagnostic: { path: resolve(path) },
+    });
+  }
+  const parsed = configSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new IMGentError("CONFIG_FILE_INVALID", {
+      diagnostic: {
+        issues: parsed.error.issues.map((issue) => ({
+          field: issue.path.join("."),
+          code: issue.code,
+        })),
+      },
+    });
+  }
+  return parsed.data as IMGentConfig;
 }
 
 export async function writeConfig(
@@ -19,9 +39,11 @@ export async function writeConfig(
   if (!overwrite) {
     try {
       await stat(finalPath);
-      throw new Error(`配置文件已存在: ${finalPath}`);
+      throw new IMGentError("CONFIG_FILE_INVALID", {
+        diagnostic: { path: finalPath, reason: "already exists" },
+      });
     } catch (error) {
-      if (error instanceof Error && error.message.startsWith("配置文件已存在")) {
+      if (error instanceof IMGentError) {
         throw error;
       }
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

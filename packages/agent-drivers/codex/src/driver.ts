@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { promisify } from "node:util";
+import { IMGentError, normalizeError } from "@imgent/contracts";
 import { AsyncQueue } from "./async-queue.js";
 import { JsonRpcProcess, type RpcNotification, type RpcRequest } from "./json-rpc.js";
 import type {
@@ -113,13 +114,15 @@ export class CodexDriver implements AgentDriver {
   constructor(private readonly options: CodexDriverOptions = {}) {}
 
   async checkReady(profile: AgentProfile): Promise<DriverReadiness> {
-    const details: string[] = [];
+    const issues: DriverReadiness["issues"] = [];
     let version: string | undefined;
     try {
       const info = await stat(profile.workspace);
-      if (!info.isDirectory()) details.push("工作区不是目录");
+      if (!info.isDirectory()) {
+        issues.push(new IMGentError("CONFIG_WORKSPACE_INVALID").descriptor);
+      }
     } catch {
-      details.push(`工作区不存在或不可访问: ${profile.workspace}`);
+      issues.push(new IMGentError("CONFIG_WORKSPACE_INVALID").descriptor);
     }
     try {
       const result = await execute(profile.command, ["--version"], {
@@ -129,12 +132,16 @@ export class CodexDriver implements AgentDriver {
       version = result.stdout.trim() || result.stderr.trim();
       const tuple = versionTuple(version);
       if (!tuple || !versionAtLeast(tuple, MINIMUM_VERSION)) {
-        details.push(`Codex CLI 版本不兼容: ${version || "unknown"}，要求 >= 0.145.0`);
+        issues.push(new IMGentError("AGENT_VERSION_UNSUPPORTED").descriptor);
       }
     } catch (error) {
-      details.push(`Codex CLI 不可用: ${errorMessage(error)}`);
+      issues.push(
+        normalizeError(error, "AGENT_UNAVAILABLE", {
+          diagnostic: { driver: "codex", operation: "version" },
+        }).descriptor,
+      );
     }
-    if (details.length === 0) {
+    if (issues.length === 0) {
       try {
         await this.ensureReady(profile);
         const account = await this.rpc!.request<{
@@ -142,16 +149,20 @@ export class CodexDriver implements AgentDriver {
           requiresOpenaiAuth: boolean;
         }>("account/read", { refreshToken: false }, 15_000);
         if (account.requiresOpenaiAuth && account.account === null) {
-          details.push("Codex 尚未登录");
+          issues.push(new IMGentError("AGENT_AUTH_REQUIRED").descriptor);
         }
       } catch (error) {
-        details.push(`Codex app-server initialize 失败: ${errorMessage(error)}`);
+        issues.push(
+          normalizeError(error, "AGENT_UNAVAILABLE", {
+            diagnostic: { driver: "codex", operation: "initialize" },
+          }).descriptor,
+        );
       }
     }
     return {
-      ready: details.length === 0,
+      ready: issues.length === 0,
       ...(version ? { version } : {}),
-      details,
+      issues,
     };
   }
 
@@ -208,9 +219,9 @@ export class CodexDriver implements AgentDriver {
     } catch (error) {
       yield {
         type: "error",
-        code: "CODEX_TURN_START_FAILED",
-        retryable: true,
-        message: errorMessage(error),
+        error: normalizeError(error, "AGENT_TURN_START_FAILED", {
+          diagnostic: { driver: "codex", operation: "turn/start" },
+        }).descriptor,
       };
     } finally {
       input.signal?.removeEventListener("abort", onAbort);
@@ -272,7 +283,7 @@ export class CodexDriver implements AgentDriver {
 
   async answerRequest(requestId: string, answer: AgentRequestAnswer): Promise<void> {
     const pending = this.pending.get(requestId);
-    if (!pending) throw new Error("Codex 审批/问题请求不存在或已结束");
+    if (!pending) throw new IMGentError("APPROVAL_NOT_FOUND");
     clearTimeout(pending.timer);
     this.pending.delete(requestId);
     const allow = answer.decision === "allow";
@@ -356,7 +367,7 @@ export class CodexDriver implements AgentDriver {
 
   private async ensureReady(profile: AgentProfile): Promise<void> {
     if (this.rpc && (this.command !== profile.command || this.workspace !== profile.workspace)) {
-      throw new Error("一个 CodexDriver 实例只能服务同一 command/workspace 的 AgentProfile");
+      throw new IMGentError("AGENT_SESSION_MISMATCH");
     }
     if (this.rpc) return;
     this.command = profile.command;
@@ -414,9 +425,12 @@ export class CodexDriver implements AgentDriver {
       } else {
         active.queue.push({
           type: "error",
-          code: "CODEX_TURN_FAILED",
-          retryable: true,
-          message: turn?.error?.message ?? turn?.error?.additionalDetails ?? "Codex turn 失败",
+          error: new IMGentError("AGENT_TURN_FAILED", {
+            diagnostic: {
+              driver: "codex",
+              vendorMessage: turn?.error?.message ?? turn?.error?.additionalDetails,
+            },
+          }).descriptor,
         });
       }
       active.queue.end();
@@ -425,9 +439,12 @@ export class CodexDriver implements AgentDriver {
     if (notification.method === "error") {
       active.queue.push({
         type: "error",
-        code: "CODEX_NOTIFICATION_ERROR",
-        retryable: true,
-        message: typeof params.message === "string" ? params.message : "Codex app-server error",
+        error: new IMGentError("AGENT_TURN_FAILED", {
+          diagnostic: {
+            driver: "codex",
+            vendorMessage: typeof params.message === "string" ? params.message : undefined,
+          },
+        }).descriptor,
       });
     }
   }

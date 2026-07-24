@@ -39,7 +39,13 @@ type AgentEvent =
   | { type: "question"; request: UserQuestion }
   | { type: "session"; sessionId: string }
   | { type: "completed"; result: "success" | "cancelled" }
-  | { type: "error"; code: string; retryable: boolean; message: string };
+  | { type: "error"; error: ErrorDescriptor };
+
+interface DriverReadiness {
+  ready: boolean;
+  version?: string;
+  issues: ErrorDescriptor[];
+}
 
 interface AgentDriver {
   readonly id: "codex" | "claude-code";
@@ -67,6 +73,8 @@ interface AgentTurnInput {
 - 把同一份 IMGent skill catalog、developer instructions 与 Host Tool 白名单
   映射到厂商接口。
 - 将输出、审批、问题、完成和错误转换为 `AgentEvent`。
+- 把厂商认证、版本、网络和协议错误映射为集中注册的稳定 ErrorCode；原始厂商
+  文本只进入统一脱敏诊断，不进入 AgentEvent 或用户文案。
 - 在 SQLite 中保存 session/thread ID、当前 turn、待审批请求和恢复所需状态。
 - 保证一个 conversationKey 同时只有一个 active turn。
 
@@ -75,6 +83,8 @@ interface AgentTurnInput {
 - 进程生命周期和 wire protocol。
 - 厂商版本与能力协商。
 - 解析厂商事件并保留未知事件的可诊断元数据。
+- 无论正常、取消还是失败，必须产生 completed/error 终态；流结束但没有终态
+  由 Scheduler 记录 `DRIVER_PROTOCOL_INCOMPLETE`。
 - 取消和恢复的实际调用。
 
 ## 3. Codex app-server
