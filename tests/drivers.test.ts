@@ -3,9 +3,9 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ClaudeCodeDriver, type ClaudeSdk } from "@agent-pigeon/driver-claude-code";
-import { CodexDriver } from "@agent-pigeon/driver-codex";
-import type { AgentEvent, AgentProfile, AgentTurnInput } from "@agent-pigeon/contracts";
+import { ClaudeCodeDriver, type ClaudeSdk } from "@imgent/driver-claude-code";
+import { CodexDriver } from "@imgent/driver-codex";
+import type { AgentEvent, AgentProfile, AgentTurnInput } from "@imgent/contracts";
 
 const profile = (
   driver: "codex" | "claude-code",
@@ -30,7 +30,7 @@ const turn = (profileValue: AgentProfile): AgentTurnInput => ({
 });
 
 test("Codex driver speaks app-server JSON-RPC and serves dynamic host tools", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "agent-pigeon-codex-"));
+  const directory = await mkdtemp(join(tmpdir(), "imgent-codex-"));
   const executable = join(directory, "fake-codex.mjs");
   await writeFile(
     executable,

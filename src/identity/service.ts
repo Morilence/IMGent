@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { PigeonStore } from "../storage/store.js";
-import type { ActorRole } from "@agent-pigeon/contracts";
+import type { IMGentStore } from "../storage/store.js";
+import type { ActorRole } from "@imgent/contracts";
 
 function now(): string {
   return new Date().toISOString();
@@ -15,7 +15,7 @@ function shortCode(): string {
 }
 
 export class IdentityService {
-  constructor(private readonly store: PigeonStore) {}
+  constructor(private readonly store: IMGentStore) {}
 
   isPaired(platformIdentityId: string): boolean {
     return (

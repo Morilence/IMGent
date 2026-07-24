@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { PigeonStore } from "../storage/store.js";
-import type { ImAdapter, OutboundMessage, SendResult } from "@agent-pigeon/contracts";
+import type { IMGentStore } from "../storage/store.js";
+import type { ImAdapter, OutboundMessage, SendResult } from "@imgent/contracts";
 
 function now(): string {
   return new Date().toISOString();
@@ -13,7 +13,7 @@ function withoutContext(message: OutboundMessage): OutboundMessage {
 }
 
 export class OutboundDispatcher {
-  constructor(private readonly store: PigeonStore) {}
+  constructor(private readonly store: IMGentStore) {}
 
   async send(adapter: ImAdapter, message: OutboundMessage, taskId?: string): Promise<SendResult> {
     const row = this.store.get<{

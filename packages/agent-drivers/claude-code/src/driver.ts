@@ -23,7 +23,7 @@ import type {
   AgentRequestAnswer,
   AgentTurnInput,
   DriverReadiness,
-} from "@agent-pigeon/contracts";
+} from "@imgent/contracts";
 
 const execute = promisify(execFile);
 const MINIMUM_VERSION = [2, 1, 89] as const;
@@ -264,10 +264,10 @@ export class ClaudeCodeDriver implements AgentDriver {
       ...(this.options.hostTools?.length && this.options.hostToolHandler
         ? {
             mcpServers: {
-              "agent-pigeon": this.hostMcpServer(input.turnId),
+              imgent: this.hostMcpServer(input.turnId),
             },
             allowedTools: this.options.hostTools.map(
-              (spec) => `mcp__agent-pigeon__${spec.namespace}_${spec.name}`,
+              (spec) => `mcp__imgent__${spec.namespace}_${spec.name}`,
             ),
           }
         : {}),
@@ -288,7 +288,7 @@ export class ClaudeCodeDriver implements AgentDriver {
   private hostMcpServer(turnId: string) {
     const handler = this.options.hostToolHandler!;
     return createSdkMcpServer({
-      name: "agent-pigeon",
+      name: "imgent",
       version: "0.1.0",
       tools: (this.options.hostTools ?? []).map((spec) => {
         const shape = schemaShape(spec.inputSchema);

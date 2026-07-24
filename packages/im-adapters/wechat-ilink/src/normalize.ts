@@ -5,7 +5,7 @@ import {
   type MessageItem,
   type WechatMessage,
 } from "./protocol.js";
-import type { AttachmentRef, InboundMessage, MessagePart } from "@agent-pigeon/contracts";
+import type { AttachmentRef, InboundMessage, MessagePart } from "@imgent/contracts";
 
 export class WechatCompatibilityError extends Error {
   constructor(

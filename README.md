@@ -1,6 +1,6 @@
-# Agent Pigeon
+# IMGent
 
-Agent Pigeon 是一个自托管的单进程桥接器：通过 QQ 官方机器人或微信
+IMGent 是一个自托管的单进程桥接器：通过 QQ 官方机器人或微信
 iLink 接收消息，在严格的身份、审批、会话与记忆边界内驱动本地 Codex 或
 Claude Code。
 
@@ -38,52 +38,52 @@ pnpm install --frozen-lockfile
 pnpm build
 pnpm link --global
 
-agent-pigeon init --workspace /absolute/path/to/workspace
-agent-pigeon profile add main \
+imgent init --workspace /absolute/path/to/workspace
+imgent profile add main \
   --driver codex \
   --workspace /absolute/path/to/workspace
 ```
 
-不希望创建全局链接时，可把下文的 `agent-pigeon` 替换为
-`pnpm pigeon`。
+不希望创建全局链接时，可把下文的 `imgent` 替换为
+`pnpm imgent`。
 
 添加 QQ 时，从环境变量读取 AppSecret 并立即加密落盘：
 
 ```bash
-export AGENT_PIGEON_QQ_APP_SECRET='...'
-agent-pigeon bot add qq qq-main \
+export IMGENT_QQ_APP_SECRET='...'
+imgent bot add qq qq-main \
   --profile main \
-  --app-id-env AGENT_PIGEON_QQ_APP_ID
-unset AGENT_PIGEON_QQ_APP_SECRET
+  --app-id-env IMGENT_QQ_APP_ID
+unset IMGENT_QQ_APP_SECRET
 ```
 
 添加和授权微信：
 
 ```bash
-agent-pigeon bot add wechat-ilink wechat-main --profile main
-agent-pigeon bot authorize wechat-main
+imgent bot add wechat-ilink wechat-main --profile main
+imgent bot authorize wechat-main
 ```
 
 首次私聊会返回一次性配对码。部署者在本机确认后，用户才能运行 Agent：
 
 ```bash
-agent-pigeon pair <code>
-agent-pigeon doctor
-agent-pigeon start
+imgent pair <code>
+imgent doctor
+imgent start
 ```
 
 QQ 群需要先出现一次触发消息，随后由部署者查看本地群空间并授权：
 
 ```bash
-agent-pigeon identity list
-agent-pigeon group list
-agent-pigeon group authorize <conversation-space-id> \
+imgent identity list
+imgent group list
+imgent group authorize <conversation-space-id> \
   --principal <paired-principal-id>
 ```
 
 ## 运行与安全
 
-- 配置默认是当前目录的 `agent-pigeon.json`，可用全局
+- 配置默认是当前目录的 `imgent.json`，可用全局
   `--config <path>` 指定。
 - 管理服务默认监听 `127.0.0.1:8787`，提供 `/healthz` 和 `/readyz`。
 - 配置、数据库、备份、凭据与密钥按本地敏感数据处理。
@@ -94,9 +94,9 @@ agent-pigeon group authorize <conversation-space-id> \
 常用运维命令：
 
 ```bash
-agent-pigeon status
-agent-pigeon backup --output ./state.backup
-agent-pigeon restore ./state.backup \
+imgent status
+imgent backup --output ./state.backup
+imgent restore ./state.backup \
   --config ./restored.json \
   --data-dir ./restored-data
 ```
@@ -104,13 +104,13 @@ agent-pigeon restore ./state.backup \
 聊天内控制命令：
 
 ```text
-/pigeon cancel
-/pigeon bind [绑定码]
-/pigeon allow <requestId>
-/pigeon deny <requestId>
-/pigeon answer <requestId> <内容>
-/pigeon group full
-/pigeon group triggered
+/imgent cancel
+/imgent bind [绑定码]
+/imgent allow <requestId>
+/imgent deny <requestId>
+/imgent answer <requestId> <内容>
+/imgent group full
+/imgent group triggered
 ```
 
 ## 开发与验证
@@ -130,7 +130,7 @@ IM payload 规范化以及两个驱动的协议合约。Codex 另有真实本机
 smoke；Claude Code 按当前交付约定只执行 mock/contract 验证。
 
 完整产品与安全约束见
-[产品设计](docs/agent-pigeon-product-design.md)。
+[产品设计](docs/imgent-product-design.md)。
 
 Docker 镜像不内置也不代管 Codex/Claude 的登录凭据；容器部署者需要在自己的
 派生镜像中安装对应 CLI，或把受控的可执行文件与认证目录按最小权限挂载进容器。

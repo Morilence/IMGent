@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { PigeonStore } from "../storage/store.js";
-import type { AgentRequestAnswer, ApprovalRequest } from "@agent-pigeon/contracts";
+import type { IMGentStore } from "../storage/store.js";
+import type { AgentRequestAnswer, ApprovalRequest } from "@imgent/contracts";
 
 function now(): string {
   return new Date().toISOString();
@@ -15,7 +15,7 @@ export interface ApprovalDecision {
 }
 
 export class ApprovalService {
-  constructor(private readonly store: PigeonStore) {}
+  constructor(private readonly store: IMGentStore) {}
 
   create(
     taskId: string,

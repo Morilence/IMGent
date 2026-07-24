@@ -1,8 +1,8 @@
 import process from "node:process";
-import { CodexDriver } from "@agent-pigeon/driver-codex";
+import { CodexDriver } from "@imgent/driver-codex";
 
-const command = process.env.AGENT_PIGEON_CODEX_COMMAND ?? "codex";
-const workspace = process.env.AGENT_PIGEON_CODEX_WORKSPACE ?? process.cwd();
+const command = process.env.IMGENT_CODEX_COMMAND ?? "codex";
+const workspace = process.env.IMGENT_CODEX_WORKSPACE ?? process.cwd();
 const profile = {
   id: "codex-real-smoke",
   driver: "codex",

@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { MIGRATION_1, SCHEMA_VERSION } from "./migrations.js";
 import type { SecretBox } from "../security/secret-box.js";
-import type { InboundMessage, ReplyContext } from "@agent-pigeon/contracts";
+import type { InboundMessage, ReplyContext } from "@imgent/contracts";
 
 type SqlValue = null | number | bigint | string | Uint8Array;
 
@@ -57,14 +57,14 @@ function stripReplyContext(message: InboundMessage): InboundMessage {
   return copy;
 }
 
-export class PigeonStore {
+export class IMGentStore {
   private constructor(
     readonly database: DatabaseSync,
     private readonly secretBox: SecretBox,
     readonly path: string,
   ) {}
 
-  static async open(path: string, secretBox: SecretBox): Promise<PigeonStore> {
+  static async open(path: string, secretBox: SecretBox): Promise<IMGentStore> {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const database = new DatabaseSync(path, {
       enableForeignKeyConstraints: true,
@@ -112,7 +112,7 @@ export class PigeonStore {
     database.prepare("INSERT INTO memory_fts(value) VALUES (?)").run("tokenizer-check");
     database.prepare("DELETE FROM memory_fts WHERE value = ?").run("tokenizer-check");
 
-    return new PigeonStore(database, secretBox, path);
+    return new IMGentStore(database, secretBox, path);
   }
 
   close(): void {

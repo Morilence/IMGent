@@ -1,9 +1,5 @@
 import type { MemoryContext, MemoryKind, MemoryService, RememberInput } from "./service.js";
-import type {
-  AgentHostToolCall,
-  AgentHostToolResult,
-  AgentHostToolSpec,
-} from "@agent-pigeon/contracts";
+import type { AgentHostToolCall, AgentHostToolResult, AgentHostToolSpec } from "@imgent/contracts";
 
 export const MEMORY_HOST_TOOLS: AgentHostToolSpec[] = [
   {

@@ -1,6 +1,6 @@
-import { textOf } from "@agent-pigeon/contracts";
+import { textOf } from "@imgent/contracts";
 import type { MemoryContext, MemoryService } from "./service.js";
-import type { PigeonStore } from "../storage/store.js";
+import type { IMGentStore } from "../storage/store.js";
 
 function now(): string {
   return new Date().toISOString();
@@ -18,7 +18,7 @@ export class MemoryCurator {
   private running = false;
 
   constructor(
-    private readonly store: PigeonStore,
+    private readonly store: IMGentStore,
     private readonly memory: MemoryService,
   ) {}
 

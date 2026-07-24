@@ -2,7 +2,7 @@
 
 > `last_verified: 2026-07-23`
 >
-> 本文只记录会影响 Agent Pigeon 设计和实现的接口事实。官方接口可能变化，开发适配器前必须重新核对链接与权限，不在本仓库镜像完整厂商文档。
+> 本文只记录会影响 IMGent 设计和实现的接口事实。官方接口可能变化，开发适配器前必须重新核对链接与权限，不在本仓库镜像完整厂商文档。
 
 ## 1. 能力矩阵
 
@@ -15,7 +15,7 @@
 
 核心建模结论：
 
-- Agent Pigeon 只接入平台官方机器人能力，不登录或模拟个人 IM 客户端；一个已配置机器人连接统一建模为 `BotInstance`。
+- IMGent 只接入平台官方机器人能力，不登录或模拟个人 IM 客户端；一个已配置机器人连接统一建模为 `BotInstance`。
 - `botInstanceId` 是本地实例 ID，`platformBotId` 是平台分配的机器人 ID，消息发送者则使用 `actor.platformUserId`；三者不能混用。
 - 私聊和群聊是不同的记忆安全边界，不能用同一个平台会话 ID 或昵称推断。
 - 平台事件 ID、消息 ID、去重键和发送回复所需的上下文是四件不同的事。
@@ -24,7 +24,7 @@
 
 ## 2. 统一字段映射
 
-| Agent Pigeon 字段           | QQ                                            | 微信 iLink                     | 飞书                          | Telegram                                |
+| IMGent 字段                 | QQ                                            | 微信 iLink                     | 飞书                          | Telegram                                |
 | --------------------------- | --------------------------------------------- | ------------------------------ | ----------------------------- | --------------------------------------- |
 | `botInstanceId`             | 本地配置的 QQ 机器人实例 ID                   | 本地配置的 iLink 机器人实例 ID | 未来本地应用机器人实例 ID     | 未来本地 Bot 实例 ID                    |
 | `platformBotId`             | QQ 开放平台 AppID                             | QR 授权返回的 `ilink_bot_id`   | 未来使用应用 / 机器人稳定标识 | 未来使用 Bot API 返回的 bot user ID     |
@@ -55,8 +55,8 @@
 
 ### 3.2 会话和事件
 
-- 接入对象是在 QQ 开放平台创建的官方机器人：AppID 是机器人标识并映射为 `platformBotId`，AppSecret 用于取得 AccessToken。运行 Agent Pigeon 不需要、也不应登录部署者的个人 QQ 账号。
-- QQ 官方机器人可在单聊、群聊和频道中收发消息；Agent Pigeon v1 只实现单聊和群聊。
+- 接入对象是在 QQ 开放平台创建的官方机器人：AppID 是机器人标识并映射为 `platformBotId`，AppSecret 用于取得 AccessToken。运行 IMGent 不需要、也不应登录部署者的个人 QQ 账号。
+- QQ 官方机器人可在单聊、群聊和频道中收发消息；IMGent v1 只实现单聊和群聊。
 - 单聊入口为 `C2C_MESSAGE_CREATE`。
 - 群聊默认入口为 `GROUP_AT_MESSAGE_CREATE`，并结合回复机器人、命令和短期连续会话触发。
 - `GROUP_MESSAGE_CREATE` 可以提供全量群消息，但需要相应事件权限。没有权限时订阅会失败或收不到事件，readiness 必须明确报错。
@@ -80,7 +80,7 @@
 
 超出被动回复窗口时，只能在用户或群允许主动消息且当前配额允许时降级为主动发送；否则任务进入可诊断的发送失败状态，不能伪装成功。
 
-### 3.5 Agent Pigeon 的群聊策略
+### 3.5 IMGent 的群聊策略
 
 - 每群保存 `triggered` 或 `full` 模式，默认 `triggered`。
 - 切换 `full` 的发起者必须同时满足：已配对、已获授权、事件中可验证为群主或管理员。
@@ -108,9 +108,9 @@
 
 1. 获取授权二维码，并在终端展示二维码或可打开的二维码地址。
 2. 微信用户扫码确认后，长轮询取得 `bot_token`、`ilink_bot_id`、`ilink_user_id` 和 `baseurl`。
-3. Agent Pigeon 将 `ilink_bot_id` 记录为 `platformBotId`，将扫码授权者 `ilink_user_id` 记录为 `authorizingPlatformUserId`，并将 bot token 写入 `credentialRef` 指向的本地凭据存储。
-4. 上游 OpenClaw 插件把 `ilink_bot_id` 放入运行时 `accountId` 字段，并把每次扫码结果称为 account entry；这是上游宿主术语，不进入 Agent Pigeon 的公开配置、消息信封或身份模型。
-5. 该流程是用户对 iLink Bot 的扫码授权，不是 Agent Pigeon 登录、接管或模拟扫码者的个人微信客户端会话。
+3. IMGent 将 `ilink_bot_id` 记录为 `platformBotId`，将扫码授权者 `ilink_user_id` 记录为 `authorizingPlatformUserId`，并将 bot token 写入 `credentialRef` 指向的本地凭据存储。
+4. 上游 OpenClaw 插件把 `ilink_bot_id` 放入运行时 `accountId` 字段，并把每次扫码结果称为 account entry；这是上游宿主术语，不进入 IMGent 的公开配置、消息信封或身份模型。
+5. 该流程是用户对 iLink Bot 的扫码授权，不是 IMGent 登录、接管或模拟扫码者的个人微信客户端会话。
 6. 后续请求携带：
    - `AuthorizationType: ilink_bot_token`
    - `Authorization: Bearer <bot_token>`
@@ -130,7 +130,7 @@
 
 - 当前可验证的腾讯官方 `2.4.6` 实现将入站 `ChatType` 和 peer 固定为 direct，群白名单为空，消息处理显式使用 `isGroup: false`。
 - wire type 中可选的 `group_id` 没有配套的官方群事件、成员、权限和发送语义，当前实现也不读取它；因此它只能视为保留字段，不能据此声称支持群聊。
-- 结论边界是“当前官方实现仅支持 direct，Agent Pigeon v1 不支持微信 iLink 群聊”，而不是推断底层协议未来永远不可能扩展群聊。
+- 结论边界是“当前官方实现仅支持 direct，IMGent v1 不支持微信 iLink 群聊”，而不是推断底层协议未来永远不可能扩展群聊。
 - v1 始终以 `botInstanceId + from_user_id` 建立私聊会话，不复用不同联系人之间的 Agent session。
 - 微信 v1 不创建 `ConversationSpace(group)`，也不查询或写入任何群记忆作用域。
 - 发送依赖近期 `context_token`，因此不承诺无上下文的主动推送；token 必须随任务短期持久化并在终态清理。

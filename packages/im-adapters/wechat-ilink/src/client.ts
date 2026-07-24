@@ -14,7 +14,7 @@ import type {
   OutboundMessage,
   PlatformCapabilities,
   SendResult,
-} from "@agent-pigeon/contracts";
+} from "@imgent/contracts";
 
 export interface WechatCredential {
   botToken: string;
@@ -238,7 +238,7 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
       }
     }
     if (items.length === 0) throw new Error("微信出站消息没有可发送内容");
-    const clientId = `agent-pigeon-${randomUUID()}`;
+    const clientId = `imgent-${randomUUID()}`;
     const raw: WechatMessage = {
       from_user_id: "",
       to_user_id: message.conversation.platformConversationId,
@@ -280,7 +280,7 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
             ...body,
             base_info: {
               channel_version: "0.1.0",
-              bot_agent: "AgentPigeon/0.1.0",
+              bot_agent: "IMGent/0.1.0",
             },
           }),
           signal: controller.signal,

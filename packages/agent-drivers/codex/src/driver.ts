@@ -14,7 +14,7 @@ import type {
   ApprovalRequest,
   DriverReadiness,
   MessagePart,
-} from "@agent-pigeon/contracts";
+} from "@imgent/contracts";
 
 const execute = promisify(execFile);
 const MINIMUM_VERSION = [0, 145, 0] as const;
@@ -228,7 +228,7 @@ export class CodexDriver implements AgentDriver {
             : "workspace-write",
       ...(profile.prompt ? { baseInstructions: profile.prompt } : {}),
       ephemeral: false,
-      serviceName: "agent-pigeon",
+      serviceName: "imgent",
       ...(this.options.hostTools?.length
         ? {
             dynamicTools: groupTools(this.options.hostTools),
@@ -405,7 +405,7 @@ export class CodexDriver implements AgentDriver {
     const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
     const active = threadId ? this.activeByThread.get(threadId) : undefined;
     if (!active) {
-      this.rpc?.respondError(request.id, -32_602, "no active Agent Pigeon turn");
+      this.rpc?.respondError(request.id, -32_602, "no active IMGent turn");
       return;
     }
     if (request.method === "item/tool/call") {
@@ -486,7 +486,7 @@ export class CodexDriver implements AgentDriver {
   private async handleHostTool(request: RpcRequest, active: ActiveTurn): Promise<void> {
     if (!this.options.hostToolHandler) {
       this.rpc?.respond(request.id, {
-        contentItems: [{ type: "inputText", text: "Agent Pigeon host tool handler unavailable" }],
+        contentItems: [{ type: "inputText", text: "IMGent host tool handler unavailable" }],
         success: false,
       });
       return;

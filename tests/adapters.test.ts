@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { QqAdapter, normalizeQqDispatch, QqCompatibilityError } from "@agent-pigeon/adapter-qq";
+import { QqAdapter, normalizeQqDispatch, QqCompatibilityError } from "@imgent/adapter-qq";
 import {
   WechatIlinkAdapter,
   normalizeWechatMessage,
   WechatCompatibilityError,
-} from "@agent-pigeon/adapter-wechat-ilink";
+} from "@imgent/adapter-wechat-ilink";
 
 test("QQ normalizer preserves actor, mentions, references, attachments and reply limits", () => {
   const sentAt = "2026-07-24T00:00:00.000Z";

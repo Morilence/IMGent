@@ -1,5 +1,7 @@
+name: imgent
+
 services:
-  agent-pigeon:
+  imgent:
     build: .
     restart: unless-stopped
     ports:
@@ -8,4 +10,4 @@ services:
       - ./data:/app/data
       - ./workspace:/workspaces/main
     environment:
-      AGENT_PIGEON_QQ_APP_ID: ${AGENT_PIGEON_QQ_APP_ID:-}
+      IMGENT_QQ_APP_ID: ${IMGENT_QQ_APP_ID:-}

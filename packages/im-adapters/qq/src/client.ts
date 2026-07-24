@@ -13,7 +13,7 @@ import type {
   OutboundMessage,
   PlatformCapabilities,
   SendResult,
-} from "@agent-pigeon/contracts";
+} from "@imgent/contracts";
 
 export interface QqCredential {
   appSecret: string;
@@ -291,8 +291,8 @@ export class QqAdapter implements ImAdapter {
         shard: [0, 1],
         properties: {
           $os: process.platform,
-          $browser: "agent-pigeon",
-          $device: "agent-pigeon",
+          $browser: "imgent",
+          $device: "imgent",
         },
       },
     });

@@ -1,5 +1,5 @@
 import type { QqAttachment, QqGatewayPayload, QqMessageEvent } from "./protocol.js";
-import type { ActorRole, InboundMessage, MessagePart, Mention } from "@agent-pigeon/contracts";
+import type { ActorRole, InboundMessage, MessagePart, Mention } from "@imgent/contracts";
 
 function role(value: string | undefined): ActorRole {
   switch (value?.toLowerCase()) {
@@ -102,7 +102,7 @@ export function normalizeQqDispatch(
   const groupRole = role(event.member?.role ?? event.author?.role);
   const displayName = event.author?.nickname ?? event.member?.nick ?? event.author?.username;
   const replyMinutes = group ? 5 : 60;
-  const command = event.content?.trimStart().startsWith("/pigeon") ?? false;
+  const command = event.content?.trimStart().startsWith("/imgent") ?? false;
   const mentionsBot = mentionsOf(event).some((mention) => mention.platformUserId === platformBotId);
   const triggered = !group || payload.t === "GROUP_AT_MESSAGE_CREATE" || command || mentionsBot;
   return {

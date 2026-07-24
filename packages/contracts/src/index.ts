@@ -144,7 +144,7 @@ export interface Route {
   agentProfileId: string;
 }
 
-export interface AgentPigeonConfig {
+export interface IMGentConfig {
   version: 1;
   dataDir: string;
   server: {

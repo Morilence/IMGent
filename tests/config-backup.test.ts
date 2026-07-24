@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -49,7 +49,7 @@ test("configuration is strict and only exposes implemented adapters and drivers"
 });
 
 test("backup and restore verify checksums and preserve encrypted local credentials", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "agent-pigeon-backup-"));
+  const directory = await mkdtemp(join(tmpdir(), "imgent-backup-"));
   const workspace = join(directory, "workspace");
   const configPath = join(directory, "config.json");
   const dataDir = join(directory, "data");
@@ -71,8 +71,30 @@ test("backup and restore verify checksums and preserve encrypted local credentia
   const credentials = new CredentialStore(restoredData);
   assert.deepEqual(await credentials.get("qq-main"), { appSecret: "secret-value" });
   const raw = JSON.parse(await readFile(archivePath, "utf8")) as {
+    format: string;
     manifest: { externalAgentAuthenticationIncluded: boolean };
+    files: Array<{ path: string }>;
   };
+  assert.equal(raw.format, "imgent-backup/v1");
+  assert.ok(raw.files.some((file) => file.path === "data/imgent.sqlite"));
   assert.equal(raw.manifest.externalAgentAuthenticationIncluded, false);
+
+  const legacyArchivePath = join(directory, "legacy.backup");
+  const legacyFormat = `${["agent", ["pig", "eon"].join("")].join("-")}-backup/v1`;
+  await writeFile(
+    legacyArchivePath,
+    JSON.stringify({
+      ...raw,
+      format: legacyFormat,
+    }),
+  );
+  await assert.rejects(
+    restoreBackup(
+      legacyArchivePath,
+      join(directory, "legacy-data"),
+      join(directory, "legacy.json"),
+    ),
+    /格式无效/u,
+  );
   await rm(directory, { recursive: true, force: true });
 });

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { PigeonStore } from "../storage/store.js";
+import type { IMGentStore } from "../storage/store.js";
 
 export type MemoryScope =
   "personal_private" | "private_episode" | "group_shared" | "group_member" | "group_episode";
@@ -54,7 +54,7 @@ function ftsQuery(query: string): string {
 }
 
 export class MemoryService {
-  constructor(private readonly store: PigeonStore) {}
+  constructor(private readonly store: IMGentStore) {}
 
   private scope(context: MemoryContext, target: RememberInput["target"]): MemoryScope {
     if (context.conversationKind === "direct") {

@@ -62,8 +62,8 @@ export class JsonRpcProcess {
     });
     await this.request("initialize", {
       clientInfo: {
-        name: "agent-pigeon",
-        title: "Agent Pigeon",
+        name: "imgent",
+        title: "IMGent",
         version: "0.1.0",
       },
       capabilities: {

@@ -2,7 +2,7 @@
 
 > `last_verified: 2026-07-23`
 >
-> Agent Pigeon v1 正式支持 Codex 与 Claude Code，但只统一产品语义，不假设二者共享 wire protocol。
+> IMGent v1 正式支持 Codex 与 Claude Code，但只统一产品语义，不假设二者共享 wire protocol。
 
 ## 1. 支持矩阵
 
@@ -24,7 +24,7 @@
 - `codex-cli 0.142.3`
 - `claude 2.1.72`
 
-Claude Code v1 驱动要求 `>= 2.1.89`，因为异步聊天审批依赖非交互模式的 `defer`。当前本机版本低于要求，`agent-pigeon doctor` 应报 readiness 失败并给出升级提示，而不是静默退化为永久挂起的审批。
+Claude Code v1 驱动要求 `>= 2.1.89`，因为异步聊天审批依赖非交互模式的 `defer`。当前本机版本低于要求，`imgent doctor` 应报 readiness 失败并给出升级提示，而不是静默退化为永久挂起的审批。
 
 ## 2. 统一 `AgentDriver` 语义
 
@@ -150,7 +150,7 @@ interface AgentDriver {
 
 ### 4.5 认证边界
 
-- Agent Pigeon 只调用同一 OS 用户下已安装、已登录的 Claude Code。
+- IMGent 只调用同一 OS 用户下已安装、已登录的 Claude Code。
 - 不实现 Claude 登录页面，不读取、复制、返回或代管 Claude OAuth token。
 - 不把部署者凭据提供给群成员，也不允许 IM 命令导出认证信息。
 - Claude 的正式支持表示技术集成达到验收标准，不表示用户可以绕过 Anthropic 对第三方服务、订阅凭据或团队使用的条款。

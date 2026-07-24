@@ -5,7 +5,7 @@ import { backup } from "node:sqlite";
 import { configSchema } from "../config/schema.js";
 import { CredentialStore } from "../security/credential-store.js";
 import { SCHEMA_VERSION } from "../storage/migrations.js";
-import { PigeonStore } from "../storage/store.js";
+import { IMGentStore } from "../storage/store.js";
 
 interface ArchiveFile {
   path: string;
@@ -15,7 +15,7 @@ interface ArchiveFile {
 }
 
 interface BackupArchive {
-  format: "agent-pigeon-backup/v1";
+  format: "imgent-backup/v1";
   manifest: {
     createdAt: string;
     schemaVersion: number;
@@ -49,8 +49,8 @@ export async function createBackup(
   const base = dirname(resolve(configPath));
   const dataDir = resolve(base, parsed.data.dataDir);
   const credentials = new CredentialStore(dataDir);
-  const store = await PigeonStore.open(
-    join(dataDir, "agent-pigeon.sqlite"),
+  const store = await IMGentStore.open(
+    join(dataDir, "imgent.sqlite"),
     await credentials.secretBox(),
   );
   const snapshotPath = join(dataDir, `.backup-${process.pid}-${randomUUID()}.sqlite`);
@@ -61,7 +61,7 @@ export async function createBackup(
   }
   const files: ArchiveFile[] = [
     archiveFile("config.json", rawConfig),
-    archiveFile("data/agent-pigeon.sqlite", await readFile(snapshotPath)),
+    archiveFile("data/imgent.sqlite", await readFile(snapshotPath)),
     archiveFile("data/credentials.key", await readFile(join(dataDir, "credentials.key"))),
   ];
   await rm(snapshotPath, { force: true });
@@ -76,7 +76,7 @@ export async function createBackup(
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   const archive: BackupArchive = {
-    format: "agent-pigeon-backup/v1",
+    format: "imgent-backup/v1",
     manifest: {
       createdAt: new Date().toISOString(),
       schemaVersion: SCHEMA_VERSION,
@@ -111,11 +111,7 @@ export async function restoreBackup(
   const archive = JSON.parse(
     await readFile(resolve(archivePath), "utf8"),
   ) as Partial<BackupArchive>;
-  if (
-    archive.format !== "agent-pigeon-backup/v1" ||
-    !archive.manifest ||
-    !Array.isArray(archive.files)
-  ) {
+  if (archive.format !== "imgent-backup/v1" || !archive.manifest || !Array.isArray(archive.files)) {
     throw new Error("备份 manifest 或格式无效");
   }
   if (archive.manifest.schemaVersion !== SCHEMA_VERSION) {
@@ -131,7 +127,7 @@ export async function restoreBackup(
   ) {
     throw new Error("备份 manifest 包含重复或数量不一致的文件记录");
   }
-  for (const required of ["config.json", "data/agent-pigeon.sqlite", "data/credentials.key"]) {
+  for (const required of ["config.json", "data/imgent.sqlite", "data/credentials.key"]) {
     if (!archivePaths.has(required) || !manifestByPath.has(required)) {
       throw new Error(`备份缺少必要文件: ${required}`);
     }
@@ -148,7 +144,7 @@ export async function restoreBackup(
       throw new Error(`备份文件校验失败: ${file.path}`);
     }
   }
-  const allowed = new Set(["config.json", "data/agent-pigeon.sqlite", "data/credentials.key"]);
+  const allowed = new Set(["config.json", "data/imgent.sqlite", "data/credentials.key"]);
   for (const file of archive.files) {
     if (
       !allowed.has(file.path) &&
@@ -180,14 +176,14 @@ export async function restoreBackup(
     mode: 0o700,
   });
   if (overwrite) {
-    await rm(join(dataDir, "agent-pigeon.sqlite-wal"), { force: true });
-    await rm(join(dataDir, "agent-pigeon.sqlite-shm"), { force: true });
+    await rm(join(dataDir, "imgent.sqlite-wal"), { force: true });
+    await rm(join(dataDir, "imgent.sqlite-shm"), { force: true });
   }
   for (const file of archive.files) {
     if (file.path === "config.json") continue;
     const target =
-      file.path === "data/agent-pigeon.sqlite"
-        ? join(dataDir, "agent-pigeon.sqlite")
+      file.path === "data/imgent.sqlite"
+        ? join(dataDir, "imgent.sqlite")
         : file.path === "data/credentials.key"
           ? join(dataDir, "credentials.key")
           : join(dataDir, "credentials", file.path.slice("data/credentials/".length));
@@ -211,8 +207,8 @@ export async function restoreBackup(
   );
 
   const credentials = new CredentialStore(dataDir);
-  const store = await PigeonStore.open(
-    join(dataDir, "agent-pigeon.sqlite"),
+  const store = await IMGentStore.open(
+    join(dataDir, "imgent.sqlite"),
     await credentials.secretBox(),
   );
   try {

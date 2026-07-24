@@ -4,23 +4,23 @@ import { mkdir } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
-import { authorizeWechatIlink } from "@agent-pigeon/adapter-wechat-ilink";
+import { authorizeWechatIlink } from "@imgent/adapter-wechat-ilink";
 import { Command, Option } from "commander";
 import qrcode from "qrcode-terminal";
 import { createBackup, restoreBackup } from "../backup/service.js";
 import { defaultConfig } from "../config/index.js";
 import { readRawConfig, updateConfig, writeConfig } from "../config/write.js";
-import { AgentPigeonApplication } from "../runtime/application.js";
+import { IMGentApplication } from "../runtime/application.js";
 import { openAdminContext } from "./context.js";
-import type { AgentProfile, BotInstance } from "@agent-pigeon/contracts";
+import type { AgentProfile, BotInstance } from "@imgent/contracts";
 
 const program = new Command();
 
 program
-  .name("agent-pigeon")
+  .name("imgent")
   .description("将 QQ 与微信 iLink 安全桥接到本地 Codex / Claude Code")
   .version("0.1.0")
-  .option("-c, --config <path>", "配置文件路径", resolve("agent-pigeon.json"));
+  .option("-c, --config <path>", "配置文件路径", resolve("imgent.json"));
 
 program
   .command("init")
@@ -110,7 +110,7 @@ bot
   .option(
     "--app-secret-env <name>",
     "从环境变量读取 QQ AppSecret 并加密落盘",
-    "AGENT_PIGEON_QQ_APP_SECRET",
+    "IMGENT_QQ_APP_SECRET",
   )
   .action(
     async (
@@ -334,9 +334,9 @@ program
       ok: nodeSupported(),
       details: process.versions.node,
     });
-    let application: AgentPigeonApplication | undefined;
+    let application: IMGentApplication | undefined;
     try {
-      application = await AgentPigeonApplication.create(configPathOf());
+      application = await IMGentApplication.create(configPathOf());
       const readiness = await application.checkReady();
       checks.push({
         check: "runtime",
@@ -360,7 +360,7 @@ program
   .command("status")
   .description("显示数据库积压、Bot 与 Agent readiness")
   .action(async () => {
-    const application = await AgentPigeonApplication.create(configPathOf());
+    const application = await IMGentApplication.create(configPathOf());
     try {
       print({
         database: application.store.status(),
@@ -405,7 +405,7 @@ program
   .command("start")
   .description("执行 readiness 后启动所有启用的机器人实例")
   .action(async () => {
-    const application = await AgentPigeonApplication.create(configPathOf());
+    const application = await IMGentApplication.create(configPathOf());
     try {
       await application.start();
       await Promise.race([once(process, "SIGINT"), once(process, "SIGTERM")]);
@@ -420,8 +420,7 @@ program
   .option("--output <file>", "备份文件路径")
   .action(async (options: { output?: string }) => {
     const output =
-      options.output ??
-      resolve(`agent-pigeon-${new Date().toISOString().replaceAll(":", "-")}.backup`);
+      options.output ?? resolve(`imgent-${new Date().toISOString().replaceAll(":", "-")}.backup`);
     print(await createBackup(configPathOf(), output));
   });
 
@@ -435,7 +434,7 @@ program
   });
 
 if (!nodeSupported()) {
-  process.stderr.write(`Agent Pigeon 需要 Node.js >= 24.18.0；当前为 ${process.versions.node}\n`);
+  process.stderr.write(`IMGent 需要 Node.js >= 24.18.0；当前为 ${process.versions.node}\n`);
   process.exitCode = 1;
 } else {
   program.parseAsync().catch((error) => {

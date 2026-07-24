@@ -1,7 +1,7 @@
 {
-  "name": "agent-pigeon",
+  "name": "imgent",
   "version": "0.1.0",
-  "description": "Self-hosted bridge from QQ and WeChat iLink to local Codex and Claude Code agents",
+  "description": "IMGent is a self-hosted bridge from QQ and WeChat iLink to local Codex and Claude Code agents",
   "type": "module",
   "private": true,
   "packageManager": "pnpm@11.16.0",
@@ -9,7 +9,7 @@
     "node": ">=24.18.0"
   },
   "bin": {
-    "agent-pigeon": "./dist/src/cli/main.js"
+    "imgent": "./dist/src/cli/main.js"
   },
   "scripts": {
     "build": "tsc -b",
@@ -23,15 +23,15 @@
     "test": "tsc -b && node --test --test-reporter=spec dist/tests/*.test.js",
     "verify:codex": "tsc -b && node scripts/codex-real-smoke.mjs",
     "start": "node dist/src/cli/main.js start",
-    "pigeon": "node dist/src/cli/main.js",
+    "imgent": "node dist/src/cli/main.js",
     "dev": "tsx src/cli/main.ts"
   },
   "dependencies": {
-    "@agent-pigeon/adapter-qq": "workspace:*",
-    "@agent-pigeon/adapter-wechat-ilink": "workspace:*",
-    "@agent-pigeon/contracts": "workspace:*",
-    "@agent-pigeon/driver-claude-code": "workspace:*",
-    "@agent-pigeon/driver-codex": "workspace:*",
+    "@imgent/adapter-qq": "workspace:*",
+    "@imgent/adapter-wechat-ilink": "workspace:*",
+    "@imgent/contracts": "workspace:*",
+    "@imgent/driver-claude-code": "workspace:*",
+    "@imgent/driver-codex": "workspace:*",
     "commander": "^15.0.0",
     "fastify": "^5.10.0",
     "qrcode-terminal": "^0.12.0",

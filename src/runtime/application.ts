@@ -1,9 +1,9 @@
 import { join } from "node:path";
-import { QqAdapter, type QqCredential } from "@agent-pigeon/adapter-qq";
-import { WechatIlinkAdapter, type WechatCredential } from "@agent-pigeon/adapter-wechat-ilink";
-import { conversationKey, textOf } from "@agent-pigeon/contracts";
-import { ClaudeCodeDriver } from "@agent-pigeon/driver-claude-code";
-import { CodexDriver } from "@agent-pigeon/driver-codex";
+import { QqAdapter, type QqCredential } from "@imgent/adapter-qq";
+import { WechatIlinkAdapter, type WechatCredential } from "@imgent/adapter-wechat-ilink";
+import { conversationKey, textOf } from "@imgent/contracts";
+import { ClaudeCodeDriver } from "@imgent/driver-claude-code";
+import { CodexDriver } from "@imgent/driver-codex";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ApprovalService } from "../approvals/service.js";
 import { loadConfig } from "../config/index.js";
@@ -13,17 +13,17 @@ import { MEMORY_HOST_TOOLS, MemoryHostTools } from "../memory/host-tools.js";
 import { MemoryService } from "../memory/service.js";
 import { ConversationScheduler } from "../queue/scheduler.js";
 import { CredentialStore } from "../security/credential-store.js";
-import { PigeonStore } from "../storage/store.js";
+import { IMGentStore } from "../storage/store.js";
 import { Logger } from "./logger.js";
 import { OutboundDispatcher } from "./outbound.js";
 import type {
   AgentDriver,
-  AgentPigeonConfig,
+  IMGentConfig,
   AgentProfile,
   ImAdapter,
   InboundMessage,
   OutboundMessage,
-} from "@agent-pigeon/contracts";
+} from "@imgent/contracts";
 
 const WECHAT_BASE_URL = "https://ilinkai.weixin.qq.com";
 
@@ -34,7 +34,7 @@ export interface ReadinessReport {
   profiles: Record<string, { ready: boolean; details: string[] }>;
 }
 
-export class AgentPigeonApplication {
+export class IMGentApplication {
   readonly identity: IdentityService;
   readonly memory: MemoryService;
   readonly approvals: ApprovalService;
@@ -55,8 +55,8 @@ export class AgentPigeonApplication {
 
   private constructor(
     readonly configPath: string,
-    readonly config: AgentPigeonConfig,
-    readonly store: PigeonStore,
+    readonly config: IMGentConfig,
+    readonly store: IMGentStore,
     private readonly credentials: CredentialStore,
   ) {
     this.profiles = new Map(config.agentProfiles.map((profile) => [profile.id, profile]));
@@ -81,14 +81,14 @@ export class AgentPigeonApplication {
     });
   }
 
-  static async create(configPath: string): Promise<AgentPigeonApplication> {
+  static async create(configPath: string): Promise<IMGentApplication> {
     const config = await loadConfig(configPath);
     const credentials = new CredentialStore(config.dataDir);
-    const store = await PigeonStore.open(
-      join(config.dataDir, "agent-pigeon.sqlite"),
+    const store = await IMGentStore.open(
+      join(config.dataDir, "imgent.sqlite"),
       await credentials.secretBox(),
     );
-    const application = new AgentPigeonApplication(configPath, config, store, credentials);
+    const application = new IMGentApplication(configPath, config, store, credentials);
     try {
       await application.assemble();
       return application;
@@ -262,7 +262,7 @@ export class AgentPigeonApplication {
   }
 
   async start(options: { skipReadiness?: boolean } = {}): Promise<void> {
-    if (this.started) throw new Error("Agent Pigeon 已启动");
+    if (this.started) throw new Error("IMGent 已启动");
     if (!options.skipReadiness) {
       const readiness = await this.checkReady();
       if (!readiness.ready) {
@@ -368,7 +368,7 @@ export class AgentPigeonApplication {
         return;
       }
     }
-    const command = parseCommand(textOf(message.parts));
+    const command = parseIMGentCommand(textOf(message.parts));
     const directPaired =
       message.conversation.kind === "direct" &&
       this.store.get<{ paired: number }>(
@@ -410,7 +410,7 @@ export class AgentPigeonApplication {
           message,
           [
             "此身份尚未配对，当前不会运行 Agent。",
-            `请部署者在本机执行：agent-pigeon pair ${code}`,
+            `请部署者在本机执行：imgent pair ${code}`,
             "配对码 10 分钟内有效且只能使用一次。",
           ].join("\n"),
           `pairing:${ingested.eventId}`,
@@ -460,7 +460,7 @@ export class AgentPigeonApplication {
   }
 
   private async handleCommand(
-    command: PigeonCommand,
+    command: IMGentCommand,
     message: InboundMessage,
     key: string,
     principalId: string,
@@ -502,7 +502,7 @@ export class AgentPigeonApplication {
             throw new Error("绑定码只能在私聊中创建");
           }
           const code = this.identity.createBindingCode(platformIdentityId);
-          response = `绑定码：${code}\n请在另一个已经配对的私聊身份中发送 /pigeon bind ${code}`;
+          response = `绑定码：${code}\n请在另一个已经配对的私聊身份中发送 /imgent bind ${code}`;
           break;
         }
         case "bind-consume": {
@@ -525,18 +525,18 @@ export class AgentPigeonApplication {
           );
           response =
             command.mode === "full"
-              ? "已开启本群全量采集：普通消息仅用于本群上下文，原文默认保留 7 天；发送 /pigeon group triggered 可关闭。"
+              ? "已开启本群全量采集：普通消息仅用于本群上下文，原文默认保留 7 天；发送 /imgent group triggered 可关闭。"
               : "已恢复 triggered 模式：新的普通群消息不再持久化，只有触发消息会运行 Agent。";
           break;
         }
         case "help":
           response = [
-            "/pigeon cancel",
-            "/pigeon bind [绑定码]",
-            "/pigeon allow <requestId>",
-            "/pigeon deny <requestId>",
-            "/pigeon answer <requestId> <内容>",
-            "/pigeon group full|triggered",
+            "/imgent cancel",
+            "/imgent bind [绑定码]",
+            "/imgent allow <requestId>",
+            "/imgent deny <requestId>",
+            "/imgent answer <requestId> <内容>",
+            "/imgent group full|triggered",
           ].join("\n");
           break;
       }
@@ -565,7 +565,7 @@ export class AgentPigeonApplication {
   }
 }
 
-type PigeonCommand =
+export type IMGentCommand =
   | { name: "cancel" }
   | { name: "allow" | "deny"; requestId: string }
   | { name: "answer"; requestId: string; value: string }
@@ -574,10 +574,10 @@ type PigeonCommand =
   | { name: "group-mode"; mode: "triggered" | "full" }
   | { name: "help" };
 
-function parseCommand(text: string): PigeonCommand | undefined {
+export function parseIMGentCommand(text: string): IMGentCommand | undefined {
   const normalized = text.trim();
   if (normalized === "取消") return { name: "cancel" };
-  if (!normalized.startsWith("/pigeon")) return undefined;
+  if (normalized !== "/imgent" && !normalized.startsWith("/imgent ")) return undefined;
   const parts = normalized.split(/\s+/u);
   const action = parts[1]?.toLowerCase();
   if (!action || action === "help") return { name: "help" };

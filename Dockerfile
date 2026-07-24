@@ -22,7 +22,7 @@ EXPOSE 8787
 VOLUME ["/app/data", "/workspaces"]
 
 ENTRYPOINT ["node", "dist/src/cli/main.js"]
-CMD ["--config", "/app/data/agent-pigeon.json", "start"]
+CMD ["--config", "/app/data/imgent.json", "start"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]

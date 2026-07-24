@@ -1,6 +1,6 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import type { CdnMedia, MessageItem } from "./protocol.js";
-import type { AttachmentRef } from "@agent-pigeon/contracts";
+import type { AttachmentRef } from "@imgent/contracts";
 
 export interface WechatHttpClient {
   post<T>(path: string, body: Record<string, unknown>, timeoutMs?: number): Promise<T>;

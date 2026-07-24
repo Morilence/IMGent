@@ -1,16 +1,16 @@
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { configSchema } from "./schema.js";
-import type { AgentPigeonConfig } from "@agent-pigeon/contracts";
+import type { IMGentConfig } from "@imgent/contracts";
 
-export async function readRawConfig(path: string): Promise<AgentPigeonConfig> {
+export async function readRawConfig(path: string): Promise<IMGentConfig> {
   const value = JSON.parse(await readFile(resolve(path), "utf8")) as unknown;
-  return configSchema.parse(value) as AgentPigeonConfig;
+  return configSchema.parse(value) as IMGentConfig;
 }
 
 export async function writeConfig(
   path: string,
-  config: AgentPigeonConfig,
+  config: IMGentConfig,
   overwrite = true,
 ): Promise<void> {
   const validated = configSchema.parse(config);
@@ -43,8 +43,8 @@ export async function writeConfig(
 
 export async function updateConfig(
   path: string,
-  transform: (config: AgentPigeonConfig) => AgentPigeonConfig,
-): Promise<AgentPigeonConfig> {
+  transform: (config: IMGentConfig) => IMGentConfig,
+): Promise<IMGentConfig> {
   const next = transform(await readRawConfig(path));
   await writeConfig(path, next);
   return next;

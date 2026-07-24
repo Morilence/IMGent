@@ -2,7 +2,7 @@ node_modules/
 dist/
 packages/*/dist/
 *.tsbuildinfo
-.agent-pigeon/
+.imgent/
 data/
 *.sqlite
 *.sqlite-shm

@@ -1,7 +1,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { configSchema } from "./schema.js";
-import type { AgentPigeonConfig } from "@agent-pigeon/contracts";
+import type { IMGentConfig } from "@imgent/contracts";
 
 export class ConfigError extends Error {
   constructor(message: string) {
@@ -15,7 +15,7 @@ function isInside(path: string, root: string): boolean {
   return result === "" || (!result.startsWith("..") && !isAbsolute(result));
 }
 
-export async function loadConfig(path: string): Promise<AgentPigeonConfig> {
+export async function loadConfig(path: string): Promise<IMGentConfig> {
   let raw: unknown;
   try {
     raw = JSON.parse(await readFile(path, "utf8")) as unknown;
@@ -101,7 +101,7 @@ export async function loadConfig(path: string): Promise<AgentPigeonConfig> {
   };
 }
 
-export function defaultConfig(workspace: string): AgentPigeonConfig {
+export function defaultConfig(workspace: string): IMGentConfig {
   return {
     version: 1,
     dataDir: "./data",

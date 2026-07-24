@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { test } from "node:test";
-import { conversationKey } from "@agent-pigeon/contracts";
+import { conversationKey } from "@imgent/contracts";
 import { ApprovalService } from "../src/approvals/service.js";
 import { IdentityService } from "../src/identity/service.js";
 import { MemoryCurator } from "../src/memory/curator.js";
 import { MemoryService } from "../src/memory/service.js";
 import { redactForLog } from "../src/runtime/logger.js";
 import { SecretBox } from "../src/security/secret-box.js";
-import { PigeonStore } from "../src/storage/store.js";
+import { IMGentStore } from "../src/storage/store.js";
 import { directMessage, testStore } from "./helpers.js";
 
 test("ingest is atomic, idempotent and advances checkpoints", async () => {
@@ -77,10 +77,10 @@ test("scheduler claims FIFO per conversation while allowing another conversation
 test("restart recovery requeues safe work and dead-letters possibly executed work", async () => {
   const directory = await (
     await import("node:fs/promises")
-  ).mkdtemp(`${(await import("node:os")).tmpdir()}/agent-pigeon-restart-`);
+  ).mkdtemp(`${(await import("node:os")).tmpdir()}/imgent-restart-`);
   const key = randomBytes(32);
   const path = `${directory}/state.sqlite`;
-  let store = await PigeonStore.open(path, new SecretBox(key));
+  let store = await IMGentStore.open(path, new SecretBox(key));
   const first = store.ingest(
     directMessage({ messageId: "safe", dedupeKey: "safe" }),
     "main",
@@ -95,7 +95,7 @@ test("restart recovery requeues safe work and dead-letters possibly executed wor
   assert.equal(store.claimNextTask()?.id, second.taskId);
   store.markDangerousSideEffect(second.taskId!);
   store.close();
-  store = await PigeonStore.open(path, new SecretBox(key));
+  store = await IMGentStore.open(path, new SecretBox(key));
   const recovered = store.recoverAfterRestart();
   assert.deepEqual(recovered, { requeued: 1, deadLettered: 1 });
   assert.equal(store.task(first.taskId!)?.status, "queued");

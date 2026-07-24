@@ -3,16 +3,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SecretBox } from "../src/security/secret-box.js";
-import { PigeonStore } from "../src/storage/store.js";
-import type { InboundMessage } from "@agent-pigeon/contracts";
+import { IMGentStore } from "../src/storage/store.js";
+import type { InboundMessage } from "@imgent/contracts";
 
 export async function testStore(): Promise<{
   directory: string;
-  store: PigeonStore;
+  store: IMGentStore;
   cleanup: () => Promise<void>;
 }> {
-  const directory = await mkdtemp(join(tmpdir(), "agent-pigeon-test-"));
-  const store = await PigeonStore.open(
+  const directory = await mkdtemp(join(tmpdir(), "imgent-test-"));
+  const store = await IMGentStore.open(
     join(directory, "test.sqlite"),
     new SecretBox(randomBytes(32)),
   );

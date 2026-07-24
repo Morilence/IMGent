@@ -1,20 +1,20 @@
-import { textOf } from "@agent-pigeon/contracts";
+import { textOf } from "@imgent/contracts";
 import { Logger } from "../runtime/logger.js";
 import type { ApprovalService } from "../approvals/service.js";
 import type { MemoryHostTools } from "../memory/host-tools.js";
 import type { MemoryContext, MemoryService } from "../memory/service.js";
 import type { OutboundDispatcher } from "../runtime/outbound.js";
-import type { PigeonStore, StoredTask } from "../storage/store.js";
+import type { IMGentStore, StoredTask } from "../storage/store.js";
 import type {
   AgentDriver,
   AgentProfile,
   AgentRequestAnswer,
   ImAdapter,
   OutboundMessage,
-} from "@agent-pigeon/contracts";
+} from "@imgent/contracts";
 
 export interface SchedulerOptions {
-  store: PigeonStore;
+  store: IMGentStore;
   profiles: ReadonlyMap<string, AgentProfile>;
   drivers: ReadonlyMap<string, AgentDriver>;
   adapters: ReadonlyMap<string, ImAdapter>;
@@ -155,8 +155,8 @@ export class ConversationScheduler {
                 `需要审批：${event.request.toolName}`,
                 `风险：${event.request.risk}`,
                 `请求：${JSON.stringify(event.request.sanitizedInput)}`,
-                `允许：/pigeon allow ${event.request.requestId}`,
-                `拒绝：/pigeon deny ${event.request.requestId}`,
+                `允许：/imgent allow ${event.request.requestId}`,
+                `拒绝：/imgent deny ${event.request.requestId}`,
               ].join("\n"),
               `approval:${event.request.requestId}`,
             );
@@ -183,7 +183,7 @@ export class ConversationScheduler {
               [
                 event.request.prompt,
                 ...(event.request.choices?.map((choice) => `- ${choice}`) ?? []),
-                `回答：/pigeon answer ${event.request.requestId} <内容>`,
+                `回答：/imgent answer ${event.request.requestId} <内容>`,
               ].join("\n"),
               `question:${event.request.requestId}`,
             );

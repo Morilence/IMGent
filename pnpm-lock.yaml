@@ -17,19 +17,19 @@ importers:
 
   .:
     dependencies:
-      '@agent-pigeon/adapter-qq':
+      '@imgent/adapter-qq':
         specifier: workspace:*
         version: link:packages/im-adapters/qq
-      '@agent-pigeon/adapter-wechat-ilink':
+      '@imgent/adapter-wechat-ilink':
         specifier: workspace:*
         version: link:packages/im-adapters/wechat-ilink
-      '@agent-pigeon/contracts':
+      '@imgent/contracts':
         specifier: workspace:*
         version: link:packages/contracts
-      '@agent-pigeon/driver-claude-code':
+      '@imgent/driver-claude-code':
         specifier: workspace:*
         version: link:packages/agent-drivers/claude-code
-      '@agent-pigeon/driver-codex':
+      '@imgent/driver-codex':
         specifier: workspace:*
         version: link:packages/agent-drivers/codex
       commander:
@@ -99,7 +99,7 @@ importers:
 
   packages/agent-drivers/claude-code:
     dependencies:
-      '@agent-pigeon/contracts':
+      '@imgent/contracts':
         specifier: workspace:*
         version: link:../../contracts
       '@anthropic-ai/claude-agent-sdk':
@@ -124,7 +124,7 @@ importers:
 
   packages/agent-drivers/codex:
     dependencies:
-      '@agent-pigeon/contracts':
+      '@imgent/contracts':
         specifier: workspace:*
         version: link:../../contracts
     devDependencies:
@@ -146,7 +146,7 @@ importers:
 
   packages/im-adapters/qq:
     dependencies:
-      '@agent-pigeon/contracts':
+      '@imgent/contracts':
         specifier: workspace:*
         version: link:../../contracts
       ws:
@@ -165,7 +165,7 @@ importers:
 
   packages/im-adapters/wechat-ilink:
     dependencies:
-      '@agent-pigeon/contracts':
+      '@imgent/contracts':
         specifier: workspace:*
         version: link:../../contracts
     devDependencies:

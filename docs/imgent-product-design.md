@@ -1,4 +1,4 @@
-# Agent Pigeon（信鸽）产品设计与落地指南
+# IMGent产品设计与落地指南
 
 > 状态：v0.2 设计基线
 > 最后核验：2026-07-23
@@ -11,9 +11,9 @@
 
 ## 1. 产品概述
 
-Agent Pigeon 是一个自托管的消息 Agent 框架。它把 QQ 官方机器人和微信 iLink 中的消息可靠地交给部署者本机已经登录的 Codex 或 Claude Code，再把结果送回原会话。
+IMGent 是一个自托管的消息 Agent 框架。它把 QQ 官方机器人和微信 iLink 中的消息可靠地交给部署者本机已经登录的 Codex 或 Claude Code，再把结果送回原会话。
 
-产品面向个人开发者和由单一部署者管理的小团队。部署者不需要为 v1 的本地 Agent 驱动配置模型 API Key，也不需要把会话和长期记忆交给额外的云端记忆服务。Agent Pigeon 负责平台连接、身份映射、消息顺序、权限审批、会话恢复和长期记忆；本地 Agent 负责理解消息、执行任务和生成回答。
+产品面向个人开发者和由单一部署者管理的小团队。部署者不需要为 v1 的本地 Agent 驱动配置模型 API Key，也不需要把会话和长期记忆交给额外的云端记忆服务。IMGent 负责平台连接、身份映射、消息顺序、权限审批、会话恢复和长期记忆；本地 Agent 负责理解消息、执行任务和生成回答。
 
 ### 1.1 要解决的问题
 
@@ -98,7 +98,7 @@ Agent Pigeon 是一个自托管的消息 Agent 框架。它把 QQ 官方机器�
 
 #### 部署者
 
-- 安装和运行 Agent Pigeon。
+- 安装和运行 IMGent。
 - 登录本地 Codex / Claude Code。
 - 配置 AgentProfile、工作区和权限上限。
 - 配置 QQ 机器人应用并完成微信 iLink Bot 的 QR 授权。
@@ -159,7 +159,7 @@ v1 支持：
 
 两种方式都运行同一个 Node.js 进程并使用一个本地 SQLite 文件。Docker 需要挂载：
 
-- Agent Pigeon 数据目录。
+- IMGent 数据目录。
 - 目标工作区。
 - 部署者明确允许使用的 Codex / Claude Code 配置目录。
 
@@ -168,17 +168,17 @@ v1 支持：
 ### 4.2 CLI
 
 ```text
-agent-pigeon init
-agent-pigeon bot add qq
-agent-pigeon bot add wechat-ilink
-agent-pigeon bot authorize wechat-ilink <bot-instance>
-agent-pigeon profile add
-agent-pigeon pair
-agent-pigeon doctor
-agent-pigeon start
-agent-pigeon status
-agent-pigeon backup
-agent-pigeon restore <file>
+imgent init
+imgent bot add qq
+imgent bot add wechat-ilink
+imgent bot authorize wechat-ilink <bot-instance>
+imgent profile add
+imgent pair
+imgent doctor
+imgent start
+imgent status
+imgent backup
+imgent restore <file>
 ```
 
 - `init` 创建最小配置和数据目录。
@@ -229,7 +229,7 @@ agent-pigeon restore <file>
       "id": "qq-main",
       "adapter": "qq",
       "transport": "websocket",
-      "platformBotIdEnv": "AGENT_PIGEON_QQ_APP_ID",
+      "platformBotIdEnv": "IMGENT_QQ_APP_ID",
       "credentialRef": "qq-main",
       "groupIngestionDefault": "triggered"
     },
@@ -292,7 +292,7 @@ agent-pigeon restore <file>
 ### 5.2 Monorepo
 
 ```text
-agent-pigeon/
+imgent/
 ├─ package.json
 ├─ pnpm-workspace.yaml
 ├─ src/
@@ -317,7 +317,7 @@ agent-pigeon/
 
 约束：
 
-- 根包是 `agent-pigeon` CLI 和运行时，主要实现始终位于 `src/`。
+- 根包是 `imgent` CLI 和运行时，主要实现始终位于 `src/`。
 - `pnpm-workspace.yaml` 分别声明 `packages/im-adapters/*` 与 `packages/agent-drivers/*`。
 - v1 适配器位于 `packages/im-adapters/qq` 和 `packages/im-adapters/wechat-ilink`。
 - Codex 与 Claude Code 驱动分别位于 `packages/agent-drivers/codex` 和 `packages/agent-drivers/claude-code`。
@@ -500,7 +500,7 @@ QQ adapter 负责：
 - 结合 `msg_id` 与消息序号 / 索引生成去重键。
 - 管理回复 `msg_seq`、被动回复时效和主动消息回退。
 
-群全量权限与本地群策略是两个条件：平台能收到全部消息，不代表 Agent Pigeon 可以保存；本地已开启 `full`，但平台权限缺失时 readiness 仍失败。
+群全量权限与本地群策略是两个条件：平台能收到全部消息，不代表 IMGent 可以保存；本地已开启 `full`，但平台权限缺失时 readiness 仍失败。
 
 ### 8.2 微信 iLink
 
@@ -597,7 +597,7 @@ AgentProfile 内的规范人物。一个 Principal 可以绑定多个平台身�
 
 #### `BotInstance`
 
-Agent Pigeon 中一个已配置、可独立启动和路由的官方机器人连接：
+IMGent 中一个已配置、可独立启动和路由的官方机器人连接：
 
 ```text
 botInstanceId
@@ -610,7 +610,7 @@ botInstanceId
 - `botInstanceId` 是本地稳定 ID，用于配置、路由、会话和存储命名空间。
 - `platformBotId` 是平台分配的机器人标识：QQ 使用 AppID；微信使用 QR 授权返回的 `ilink_bot_id`。
 - `credentialRef` 指向本地凭据，不包含 secret 或 token 本身。
-- `authorizingPlatformUserId` 仅用于需要用户扫码授权的微信 iLink，对应 `ilink_user_id`；它不表示 Agent Pigeon 登录或模拟了该用户的个人微信客户端。
+- `authorizingPlatformUserId` 仅用于需要用户扫码授权的微信 iLink，对应 `ilink_user_id`；它不表示 IMGent 登录或模拟了该用户的个人微信客户端。
 
 #### `PlatformIdentity`
 
@@ -820,7 +820,7 @@ interface AgentDriver {
 
 ### 12.4 认证边界
 
-- Agent Pigeon 只调用部署者已经登录的本地 CLI。
+- IMGent 只调用部署者已经登录的本地 CLI。
 - 不实现第三方登录 UI，不读取或转发 OAuth token。
 - `doctor` 验证命令、版本、登录态、工作目录和最小协议握手。
 - Claude Code 的技术支持不改变 Anthropic 对订阅凭据和第三方服务的条款；部署者负责确认自己的使用方式被允许。
@@ -919,7 +919,7 @@ SQLite 保存：
 
 ### 14.4 备份
 
-`agent-pigeon backup`：
+`imgent backup`：
 
 1. 确保数据库处于一致状态。
 2. 使用 SQLite backup 能力创建快照。
@@ -958,7 +958,7 @@ Info 和 Debug 默认都不记录完整消息正文、记忆值、平台 token �
 - `GET /healthz`：进程仍能响应。
 - `GET /readyz`：数据库可写、迁移完成、至少一个启用 BotInstance 和对应 AgentProfile ready。
 
-`agent-pigeon status` 额外显示：
+`imgent status` 额外显示：
 
 - 各 BotInstance 的 Transport 状态、最后事件时间和 checkpoint。
 - QQ 全量事件权限与群采集模式数量。
@@ -1026,8 +1026,8 @@ Info 和 Debug 默认都不记录完整消息正文、记忆值、平台 token �
 建议使用明确命令：
 
 ```text
-/pigeon group full
-/pigeon group triggered
+/imgent group full
+/imgent group triggered
 ```
 
 开启成功时回复采集范围、7 天原文保留和关闭命令。非管理员、未配对、平台角色未知或缺少全量权限时说明具体拒绝原因。

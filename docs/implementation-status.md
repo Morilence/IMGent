@@ -1,6 +1,6 @@
-# Agent Pigeon v1 implementation status
+# IMGent v1 implementation status
 
-本仓库按 `agent-pigeon-product-design.md` 的 v1 边界实现，并采用后续确认的
+本仓库按 `imgent-product-design.md` 的 v1 边界实现，并采用后续确认的
 pnpm monorepo 结构：
 
 - 根包：单进程运行时、SQLite、身份、审批、记忆、队列、CLI、管理端点与备份。

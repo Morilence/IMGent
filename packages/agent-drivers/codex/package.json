@@ -1,5 +1,5 @@
 {
-  "name": "@agent-pigeon/driver-codex",
+  "name": "@imgent/driver-codex",
   "version": "0.1.0",
   "type": "module",
   "private": true,
@@ -12,7 +12,7 @@
     }
   },
   "dependencies": {
-    "@agent-pigeon/contracts": "workspace:*"
+    "@imgent/contracts": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",
