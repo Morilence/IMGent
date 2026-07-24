@@ -19,7 +19,7 @@ import { defaultConfig } from "../src/config/index.js";
 import { writeConfig } from "../src/config/write.js";
 import { SkillHostTools } from "../src/skills/host-tools.js";
 import { builtInSkillsDirectory } from "../src/skills/paths.js";
-import { CONVERSATION_SKILL, CURATION_SKILL, SkillRegistry } from "../src/skills/registry.js";
+import { CONVERSATION_SKILL, MEMORY_SKILL, SkillRegistry } from "../src/skills/registry.js";
 
 const execute = promisify(execFile);
 
@@ -40,12 +40,10 @@ test("SkillRegistry applies full user overrides and provider-independent profile
       registry.visible(["release-check"]).map((skill) => skill.name),
       ["release-check"],
     );
-    assert.equal(
-      registry.visible(["*"]).some((skill) => skill.name === CURATION_SKILL),
-      false,
-    );
     assert.throws(() => registry.visible(["missing-skill"]), /不存在/);
-    assert.throws(() => registry.visible([CURATION_SKILL]), /内部 skill/);
+    assert.match(registry.require(MEMORY_SKILL).body, /Interactive conversation mode/);
+    assert.match(registry.require(MEMORY_SKILL).body, /Background curation mode/);
+    assert.equal(registry.get("imgent-memory-curation"), undefined);
     const withoutMemory = registry.developerInstructions(["*"], false);
     assert.match(withoutMemory, /deployment-specific conversation policy/i);
     assert.match(withoutMemory, /release-check: Check releases/);

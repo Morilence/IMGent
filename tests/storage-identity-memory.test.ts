@@ -487,6 +487,10 @@ test("full-mode group context gets seven-day retention and asynchronous scoped c
       assert.equal(input.ephemeral, true);
       assert.equal(input.builtInTools, "none");
       assert.deepEqual(input.hostTools, ["memory.search", "memory.remember"]);
+      const developerInstructions = input.developerInstructions ?? "";
+      assert.match(developerInstructions, /IMGent background memory curation/);
+      assert.match(developerInstructions, /## Background curation mode/);
+      assert.doesNotMatch(developerInstructions, /imgent-memory-curation/);
       const result = await hostTools.handle({
         turnId: input.turnId,
         namespace: "memory",

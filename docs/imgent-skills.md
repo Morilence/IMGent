@@ -21,9 +21,8 @@ IMGent 在启动时读取两层目录：
 内置 skills：
 
 - `imgent-conversation`：普通 IM turn 始终注入。
-- `imgent-memory`：`memory.enabled` 时始终注入。
-- `imgent-memory-curation`：仅供后台 Curator 临时 turn 使用，不出现在普通
-  profile 的可见 catalog。
+- `imgent-memory`：`memory.enabled` 时始终注入；同一技能按 Host 选择的模式
+  同时指导普通会话中的记忆操作和后台 Curator 的保守策展。
 
 ## 包格式
 
@@ -110,7 +109,8 @@ imgent skills init release-check \
 skills 的 Host Tool；只有能访问本机配置和数据目录的部署者可以管理它们。
 
 修改后先运行 `imgent skills validate`，再重启 IMGent。若用户层覆盖
-`imgent-conversation`、`imgent-memory` 或 `imgent-memory-curation`，覆盖
-内容也仍受相同 Host Tool 白名单、scope、敏感数据规则与权限上限约束。
+`imgent-conversation` 或 `imgent-memory`，覆盖内容也仍受相同 Host Tool
+白名单、scope、敏感数据规则与权限上限约束。覆盖 `imgent-memory` 会同时
+影响交互记忆和后台策展的语义指令，但不会扩大任一 turn 的工具权限。
 `imgent backup` 会连同文件执行位一起备份用户层 skills，恢复时仍执行安全
 路径与权限校验；内置层由 IMGent 版本本身提供。

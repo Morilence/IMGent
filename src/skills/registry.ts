@@ -8,9 +8,6 @@ const MAX_SKILL_PACKAGE_BYTES = 10 * 1024 * 1024;
 
 export const CONVERSATION_SKILL = "imgent-conversation";
 export const MEMORY_SKILL = "imgent-memory";
-export const CURATION_SKILL = "imgent-memory-curation";
-
-const INTERNAL_SKILLS = new Set([CURATION_SKILL]);
 
 export type SkillSource = "builtin" | "user";
 
@@ -44,7 +41,7 @@ export class SkillRegistry {
     const user = await scanRoot(userRoot, "user");
     const merged = new Map(builtin);
     for (const [name, definition] of user) merged.set(name, definition);
-    for (const required of [CONVERSATION_SKILL, MEMORY_SKILL, CURATION_SKILL]) {
+    for (const required of [CONVERSATION_SKILL, MEMORY_SKILL]) {
       if (!merged.has(required)) throw new Error(`缺少 IMGent 必需 skill: ${required}`);
     }
     return new SkillRegistry(merged);
@@ -67,15 +64,10 @@ export class SkillRegistry {
   }
 
   visible(requested: readonly string[], memoryEnabled = true): SkillDefinition[] {
-    const available = this.all().filter(
-      (skill) => !INTERNAL_SKILLS.has(skill.name) && (memoryEnabled || skill.name !== MEMORY_SKILL),
-    );
+    const available = this.all().filter((skill) => memoryEnabled || skill.name !== MEMORY_SKILL);
     if (requested.includes("*")) return available;
     const selected: SkillDefinition[] = [];
     for (const name of requested) {
-      if (INTERNAL_SKILLS.has(name)) {
-        throw new Error(`内部 skill 不能分配给普通会话: ${name}`);
-      }
       const definition = this.definitions.get(name);
       if (!definition) throw new Error(`AgentProfile 引用了不存在的 skill: ${name}`);
       if (memoryEnabled || name !== MEMORY_SKILL) selected.push(definition);

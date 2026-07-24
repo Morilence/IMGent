@@ -1,6 +1,6 @@
 import { normalizeError, textOf } from "@imgent/contracts";
 import { Logger } from "../runtime/logger.js";
-import { CURATION_SKILL, type SkillRegistry } from "../skills/registry.js";
+import { MEMORY_SKILL, type SkillRegistry } from "../skills/registry.js";
 import type { MemoryContext, MemoryService } from "./service.js";
 import type { IMGentHostTools } from "../runtime/host-tools.js";
 import type { IMGentStore } from "../storage/store.js";
@@ -157,7 +157,8 @@ export class MemoryCurator {
         memoryContext: [],
         developerInstructions: [
           "# IMGent background memory curation",
-          this.options.skills.require(CURATION_SKILL).body,
+          "The host has selected the Background curation mode described by the following skill.",
+          this.options.skills.require(MEMORY_SKILL).body,
         ].join("\n\n"),
         ephemeral: true,
         hostTools: [...CURATOR_TOOLS],

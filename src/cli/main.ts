@@ -14,7 +14,7 @@ import { readRawConfig, updateConfig, writeConfig } from "../config/write.js";
 import { normalizeLocale, renderError, renderErrorText, resolveLocale } from "../i18n/index.js";
 import { IMGentApplication, renderReadiness } from "../runtime/application.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
-import { CURATION_SKILL, SkillRegistry } from "../skills/registry.js";
+import { SkillRegistry } from "../skills/registry.js";
 import { openAdminContext } from "./context.js";
 import { cliErrorEnvelope, cliExitCode, cliSuccessEnvelope } from "./presentation.js";
 import type {
@@ -132,7 +132,6 @@ skillsCommand
         name: skill.name,
         description: skill.description,
         source: skill.source,
-        internal: skill.name === CURATION_SKILL,
         files: skill.files,
         bytes: skill.bytes,
       })),

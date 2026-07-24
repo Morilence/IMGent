@@ -308,8 +308,7 @@ imgent/
 ├─ pnpm-workspace.yaml
 ├─ skills/
 │  ├─ imgent-conversation/
-│  ├─ imgent-memory/
-│  └─ imgent-memory-curation/
+│  └─ imgent-memory/
 ├─ src/
 │  ├─ cli/
 │  ├─ config/
@@ -838,7 +837,7 @@ memory.forget
 
 1. 读取当前消息、Agent 最终回复和当前作用域内的相关 active 记忆。
 2. 使用当前 AgentProfile 对应的 Driver 启动无用户输出的 ephemeral turn。
-3. 只注入 `imgent-memory-curation`，只暴露 `memory.search` 与
+3. 以后台策展模式注入同一个 `imgent-memory`，只暴露 `memory.search` 与
    `memory.remember`；不暴露 Shell、update、forget 或用户问题。
 4. 每次工具调用仍由宿主校验 scope、类型、长度、来源和敏感内容，并对
    factKey 冲突执行 supersede。

@@ -25,7 +25,6 @@ packages/
 skills/
   imgent-conversation/
   imgent-memory/
-  imgent-memory-curation/
 src/
   cli/ config/ runtime/ queue/ storage/
   identity/ approvals/ memory/ skills/ security/ backup/
