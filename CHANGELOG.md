@@ -1,5 +1,12 @@
 # imgent
 
+## 0.2.0-alpha.7
+
+### Minor Changes
+
+- a2d50d2: Harden participant-aware memory retention, restart recovery, principal binding, baseline recall,
+  and local control discovery, and add indexes for recent context and memory audit queries.
+
 ## 0.2.0-alpha.6
 
 ### Minor Changes

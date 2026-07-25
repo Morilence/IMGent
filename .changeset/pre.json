@@ -14,6 +14,7 @@
     "add-scheduled-agent-tasks",
     "align-npm-latest",
     "clean-runtime-boundaries",
+    "harden-memory-runtime",
     "improve-im-pairing-workspaces",
     "instantiate-license-copyright",
     "perceive-conversation-members",
