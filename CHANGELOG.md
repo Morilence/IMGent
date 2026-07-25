@@ -1,5 +1,12 @@
 # imgent
 
+## 0.2.0-alpha.3
+
+### Patch Changes
+
+- eeb013d: Add Morilence author and copyright attribution to the npm package, README files, and distributed
+  Apache-2.0 NOTICE.
+
 ## 0.2.0-alpha.2
 
 ### Patch Changes

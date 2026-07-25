@@ -10,6 +10,7 @@
     "@imgent/adapter-wechat-ilink": "0.1.0"
   },
   "changesets": [
+    "add-owner-attribution",
     "add-scheduled-agent-tasks",
     "align-npm-latest",
     "clean-runtime-boundaries",
