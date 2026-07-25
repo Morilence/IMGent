@@ -118,7 +118,29 @@ IMGent 是一个自托管的消息 Agent 框架。它把 QQ 官方机器人和�
 - 可以管理自己的私聊记忆。
 - 无权读取他人的私聊记忆、其他群记忆或部署凭据。
 
-### 3.2 私聊
+### 3.2 身份感知与 Agent 输入
+
+身份感知目录和长期记忆是两套不同事实：
+
+- `Principal`、`PlatformIdentity`、`ConversationSpace` 和 `GroupMembership` 在每次
+  入站时确定性维护，用来回答“当前是谁、在哪里发言、具有什么群角色”。
+- `MemoryRecord` 是 Agent 筛选后的长期资料；Curator 可以决定不写入，但不能因此
+  丢失身份或群成员关系。
+
+每个普通、定时和后台策展 turn 都携带必填 `AgentTurnContext`。传给 Codex/Claude
+的原始 prompt 前固定加入一行：
+
+```text
+[IMGent Context] {"conversation":{"kind":"group","ref":"group_7bc41a930f","platform":"qq","botInstanceId":"qq-main"},"speaker":{"ref":"person_a42f9c10de","displayName":"示例用户","role":"member"}}
+```
+
+`person_*` 由 AgentProfile + Principal 生成，因而人工绑定后的同一用户在私聊和
+群聊中保持同一引用；`direct_*`/`group_*` 由 AgentProfile + ConversationSpace
+生成。短引用取 SHA-256 的前 10 个十六进制字符，只用于归因和展示，不参与鉴权。
+平台用户 ID、成员 ID 和完整内部 ID 不传给厂商 Agent。昵称可变且不可信，统一通过
+JSON 转义，缺失时省略；身份锚点始终是 `speaker.ref`。
+
+### 3.3 私聊
 
 用户直接向机器人发送任务。系统解析平台身份，在当前 AgentProfile 下映射到
 Principal，恢复厂商 Agent session 并加载该用户允许的 IMGent 私聊记忆，再调用
@@ -126,7 +148,7 @@ Principal，恢复厂商 Agent session 并加载该用户允许的 IMGent 私聊
 
 如果 QQ 与微信身份经过人工绑定，两端可以召回同一 Principal 的个人记忆，但各自保持独立 Agent session。
 
-### 3.3 QQ 群聊
+### 3.4 QQ 群聊
 
 `triggered` 模式下，成员通过 @机器人、回复机器人或命令发起对话。群内每条消息保留真实发言者身份、群成员 ID、角色、mentions 和引用关系。
 
@@ -142,11 +164,11 @@ Principal，恢复厂商 Agent session 并加载该用户允许的 IMGent 私聊
 Agent 上下文。策展后形成的群记忆可在后续触发 turn 中按作用域召回；该模式不会
 让群成员获得新的工具权限，也不会改变私聊隔离。
 
-### 3.4 连续任务
+### 3.5 连续任务
 
 一个会话中已有 active turn 时，新消息进入 FIFO 队列。用户可以等待、继续补充信息或取消当前任务。跨会话可以并发，同一会话不并发执行两个 turn。
 
-### 3.5 聊天内审批
+### 3.6 聊天内审批
 
 Agent 请求高风险工具时，系统把工具名、目标、影响和一次性审批按钮或文本命令发回原会话。审批只能由原请求对应的已授权 Principal 完成。
 
@@ -154,7 +176,7 @@ v1 的审批等待只在当前 IMGent/Driver 进程内有效。进程重启时�
 `waiting_approval` task 进入 dead letter，系统不猜测 Driver 是否已接受过答复，
 也不自动重放可能产生副作用的 turn。
 
-### 3.6 定时 Agent 任务
+### 3.7 定时 Agent 任务
 
 部署者可以在服务运行时从已发现的 ConversationSpace 创建一次性或五字段 cron
 计划。计划到期后，IMGent 创建普通 Agent task，完成后把带计划名和约定时间的结果
@@ -175,7 +197,7 @@ skill。
 时间或显式 `resume` 才会重新激活。删除采用软删除，之后仍可按计划 ID 查询既有
 运行与投递历史。
 
-### 3.7 跨平台身份绑定
+### 3.8 跨平台身份绑定
 
 已配对身份 A 在私聊中取得短期一次性绑定码，身份 B 在自己的私聊中提交该码；
 提交动作本身就是确认并立即建立绑定。系统不要求两端分别生成码，也不根据昵称
@@ -218,6 +240,7 @@ imgent bot authorize <bot-instance>
 imgent profile add
 imgent pair
 imgent conversation list
+imgent memory status|list|show
 imgent schedule add|list|update|pause|resume|remove|run|reset-context|history
 imgent doctor
 imgent --locale en-US status
@@ -243,7 +266,7 @@ imgent restore <file>
 | ------- | ------------------------------------------- | -------------------------------------------------------------------------------------- |
 | offline | 直接原子操作停服状态；服务运行时拒绝        | `init`、`profile add`、`bot add/authorize`、`skills init`、`restore`                   |
 | online  | 只通过本地控制面；服务未运行时拒绝          | `pair`、`identity workspace set`、`group authorize`、`conversation list`、`schedule *` |
-| dual    | 在线走控制面，停服走受限离线路径并标记 mode | `doctor`、`status`、列表/校验命令、`backup`                                            |
+| dual    | 在线走控制面，停服走受限离线路径并标记 mode | `doctor`、`status`、`memory status/list/show`、列表/校验命令、`backup`                 |
 
 CLI 已发现控制 endpoint 但握手失败时，不得静默回退为直接打开 SQLite。
 offline/dual 命令进入离线路径后，必须在同一 endpoint 上持有短生命周期 ownership
@@ -957,31 +980,50 @@ memory.forget
 
 普通对话完成后写入 Memory Curator outbox：
 
-1. 读取当前消息、Agent 最终回复和当前作用域内的相关 active 记忆。
+1. 读取当前消息、Agent 最终回复、当前会话/发言者，以及同 conversationKey
+   过去 24 小时内最多 6 条带 `speaker.ref` 的近期入站消息。
 2. 使用当前 AgentProfile 对应的 Driver 启动无用户输出的 ephemeral turn。
 3. 以后台策展模式注入同一个 `imgent-memory`，只暴露 `memory.search` 与
    `memory.remember`；不暴露 Shell、update、forget 或用户问题。
 4. 每次工具调用仍由宿主校验 scope、类型、长度、来源和敏感内容，并对
    factKey 冲突执行 supersede。
-5. 以来源 task、同 scope exact value 与 factKey 保证重试幂等，再标记 outbox。
+5. 近期窗口只用于解析当前消息的代词和指代；只有当前 task/message 可以成为
+   新记录的 `sourceTaskId/sourceMessageIds`。
+6. 以来源 task、同 scope exact value 与 factKey 保证重试幂等，再标记 outbox。
 
 策展失败有限重试，不影响主回复。相同任务幂等键不能生成第二份相同记忆。
 
 ### 11.8 召回
 
-候选筛选顺序：
+召回采用固定的三段合并：
 
 1. 先限制为当前 AgentProfile、允许 scope、active 且未过期的记录。
-2. 写入时把 NFKC/lowercase Latin token 与连续汉字 bigram 生成到
+2. 基础画像：
+   - 私聊最多 6 条当前 Principal 的 `personal_private` fact/preference/decision/plan。
+   - 群聊最多 3 条当前成员在本群的 `group_member`，再加最多 3 条本群
+     `group_shared`；禁止加载 private、其他成员和其他群。
+3. 相关召回：在允许 scope 内使用 SQLite FTS5 取前 8 条。写入时把
+   NFKC/lowercase Latin token 与连续汉字 bigram 生成到
    `search_text`，查询使用同一规则和 token 上限。
-3. 在允许作用域内只使用 SQLite FTS5 召回；汉字查询不走整句 `LIKE` 旁路。
-4. 按 FTS5 相关度、置信度和更新时间排序。
-5. 限制总条数和字符预算。
-6. 以“历史记忆资料”注入，明确其不具有系统指令优先级。
+4. 近期情节：补充最新 2 条当前场景允许的 private/group episode。
+5. 按“基础画像 → FTS5 相关结果 → 近期情节”合并，以 memory ID 去重，最多
+   12 条，并继续使用 6,000 字符预算。
+6. 基础画像按 confidence、updatedAt 降序；FTS5 结果按相关度、confidence 和
+   updatedAt 排序。汉字查询不走整句 `LIKE` 旁路。
+7. 以“历史记忆资料”注入，明确其不具有系统指令优先级。
 
 记录中的命令、链接和工具要求不能绕过当前权限。
 
-### 11.9 保留与删除
+### 11.9 本机审计
+
+部署者使用 `imgent memory status|list|show` 检查记录和 Curator 状态。命令为
+dual：在线时只通过本地 Control v3，停服时取得 ownership lease 后只读 SQLite。
+列表默认 50、最多 100 条，按 `(updatedAt, id)` 倒序并返回不透明游标；支持按
+scope、Principal、ConversationSpace、origin 和 status 过滤。响应可以包含记忆
+正文、生命周期和来源 task/message ID，但不得包含 replyContext、平台原始用户 ID
+或凭据。聊天用户继续用自然语言询问记忆，不新增 `/imgent memory` 命令。
+
+### 11.10 保留与删除
 
 - QQ `full` 模式未触发普通消息原文默认保留 7 天。
 - 其他原始事件只按故障恢复所需的最短期限保存，并支持配置。
@@ -1010,10 +1052,27 @@ interface AgentDriver {
 
 ```ts
 interface AgentTurnInput {
+  context: AgentTurnContext;
   developerInstructions?: string;
   ephemeral?: boolean;
   hostTools?: string[];
   builtInTools?: "default" | "none";
+}
+
+interface AgentTurnContext {
+  origin: "im" | "schedule" | "memory-curation";
+  conversation: {
+    ref: string;
+    kind: "direct" | "group";
+    platform: "qq" | "wechat-ilink";
+    botInstanceId: string;
+    threadId?: string;
+  };
+  speaker: {
+    ref: string;
+    displayName?: string;
+    role: "owner" | "admin" | "member" | "unknown";
+  };
 }
 ```
 
@@ -1021,6 +1080,7 @@ interface AgentTurnInput {
 `thread/start` / `thread/resume` 设置对应字段；Claude Code 使用 SDK preset
 system prompt 的 `append`。Driver 只暴露本 turn 白名单中的 IMGent Host
 Tools。Curator 使用 ephemeral、无持久 session 且禁用厂商内置工具的受限 turn。
+两个 Driver 共用同一个上下文格式化器，不能各自拼接或省略身份头。
 
 会话连续性以厂商 session 加 IMGent 记忆为准。v1 不维护第二套最近对话摘要；
 Codex/Claude session 在产生输出前恢复失败时回退到新 session。

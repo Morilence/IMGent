@@ -158,6 +158,10 @@ test("scheduled turns use proactive delivery and isolate fresh sessions", async 
 
     assert.equal(observed?.ephemeral, true);
     assert.equal(observed?.sessionId, undefined);
+    assert.equal(observed?.context.origin, "schedule");
+    assert.equal(observed?.context.conversation.kind, "direct");
+    assert.match(observed?.context.conversation.ref ?? "", /^direct_[0-9a-f]{10}$/u);
+    assert.match(observed?.context.speaker.ref ?? "", /^person_[0-9a-f]{10}$/u);
     assert.match(observed?.developerInstructions ?? "", /IMGent scheduled execution/);
     assert.equal(fixture.store.session(`schedule:${schedule.id}`), undefined);
     assert.equal(

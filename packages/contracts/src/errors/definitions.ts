@@ -316,6 +316,13 @@ export const ERROR_DEFINITIONS = {
     actionKey: "error.memory_operation_rejected.action",
     retry: { strategy: "none", replay: "safe" },
   },
+  MEMORY_RECORD_NOT_FOUND: {
+    domain: "memory",
+    kind: "not_found",
+    messageKey: "error.memory_record_not_found.message",
+    actionKey: "error.memory_record_not_found.action",
+    retry: { strategy: "none", replay: "safe" },
+  },
   MEMORY_CURATION_FAILED: {
     domain: "memory",
     kind: "transient",

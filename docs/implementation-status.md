@@ -1,6 +1,6 @@
 # IMGent implementation status
 
-> Snapshot: 2026-07-25
+> Snapshot: 2026-07-26
 > Runtime baseline: Node.js 24.18.0+
 > Release channel: Changesets `alpha`; initial public line `0.2.0-alpha.x`
 
@@ -52,6 +52,9 @@ explicitly exiting Changesets prerelease mode and will move `latest` to that sta
   sessions.
 - Host/control messages use `[IMGent: <localized status>]`. Direct-only adapters omit all group
   guidance, while Agent final output remains unprefixed.
+- Every Codex/Claude turn receives a required, shared `AgentTurnContext`. The driver prepends a
+  compact `[IMGent Context]` line with stable pseudonymous conversation/speaker references;
+  group members remain attributable even when they share one vendor session.
 - The health server uses Node's `node:http`; no web framework is present.
 - Online admin reads share the same query functions as the restricted offline admin service.
 - `src/cli/main.ts` is only the executable entry; command construction lives in
@@ -91,6 +94,24 @@ The current SQLite schema version is 6.
   this path and current WeChat iLink does not.
 - Scheduling is a host/runtime feature. No built-in skill was added.
 
+## Identity perception and memory
+
+- Principal/PlatformIdentity/ConversationSpace/GroupMembership form the deterministic perception
+  directory and are updated on ingestion independently of whether long-term curation writes a
+  record.
+- Automatic recall combines a bounded scope-safe baseline, up to eight SQLite FTS5 results, and
+  two recent episodes, deduplicated to at most twelve records and 6,000 characters. Chinese and
+  mixed-language retrieval remains FTS5 with generated bigrams.
+- Group recall is strictly limited to the current member's records in the current group plus
+  current-group shared/episode records; direct memory, another member, and another group are
+  excluded.
+- The restricted Curator receives the current signed speaker plus up to six earlier inbound turns
+  from the same conversation within 24 hours. Earlier turns resolve references only; all writes
+  remain sourced to the current task/message.
+- `imgent memory status|list|show` provides local operator audit in online/offline dual mode.
+  Control v3 exposes matching read-only, filtered cursor endpoints without reply context, raw
+  platform identities, or credentials. No IM memory command was added.
+
 Backup format is `imgent-backup/v2`. Restore validates its manifest and checksums; backup v1 is
 rejected. Archives contain IMGent configuration, local encrypted platform credentials, the SQLite
 snapshot, and user skills, but never external Codex or Claude authentication directories.
@@ -110,7 +131,7 @@ parity and rejects template braces.
 
 ## Validation coverage
 
-The automated suite covers:
+The automated suite currently contains 90 passing tests and covers:
 
 - strict configuration and capability routing;
 - schema v6 creation, legacy-schema rejection without mutation, foreign keys, FTS5, and query
@@ -121,7 +142,8 @@ The automated suite covers:
 - pairing defaults and explicit workspaces, identity binding, group-workspace authorization,
   pairing-to-group `nextSteps`, approval ownership, system-message prefixes, and idempotency;
 - skill validation, profile filtering, immutable startup snapshots, and read-only materialization;
-- memory scope isolation, Chinese/mixed FTS5, curation retry, and retention;
+- stable Agent speaker attribution, memory baseline/FTS5/episode recall, strict group privacy,
+  signed Curator windows, curation retry, retention, and local audit pagination;
 - QQ/WeChat payload and runtime-readiness behavior;
 - Codex/Claude protocol contracts, including the runtime-versus-diagnostic readiness split;
 - cached health/readiness responses and explicit diagnostic refresh;

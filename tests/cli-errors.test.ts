@@ -4,8 +4,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { defaultConfig } from "../src/config/index.js";
+import { defaultConfig, loadConfig } from "../src/config/index.js";
 import { writeConfig } from "../src/config/write.js";
+import { MemoryService } from "../src/memory/service.js";
+import { CredentialStore } from "../src/security/credential-store.js";
+import { IMGentStore } from "../src/storage/store.js";
+import { directMessage } from "./helpers.js";
 
 interface CliResult {
   code: number | null;
@@ -145,6 +149,107 @@ test("CLI --json success uses locale and a stable success envelope", async () =>
     assert.equal(envelope.locale, "en-US");
     assert.equal(envelope.result.mode, "offline");
     assert.ok(Array.isArray(envelope.result.skills));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("memory status, list, and show work through the offline CLI audit path", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-cli-memory-"));
+  try {
+    const configPath = join(directory, "imgent.json");
+    await writeConfig(configPath, {
+      ...defaultConfig(directory),
+      dataDir: "./state",
+    });
+    const config = await loadConfig(configPath);
+    const credentials = new CredentialStore(config.dataDir);
+    const store = await IMGentStore.open(
+      join(config.dataDir, "imgent.sqlite"),
+      await credentials.secretBox(),
+    );
+    const ingested = store.ingest(
+      directMessage({ messageId: "cli-memory", dedupeKey: "cli-memory" }),
+      "main",
+      "cli-memory",
+      undefined,
+      false,
+    );
+    const record = new MemoryService(store).remember(
+      {
+        agentProfileId: "main",
+        principalId: ingested.principalId,
+        conversationSpaceId: ingested.conversationSpaceId,
+        conversationKey: "cli-memory",
+        conversationKind: "direct",
+        sourceMessageIds: ["cli-memory"],
+      },
+      {
+        target: "self",
+        kind: "fact",
+        value: "CLI 可审计记忆",
+      },
+    );
+    store.close();
+    const executable = join(process.cwd(), "dist", "src", "cli", "main.js");
+    const wrapper = join(directory, "node24-cli-wrapper.mjs");
+    await writeFile(
+      wrapper,
+      [
+        "const cli = process.argv[2];",
+        "process.argv.splice(1, 2, cli);",
+        'Object.defineProperty(process.versions, "node", { value: "24.18.0" });',
+        "await import(cli);",
+        "",
+      ].join("\n"),
+    );
+
+    const status = await runCli(wrapper, executable, [
+      "--json",
+      "--config",
+      configPath,
+      "memory",
+      "status",
+    ]);
+    assert.equal(status.code, 0, `${status.stdout}\n${status.stderr}`);
+    const statusResult = JSON.parse(status.stdout) as {
+      result: { mode: string; records: { total: number } };
+    };
+    assert.equal(statusResult.result.mode, "offline");
+    assert.equal(statusResult.result.records.total, 1);
+
+    const list = await runCli(wrapper, executable, [
+      "--json",
+      "--config",
+      configPath,
+      "memory",
+      "list",
+      "--scope",
+      "personal_private",
+      "--limit",
+      "1",
+    ]);
+    assert.equal(list.code, 0);
+    const listResult = JSON.parse(list.stdout) as {
+      result: { records: Array<{ id: string; value: string }> };
+    };
+    assert.equal(listResult.result.records[0]?.id, record.id);
+    assert.equal(listResult.result.records[0]?.value, "CLI 可审计记忆");
+
+    const show = await runCli(wrapper, executable, [
+      "--json",
+      "--config",
+      configPath,
+      "memory",
+      "show",
+      record.id,
+    ]);
+    assert.equal(show.code, 0);
+    const showResult = JSON.parse(show.stdout) as {
+      result: { record: { id: string; sourceMessageIds: string[] } };
+    };
+    assert.equal(showResult.result.record.id, record.id);
+    assert.deepEqual(showResult.result.record.sourceMessageIds, ["cli-memory"]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -4,6 +4,14 @@ import { ClaudeCodeDriver } from "@imgent/driver-claude-code";
 import { CodexDriver } from "@imgent/driver-codex";
 import { createBackup } from "../backup/service.js";
 import { loadConfig } from "../config/index.js";
+import {
+  getMemoryRecord,
+  listMemoryRecords,
+  memoryCurationStatus,
+  type MemoryAuditRecord,
+  type MemoryListInput,
+  type MemoryRecordPage,
+} from "../memory/admin.js";
 import { CredentialStore } from "../security/credential-store.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
 import { SkillRegistry } from "../skills/registry.js";
@@ -51,6 +59,20 @@ export class OfflineAdminService {
 
   groups(): unknown[] {
     return groups(this.context.store);
+  }
+
+  memoryRecords(input: MemoryListInput): MemoryRecordPage {
+    return listMemoryRecords(this.context.store, input);
+  }
+
+  memoryRecord(id: string): MemoryAuditRecord {
+    const record = getMemoryRecord(this.context.store, id);
+    if (!record) throw new IMGentError("MEMORY_RECORD_NOT_FOUND");
+    return record;
+  }
+
+  memoryCurationStatus(): Record<string, unknown> {
+    return memoryCurationStatus(this.context.store);
   }
 
   async skills(): Promise<unknown[]> {

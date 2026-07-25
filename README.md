@@ -83,6 +83,9 @@ Important behavior along this path:
 - Duplicate delivery is deduplicated before another task is created.
 - One conversation runs one turn at a time; later messages wait in FIFO order. Other conversations
   can run concurrently.
+- Every Agent turn starts with a host-generated `[IMGent Context]` JSON line containing stable,
+  pseudonymous conversation and speaker references. Group members share the group session but
+  remain distinguishable on every message; mutable display names are untrusted labels.
 - Private memory, QQ group-shared memory, and per-member group profiles are separate scopes. Group
   turns never load a member's direct-message memory.
 - A risky Host Tool request returns an approval request to the original conversation. Only the
@@ -178,11 +181,11 @@ npx --package imgent@alpha imgent --help
 
 Management commands declare how they may access state:
 
-| Mode      | When it works                                                                   | Commands                                                                                              |
-| --------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `offline` | Only while `imgent start` for the same data directory is stopped                | `init`, `profile add`, `bot add`, `bot authorize`, `skills init`, `restore`                           |
-| `online`  | Only while the resident service is running; always uses the local control plane | `pair`, `identity workspace set`, `group authorize`, `conversation list`, every `schedule` subcommand |
-| `dual`    | Uses the service when running, otherwise takes a short offline ownership lease  | `doctor`, `status`, `identity list`, `group list`, `skills list`, `skills validate`, `backup`         |
+| Mode      | When it works                                                                   | Commands                                                                                                                 |
+| --------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `offline` | Only while `imgent start` for the same data directory is stopped                | `init`, `profile add`, `bot add`, `bot authorize`, `skills init`, `restore`                                              |
+| `online`  | Only while the resident service is running; always uses the local control plane | `pair`, `identity workspace set`, `group authorize`, `conversation list`, every `schedule` subcommand                    |
+| `dual`    | Uses the service when running, otherwise takes a short offline ownership lease  | `doctor`, `status`, `identity list`, `group list`, `memory status/list/show`, `skills list`, `skills validate`, `backup` |
 
 `imgent start` is the resident process itself. An offline command returns
 `RUNTIME_SERVICE_MUST_STOP` if the service is active. An online command returns
@@ -318,6 +321,15 @@ The response is produced by the selected local Agent in that Principal's workspa
 needs a risky Host Tool or more information, IMGent sends a request ID back to the same
 conversation; answer it with `/imgent allow`, `/imgent deny`, or `/imgent answer` as documented
 below. Send `/imgent cancel` or `取消` to cancel active and queued work for that conversation.
+
+Before the raw request reaches Codex or Claude Code, IMGent adds compact host metadata such as:
+
+```text
+[IMGent Context] {"conversation":{"kind":"group","ref":"group_7bc41a930f","platform":"qq","botInstanceId":"qq-main"},"speaker":{"ref":"person_a42f9c10de","displayName":"Example user","role":"member"}}
+```
+
+The references remain stable for the same Principal and ConversationSpace without exposing raw QQ
+or WeChat user IDs. The line is metadata, not user-authored instructions.
 
 IMGent control messages—pairing, group authorization, queueing, approvals, questions, errors, and
 command receipts—start with `[IMGent: Status]`. WeChat iLink pairing guidance never mentions
@@ -976,6 +988,29 @@ imgent --config /srv/imgent/imgent.json conversation list
 Use the `id` as `--conversation`. A group with multiple eligible Principals also requires
 `--principal`. Do not schedule to a target whose `supportsProactiveSend` is `false`.
 
+#### `memory status`, `memory list`, and `memory show` — audit local memory
+
+**Mode:** dual.
+
+```bash
+imgent --config /srv/imgent/imgent.json memory status
+imgent --config /srv/imgent/imgent.json memory list \
+  --scope group_member \
+  --conversation conversation_qq_group_01 \
+  --status active \
+  --limit 50
+imgent --config /srv/imgent/imgent.json memory show memory_01
+```
+
+`status` reports record counts by scope, status, and origin together with Memory Curator outbox
+state and the latest success/failure timestamps. `list` supports `--principal`, `--conversation`,
+`--scope`, `--origin`, `--status`, `--limit`, and the opaque `--cursor` returned by the previous
+page. `show` returns the selected record's value, lifecycle, and source task/message IDs.
+
+These are local operator commands. They use Control v3 while the service is running and a
+short-lived offline ownership lease while stopped. They never expose reply context, platform raw
+user IDs, or credentials, and no equivalent IM chat command is added.
+
 #### `schedule add` — create a one-time or cron task
 
 **Mode:** online.
@@ -1354,6 +1389,8 @@ degraded.
   incompatible schemas are rejected without mutation.
 - QQ full ingestion retains untriggered raw group messages for seven days by default. Curated
   group-shared memory follows memory correction/deletion rules instead.
+- Automatic recall combines a small scope-safe member/group baseline, FTS5 relevance, and recent
+  episodes. A group never receives private direct-message memory or another member's profile.
 
 ## 3. Develop and maintain IMGent
 

@@ -3,6 +3,14 @@ import { mkdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { IMGentError } from "@imgent/contracts";
 import { createBackup } from "../backup/service.js";
+import {
+  getMemoryRecord,
+  listMemoryRecords,
+  memoryCurationStatus,
+  type MemoryAuditRecord,
+  type MemoryListInput,
+  type MemoryRecordPage,
+} from "../memory/admin.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { conversations, groups, identities, persistentStatus } from "./admin-queries.js";
@@ -91,6 +99,20 @@ export class AdminService {
         this.application.adapters.get(String(conversation.botInstanceId))?.capabilities
           .supportsProactiveSend ?? false,
     }));
+  }
+
+  memoryRecords(input: MemoryListInput): MemoryRecordPage {
+    return listMemoryRecords(this.application.store, input);
+  }
+
+  memoryRecord(id: string): MemoryAuditRecord {
+    const record = getMemoryRecord(this.application.store, id);
+    if (!record) throw new IMGentError("MEMORY_RECORD_NOT_FOUND");
+    return record;
+  }
+
+  memoryCurationStatus(): Record<string, unknown> {
+    return memoryCurationStatus(this.application.store);
   }
 
   schedules(): unknown[] {

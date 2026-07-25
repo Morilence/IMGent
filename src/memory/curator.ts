@@ -1,10 +1,11 @@
-import { normalizeError, textOf } from "@imgent/contracts";
+import { formatAgentContextHeader, normalizeError, textOf } from "@imgent/contracts";
+import { agentTurnContext } from "../identity/agent-context.js";
 import { Logger } from "../runtime/logger.js";
 import { MEMORY_SKILL, type SkillRegistry } from "../skills/registry.js";
 import type { MemoryContext, MemoryService } from "./service.js";
 import type { IMGentHostTools } from "../runtime/host-tools.js";
-import type { IMGentStore } from "../storage/store.js";
-import type { AgentDriver, AgentProfile } from "@imgent/contracts";
+import type { IMGentStore, StoredConversationTurn } from "../storage/store.js";
+import type { AgentDriver, AgentProfile, AgentTurnContext } from "@imgent/contracts";
 
 const CURATOR_TOOLS = ["memory.search", "memory.remember"] as const;
 
@@ -136,14 +137,11 @@ export class MemoryCurator {
     };
     const message = textOf(task.message.parts);
     const relevant = message
-      ? this.options.memory.renderContext(this.options.memory.search(context, message, 12))
+      ? this.options.memory.renderContext(this.options.memory.recall(context, message))
       : [];
-    const prompt = curationPrompt(
-      task.message.conversation.kind,
-      message,
-      task.finalText,
-      relevant,
-    );
+    const turnContext = agentTurnContext(task, "memory-curation");
+    const recentTurns = this.options.store.recentInboundTurns(task.id, 24 * 60 * 60 * 1_000, 6);
+    const prompt = curationPrompt(turnContext, message, task.finalText, relevant, recentTurns);
     this.options.hostTools.register(turnId, {
       allowedTools: CURATOR_TOOLS,
       memory: context,
@@ -157,12 +155,14 @@ export class MemoryCurator {
           ...taskProfile,
           permissions: { maxMode: "deny" },
         },
+        context: turnContext,
         prompt,
         parts: [{ type: "text", text: prompt }],
         memoryContext: [],
         developerInstructions: [
           "# IMGent background memory curation",
           "The host has selected the Background curation mode described by the following skill.",
+          "Only the current task message may justify a new memory record. The recent window is context for reference resolution only.",
           this.options.skills.require(MEMORY_SKILL).body,
         ].join("\n\n"),
         ephemeral: true,
@@ -195,18 +195,30 @@ function taskBotInstance(store: IMGentStore, taskId: string): string | undefined
 }
 
 function curationPrompt(
-  conversationKind: "direct" | "group",
+  context: AgentTurnContext,
   message: string,
   finalText: string | undefined,
   relevant: readonly string[],
+  recentTurns: readonly StoredConversationTurn[],
 ): string {
   return [
     "执行一次 IMGent 后台记忆策展。不要回复用户。",
-    `会话边界：${conversationKind}`,
+    `当前会话与发言者：${formatAgentContextHeader(context)}`,
     `当前用户消息：${JSON.stringify(message)}`,
     `Agent 最终回复：${JSON.stringify(finalText ?? "")}`,
+    "过去 24 小时内的近期上下文（仅用于解析当前消息中的指代，不得单独作为新记忆来源）：",
+    ...(recentTurns.length > 0 ? recentTurns.map((turn) => renderRecentTurn(turn)) : ["- 无"]),
     "当前允许作用域内的相关记忆：",
     ...(relevant.length > 0 ? relevant.map((entry) => `- ${entry}`) : ["- 无"]),
-    "仅在信息明确、持久且对未来有用时调用 memory.remember；必要时先调用 memory.search。没有合格内容就不要写入。",
+    "仅当当前用户消息提供了明确、持久且对未来有用的信息时调用 memory.remember；必要时先调用 memory.search。没有合格内容就不要写入。",
+  ].join("\n");
+}
+
+function renderRecentTurn(turn: StoredConversationTurn): string {
+  const context = agentTurnContext(turn, "memory-curation");
+  return [
+    `- ${turn.createdAt} ${formatAgentContextHeader(context)}`,
+    `  用户消息：${JSON.stringify(textOf(turn.message.parts))}`,
+    ...(turn.finalText === undefined ? [] : [`  Agent 回复：${JSON.stringify(turn.finalText)}`]),
   ].join("\n");
 }

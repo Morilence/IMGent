@@ -23,6 +23,12 @@ import { restoreBackup } from "../backup/service.js";
 import { defaultConfig, loadConfig } from "../config/index.js";
 import { readRawConfig, updateConfig, writeConfig } from "../config/write.js";
 import { normalizeLocale, renderError, renderErrorText, resolveLocale } from "../i18n/index.js";
+import {
+  MEMORY_ORIGIN_VALUES,
+  MEMORY_SCOPE_VALUES,
+  MEMORY_STATUS_VALUES,
+  type MemoryListInput,
+} from "../memory/admin.js";
 import { renderReadiness, type ReadinessReport } from "../service/application.js";
 import { resolveInstanceEndpoint } from "../service/instance.js";
 import { IMGentService } from "../service/lifecycle.js";
@@ -470,6 +476,88 @@ conversation
       service: discovery.meta,
       configDrift: discovery.configDrift,
       conversations: await discovery.client.get<unknown[]>("/v3/conversations"),
+    });
+  });
+
+const memory = program.command("memory").description("审计 IMGent 长期记忆");
+
+memory
+  .command("status")
+  .description("显示记忆记录和后台整理状态")
+  .action(async () => {
+    const discovery = await routeCommand("memory status");
+    if (discovery.state === "running") {
+      print({
+        mode: "online",
+        service: discovery.meta,
+        configDrift: discovery.configDrift,
+        ...(await discovery.client.get<Record<string, unknown>>("/v3/memory-curation-status")),
+      });
+      return;
+    }
+    print({
+      mode: "offline",
+      ...(await withOfflineAdmin((offline) => offline.memoryCurationStatus())),
+    });
+  });
+
+memory
+  .command("list")
+  .description("按作用域、主体、会话和生命周期分页列出记忆")
+  .addOption(new Option("--scope <scope>", "记忆作用域").choices([...MEMORY_SCOPE_VALUES]))
+  .option("--principal <id>", "筛选 Principal ID")
+  .option("--conversation <id>", "筛选 ConversationSpace ID")
+  .addOption(new Option("--origin <origin>", "记忆来源").choices([...MEMORY_ORIGIN_VALUES]))
+  .addOption(new Option("--status <status>", "记忆状态").choices([...MEMORY_STATUS_VALUES]))
+  .option("--limit <number>", "每页记录数（1-100）", parseMemoryLimit, 50)
+  .option("--cursor <cursor>", "上一页返回的不透明游标")
+  .action(async (options: MemoryListInput) => {
+    const input: MemoryListInput = {
+      ...(options.scope ? { scope: options.scope } : {}),
+      ...(options.principal ? { principal: options.principal } : {}),
+      ...(options.conversation ? { conversation: options.conversation } : {}),
+      ...(options.origin ? { origin: options.origin } : {}),
+      ...(options.status ? { status: options.status } : {}),
+      ...(options.limit === undefined ? {} : { limit: options.limit }),
+      ...(options.cursor ? { cursor: options.cursor } : {}),
+    };
+    const discovery = await routeCommand("memory list");
+    if (discovery.state === "running") {
+      print({
+        mode: "online",
+        service: discovery.meta,
+        configDrift: discovery.configDrift,
+        ...(await discovery.client.get<Record<string, unknown>>(
+          `/v3/memory-records?${memoryQuery(input)}`,
+        )),
+      });
+      return;
+    }
+    print({
+      mode: "offline",
+      ...(await withOfflineAdmin((offline) => offline.memoryRecords(input))),
+    });
+  });
+
+memory
+  .command("show <memory-id>")
+  .description("显示一条记忆的内容、作用域、来源和生命周期")
+  .action(async (memoryId: string) => {
+    const discovery = await routeCommand("memory show");
+    if (discovery.state === "running") {
+      print({
+        mode: "online",
+        service: discovery.meta,
+        configDrift: discovery.configDrift,
+        record: await discovery.client.get<unknown>(
+          `/v3/memory-records/${encodeURIComponent(memoryId)}`,
+        ),
+      });
+      return;
+    }
+    print({
+      mode: "offline",
+      record: await withOfflineAdmin((offline) => offline.memoryRecord(memoryId)),
     });
   });
 
@@ -922,6 +1010,25 @@ function nodeSupported(): boolean {
     if ((actual[index] ?? 0) < required[index]!) return false;
   }
   return true;
+}
+
+function parseMemoryLimit(value: string): number {
+  if (!/^[1-9]\d{0,2}$/u.test(value)) throw new IMGentError("CLI_USAGE_INVALID");
+  const parsed = Number(value);
+  if (parsed > 100) throw new IMGentError("CLI_USAGE_INVALID");
+  return parsed;
+}
+
+function memoryQuery(input: MemoryListInput): string {
+  const query = new URLSearchParams();
+  if (input.scope) query.set("scope", input.scope);
+  if (input.principal) query.set("principal", input.principal);
+  if (input.conversation) query.set("conversation", input.conversation);
+  if (input.origin) query.set("origin", input.origin);
+  if (input.status) query.set("status", input.status);
+  if (input.limit !== undefined) query.set("limit", String(input.limit));
+  if (input.cursor) query.set("cursor", input.cursor);
+  return query.toString();
 }
 
 function print(value: unknown): void {

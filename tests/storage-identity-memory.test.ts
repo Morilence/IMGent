@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { conversationKey, IMGentError } from "@imgent/contracts";
 import { ApprovalService } from "../src/approvals/service.js";
+import { agentTurnContext } from "../src/identity/agent-context.js";
 import { IdentityService } from "../src/identity/service.js";
+import { getMemoryRecord, listMemoryRecords, memoryCurationStatus } from "../src/memory/admin.js";
 import { MemoryCurator } from "../src/memory/curator.js";
 import { MemoryHostTools } from "../src/memory/host-tools.js";
 import { MemoryService } from "../src/memory/service.js";
@@ -195,6 +197,28 @@ test("pairing and explicit cross-platform binding merge principals without displ
     );
     assert.equal(identities.isPaired(second.platformIdentityId), true);
     assert.equal(identities.locale(first.principalId), "en-US");
+    const directContext = agentTurnContext(
+      {
+        agentProfileId: "main",
+        principalId: first.principalId,
+        conversationSpaceId: first.conversationSpaceId,
+        message: directMessage(),
+      },
+      "im",
+    );
+    const groupContext = agentTurnContext(
+      {
+        agentProfileId: "main",
+        principalId: first.principalId,
+        conversationSpaceId: "bound-group-space",
+        message: directMessage({
+          conversation: { kind: "group", platformConversationId: "bound-group" },
+        }),
+      },
+      "im",
+    );
+    assert.equal(directContext.speaker.ref, groupContext.speaker.ref);
+    assert.notEqual(directContext.conversation.ref, groupContext.conversation.ref);
     const unbound = identities.unbindPlatformIdentity(second.platformIdentityId);
     assert.equal(unbound.previousPrincipalId, first.principalId);
     assert.notEqual(unbound.principalId, first.principalId);
@@ -354,6 +378,238 @@ test("memory search enforces personal and group scope boundaries", async () => {
           value: "api_key=abcdefghijklmnop",
         }),
       /不能写入长期记忆/,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("hybrid recall loads a bounded baseline without requiring lexical overlap", async () => {
+  const fixture = await testStore();
+  try {
+    const identity = fixture.store.ingest(
+      directMessage({ messageId: "recall-direct", dedupeKey: "recall-direct" }),
+      "main",
+      "recall-direct",
+      undefined,
+      false,
+    );
+    const memory = new MemoryService(fixture.store);
+    const context = {
+      agentProfileId: "main",
+      principalId: identity.principalId,
+      conversationSpaceId: identity.conversationSpaceId,
+      conversationKey: "recall-direct",
+      conversationKind: "direct" as const,
+      sourceMessageIds: ["recall-direct"],
+    };
+    const preference = memory.remember(context, {
+      target: "self",
+      kind: "preference",
+      factKey: "reply.language",
+      value: "回复时优先使用简体中文",
+    });
+    const relevant = memory.remember(context, {
+      target: "self",
+      kind: "fact",
+      factKey: "project.codename",
+      value: "当前项目代号是独角兽",
+    });
+    memory.remember(context, {
+      target: "episode",
+      kind: "episode",
+      value: "上次讨论了一个临时交付问题",
+    });
+
+    const unrelated = memory.recall(context, "你还记得我吗");
+    assert.ok(unrelated.some((record) => record.id === preference.id));
+    assert.ok(unrelated.some((record) => record.id === relevant.id));
+    assert.ok(unrelated.some((record) => record.kind === "episode"));
+    const lexical = memory.recall(context, "独角兽项目");
+    assert.equal(lexical.filter((record) => record.id === relevant.id).length, 1);
+    assert.ok(lexical.length <= 12);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("group hybrid recall exposes only the current member and current group", async () => {
+  const fixture = await testStore();
+  try {
+    const conversation = { kind: "group" as const, platformConversationId: "recall-group" };
+    const first = fixture.store.ingest(
+      directMessage({
+        messageId: "recall-member-one",
+        dedupeKey: "recall-member-one",
+        conversation,
+        actor: {
+          platformUserId: "recall-user-one",
+          platformMemberId: "recall-member-one",
+          role: "member",
+        },
+      }),
+      "main",
+      "recall-group-key",
+      undefined,
+      false,
+    );
+    const second = fixture.store.ingest(
+      directMessage({
+        messageId: "recall-member-two",
+        dedupeKey: "recall-member-two",
+        conversation,
+        actor: {
+          platformUserId: "recall-user-two",
+          platformMemberId: "recall-member-two",
+          role: "member",
+        },
+      }),
+      "main",
+      "recall-group-key",
+      undefined,
+      false,
+    );
+    const memory = new MemoryService(fixture.store);
+    const firstContext = {
+      agentProfileId: "main",
+      principalId: first.principalId,
+      conversationSpaceId: first.conversationSpaceId,
+      conversationKey: "recall-group-key",
+      conversationKind: "group" as const,
+      sourceMessageIds: ["recall-member-one"],
+    };
+    const secondContext = {
+      ...firstContext,
+      principalId: second.principalId,
+      sourceMessageIds: ["recall-member-two"],
+    };
+    memory.remember(firstContext, {
+      target: "self",
+      kind: "preference",
+      value: "成员一在本群公开偏好黑咖啡",
+    });
+    memory.remember(secondContext, {
+      target: "self",
+      kind: "preference",
+      value: "成员二在本群公开偏好牛奶",
+    });
+    memory.remember(firstContext, {
+      target: "group",
+      kind: "decision",
+      value: "本群固定在周五发布",
+    });
+    memory.remember(
+      {
+        ...firstContext,
+        conversationKind: "direct",
+        conversationKey: "private-for-member-one",
+      },
+      {
+        target: "self",
+        kind: "fact",
+        value: "成员一私聊透露了家庭住址",
+      },
+    );
+
+    const recalled = memory.recall(firstContext, "你还记得什么");
+    assert.ok(recalled.some((record) => record.value.includes("黑咖啡")));
+    assert.ok(recalled.some((record) => record.value.includes("周五发布")));
+    assert.equal(
+      recalled.some((record) => record.value.includes("牛奶")),
+      false,
+    );
+    assert.equal(
+      recalled.some((record) => record.value.includes("家庭住址")),
+      false,
+    );
+    assert.equal(
+      memory.recall(
+        {
+          ...firstContext,
+          conversationSpaceId: "another-group",
+        },
+        "你还记得什么",
+      ).length,
+      0,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("local memory audit supports filters, stable cursor pagination, and curation status", async () => {
+  const fixture = await testStore();
+  try {
+    const ingested = fixture.store.ingest(
+      directMessage({ messageId: "audit-memory", dedupeKey: "audit-memory" }),
+      "main",
+      "audit-memory",
+    );
+    const task = fixture.store.claimNextTask()!;
+    fixture.store.completeTask(task.id, "done", true);
+    const memory = new MemoryService(fixture.store);
+    const context = {
+      agentProfileId: "main",
+      principalId: ingested.principalId,
+      conversationSpaceId: ingested.conversationSpaceId,
+      conversationKey: "audit-memory",
+      conversationKind: "direct" as const,
+      sourceMessageIds: ["audit-memory"],
+      sourceTaskId: task.id,
+      origin: "explicit" as const,
+    };
+    const first = memory.remember(context, {
+      target: "self",
+      kind: "fact",
+      factKey: "audit.first",
+      value: "第一条审计记忆",
+    });
+    const second = memory.remember(context, {
+      target: "self",
+      kind: "preference",
+      factKey: "audit.second",
+      value: "第二条审计记忆",
+    });
+
+    const pageOne = listMemoryRecords(fixture.store, {
+      principal: ingested.principalId,
+      status: "active",
+      limit: 1,
+    });
+    assert.equal(pageOne.records.length, 1);
+    assert.ok(pageOne.nextCursor);
+    const pageTwo = listMemoryRecords(fixture.store, {
+      principal: ingested.principalId,
+      status: "active",
+      limit: 1,
+      cursor: pageOne.nextCursor,
+    });
+    assert.equal(pageTwo.records.length, 1);
+    assert.notEqual(pageOne.records[0]?.id, pageTwo.records[0]?.id);
+    assert.deepEqual(
+      new Set([pageOne.records[0]?.id, pageTwo.records[0]?.id]),
+      new Set([first.id, second.id]),
+    );
+    const shown = getMemoryRecord(fixture.store, first.id);
+    assert.equal(shown?.value, "第一条审计记忆");
+    assert.deepEqual(shown?.sourceMessageIds, ["audit-memory"]);
+    assert.equal("replyContext" in (shown ?? {}), false);
+    assert.throws(
+      () => listMemoryRecords(fixture.store, { cursor: "not-a-valid-cursor" }),
+      (error: unknown) => error instanceof IMGentError && error.code === "CLI_USAGE_INVALID",
+    );
+    const status = memoryCurationStatus(fixture.store) as {
+      records: { total: number; byScope: Array<{ scopeType: string; count: number }> };
+      curation: { outbox: Array<{ status: string; count: number }> };
+    };
+    assert.equal(status.records.total, 2);
+    assert.deepEqual(
+      status.records.byScope.map((row) => ({ ...row })),
+      [{ scopeType: "personal_private", count: 2 }],
+    );
+    assert.deepEqual(
+      status.curation.outbox.map((row) => ({ ...row })),
+      [{ status: "pending", count: 1 }],
     );
   } finally {
     await fixture.cleanup();
@@ -670,6 +926,132 @@ test("full-mode group context gets seven-day retention and asynchronous scoped c
       )?.message_json,
       '{"expired":true}',
     );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("memory curator receives a signed recent window but writes only from the current task", async () => {
+  const fixture = await testStore();
+  try {
+    const conversation = {
+      kind: "group" as const,
+      platformConversationId: "curator-window-group",
+    };
+    const ingestCompleted = (
+      messageId: string,
+      text: string,
+      actor: {
+        platformUserId: string;
+        platformMemberId: string;
+        displayName: string;
+      },
+      curate: boolean,
+    ) => {
+      const ingested = fixture.store.ingest(
+        directMessage({
+          messageId,
+          dedupeKey: messageId,
+          conversation,
+          actor: { ...actor, role: "member" },
+          parts: [{ type: "text", text }],
+        }),
+        "main",
+        "curator-window-key",
+      );
+      const task = fixture.store.claimNextTask()!;
+      assert.equal(task.id, ingested.taskId);
+      fixture.store.completeTask(task.id, `reply:${messageId}`, curate);
+      return { ingested, task };
+    };
+    const stale = ingestCompleted(
+      "window-stale",
+      "超出窗口的旧消息",
+      {
+        platformUserId: "stale-user",
+        platformMemberId: "stale-member",
+        displayName: "Stale",
+      },
+      false,
+    );
+    fixture.store.run(
+      "UPDATE tasks SET created_at = ?, updated_at = ? WHERE id = ?",
+      new Date(Date.now() - 25 * 60 * 60 * 1_000).toISOString(),
+      new Date(Date.now() - 25 * 60 * 60 * 1_000).toISOString(),
+      stale.task.id,
+    );
+    ingestCompleted(
+      "window-recent",
+      "刚才我们讨论了主题颜色",
+      {
+        platformUserId: "recent-user",
+        platformMemberId: "recent-member",
+        displayName: "Alpha",
+      },
+      false,
+    );
+    const current = ingestCompleted(
+      "window-current",
+      "我现在明确偏好深色主题",
+      {
+        platformUserId: "current-user",
+        platformMemberId: "current-member",
+        displayName: "Beta",
+      },
+      true,
+    );
+    const memory = new MemoryService(fixture.store);
+    const skills = await SkillRegistry.load(
+      await builtInSkillsDirectory(),
+      join(fixture.directory, "skills"),
+    );
+    const hostTools = new IMGentHostTools(new MemoryHostTools(memory), new SkillHostTools(skills));
+    let observed: AgentTurnInput | undefined;
+    const driver = fakeDriver(async (input) => {
+      observed = input;
+      const result = await hostTools.handle({
+        turnId: input.turnId,
+        namespace: "memory",
+        name: "remember",
+        arguments: {
+          target: "self",
+          kind: "preference",
+          factKey: "theme.mode",
+          value: "当前成员在本群偏好深色主题",
+        },
+      });
+      assert.equal(result.success, true);
+      return [{ type: "completed", result: "success" }];
+    });
+    const curator = new MemoryCurator({
+      store: fixture.store,
+      memory,
+      profiles: new Map([["main", curatorProfile()]]),
+      drivers: new Map([["main", driver]]),
+      hostTools,
+      skills,
+    });
+
+    assert.equal(await curator.processOnce(), true);
+    assert.equal(observed?.context.origin, "memory-curation");
+    assert.equal(observed?.context.speaker.displayName, "Beta");
+    assert.match(observed?.prompt ?? "", /刚才我们讨论了主题颜色/);
+    assert.match(observed?.prompt ?? "", /Alpha/);
+    assert.doesNotMatch(observed?.prompt ?? "", /超出窗口的旧消息/);
+    assert.match(
+      observed?.developerInstructions ?? "",
+      /Only the current task message may justify a new memory record/,
+    );
+    const record = fixture.store.get<{
+      principal_id: string;
+      source_task_id: string;
+      source_message_ids: string;
+      scope_type: string;
+    }>("SELECT * FROM memory_records WHERE fact_key = 'theme.mode'");
+    assert.equal(record?.principal_id, current.ingested.principalId);
+    assert.equal(record?.source_task_id, current.task.id);
+    assert.equal(record?.source_message_ids, '["window-current"]');
+    assert.equal(record?.scope_type, "group_member");
   } finally {
     await fixture.cleanup();
   }

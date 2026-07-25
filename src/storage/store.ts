@@ -48,6 +48,16 @@ export interface StoredTask {
   createdAt: string;
 }
 
+export interface StoredConversationTurn {
+  taskId: string;
+  agentProfileId: string;
+  principalId: string;
+  conversationSpaceId: string;
+  message: InboundMessage;
+  finalText?: string;
+  createdAt: string;
+}
+
 export type TaskStatus =
   | "queued"
   | "active"
@@ -690,6 +700,71 @@ export class IMGentStore {
       ...(row.next_attempt_at ? { nextAttemptAt: row.next_attempt_at } : {}),
       createdAt: row.created_at,
     };
+  }
+
+  recentInboundTurns(
+    taskId: string,
+    withinMs = 24 * 60 * 60 * 1_000,
+    limit = 6,
+  ): StoredConversationTurn[] {
+    const current = this.get<{
+      row_id: number;
+      agent_profile_id: string;
+      conversation_space_id: string;
+      conversation_key: string;
+      created_at: string;
+    }>(
+      `SELECT rowid AS row_id, agent_profile_id, conversation_space_id,
+              conversation_key, created_at
+       FROM tasks WHERE id = ?`,
+      taskId,
+    );
+    if (!current) return [];
+    const since = new Date(Date.parse(current.created_at) - Math.max(0, withinMs)).toISOString();
+    const boundedLimit = Math.max(0, Math.min(limit, 20));
+    if (boundedLimit === 0) return [];
+    const rows = this.all<{
+      row_id: number;
+      id: string;
+      agent_profile_id: string;
+      principal_id: string;
+      conversation_space_id: string;
+      message_json: string;
+      final_text: string | null;
+      created_at: string;
+    }>(
+      `SELECT rowid AS row_id, id, agent_profile_id, principal_id,
+              conversation_space_id, message_json, final_text, created_at
+       FROM tasks
+       WHERE inbound_event_id IS NOT NULL
+         AND agent_profile_id = ?
+         AND conversation_space_id = ?
+         AND conversation_key = ?
+         AND created_at >= ?
+         AND (
+           created_at < ?
+           OR (created_at = ? AND rowid < ?)
+         )
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT ?`,
+      current.agent_profile_id,
+      current.conversation_space_id,
+      current.conversation_key,
+      since,
+      current.created_at,
+      current.created_at,
+      current.row_id,
+      boundedLimit,
+    );
+    return rows.reverse().map((row) => ({
+      taskId: row.id,
+      agentProfileId: row.agent_profile_id,
+      principalId: row.principal_id,
+      conversationSpaceId: row.conversation_space_id,
+      message: JSON.parse(row.message_json) as InboundMessage,
+      ...(row.final_text ? { finalText: row.final_text } : {}),
+      createdAt: row.created_at,
+    }));
   }
 
   addDeadLetter(

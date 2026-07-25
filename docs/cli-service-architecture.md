@@ -177,11 +177,11 @@ BotInstance → AgentProfile 路由可以服务。`degraded` 不是崩溃态。
 
 ### 6.1 三类命令
 
-| 类型     | 数据路径                               | 服务运行时行为         | 命令                                                                                   |
-| -------- | -------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------- |
-| 离线配置 | 直接读取/原子写入配置、凭据或 skills   | 明确拒绝，提示停止服务 | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`            |
-| 在线管理 | 只通过本地控制面                       | 服务未运行时明确失败   | `pair`、`identity workspace set`、`group authorize`、`conversation list`、`schedule *` |
-| 双模式   | 运行时走控制面；停服时使用受限离线路径 | 不做不透明降级         | `doctor`、`status`、`identity list`、`group list`、`skills list/validate`、`backup`    |
+| 类型     | 数据路径                               | 服务运行时行为         | 命令                                                                                                           |
+| -------- | -------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 离线配置 | 直接读取/原子写入配置、凭据或 skills   | 明确拒绝，提示停止服务 | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`                                    |
+| 在线管理 | 只通过本地控制面                       | 服务未运行时明确失败   | `pair`、`identity workspace set`、`group authorize`、`conversation list`、`schedule *`                         |
+| 双模式   | 运行时走控制面；停服时使用受限离线路径 | 不做不透明降级         | `doctor`、`status`、`identity list`、`group list`、`memory status/list/show`、`skills list/validate`、`backup` |
 
 双模式命令必须在输出中声明 `mode: "online" | "offline"`：
 
@@ -193,6 +193,11 @@ BotInstance → AgentProfile 路由可以服务。`degraded` 不是崩溃态。
 
 `status` 在服务未运行时返回 `service.state = "stopped"`，可附带安全的持久化摘要，
 但不得构造并启动第二套 Adapter 或 Driver。
+
+`memory status/list/show` 是只读双模式命令。在线时由常驻服务查询其 SQLite
+启动快照；停服时 CLI 取得 ownership lease 后打开数据库。列表使用
+`(updatedAt, id)` 倒序的不透明游标，默认 50、最多 100 条，服务端必须重新
+校验 scope/origin/status/limit/cursor，不能信任 Commander 的客户端校验。
 
 ### 6.2 命令路由算法
 
@@ -352,11 +357,12 @@ PID 和 PID 重用。
 | `RUNTIME_CONTROL_PROTOCOL_UNSUPPORTED` | CLI 与服务协议版本不兼容      |
 | `RUNTIME_INSTANCE_CONFLICT`            | 同一 dataDir 已有活动实例     |
 | `RUNTIME_INSTANCE_MISMATCH`            | endpoint 不属于请求的 dataDir |
+| `MEMORY_RECORD_NOT_FOUND`              | 审计目标记忆不存在            |
 
 服务端和 CLI 都要设置请求体上限、响应超时和每次请求的 `requestId`。CLI 不自动
 重试 mutation；需要重试的 mutation 必须先在业务层定义幂等键或幂等终态。
 
-### 7.3 v2 路由
+### 7.3 v3 路由
 
 | Method | Path                         | 用途                                     |
 | ------ | ---------------------------- | ---------------------------------------- |
@@ -369,6 +375,9 @@ PID 和 PID 重用。
 | `GET`  | `/v3/groups`                 | QQ 群空间和授权状态                      |
 | `POST` | `/v3/groups/:id/authorize`   | 由指定 Principal 授权群                  |
 | `GET`  | `/v3/conversations`          | 可主动投递的会话与 Principal             |
+| `GET`  | `/v3/memory-records`         | 过滤和游标分页的本机记忆审计列表         |
+| `GET`  | `/v3/memory-records/:id`     | 单条记忆正文、生命周期与来源             |
+| `GET`  | `/v3/memory-curation-status` | 记忆计数、outbox 与最近整理结果          |
 | `GET`  | `/v3/schedules`              | 计划列表                                 |
 | `POST` | `/v3/schedules`              | 创建计划                                 |
 | `GET`  | `/v3/schedules/:id/history`  | 计划运行历史                             |
@@ -403,6 +412,7 @@ PID 和 PID 重用。
 | credential store        | 常驻服务               | 授权和恢复命令             |
 | Adapter/Driver 连接     | 常驻服务               | 不允许构造伪实时状态       |
 | Scheduler/审批/出站状态 | 常驻服务               | 只读维护工具需显式设计     |
+| memory records/outbox   | 常驻服务               | `memory status/list/show`  |
 | skill registry          | 常驻服务启动快照       | `skills init/validate`     |
 | 控制 endpoint           | 当前常驻实例           | CLI 连接；离线操作短暂租用 |
 | health TCP endpoint     | 当前常驻实例           | CLI 不监听                 |
@@ -459,6 +469,9 @@ schema version、权限和 SQLite integrity。当前 schema v6 只允许空数�
   message。
 - 配置路径、workspace、SQL、平台 token、replyContext 和完整消息正文不出现在
   默认控制响应。
+- 记忆审计路由是上述默认摘要规则的显式例外：它可以向同一操作系统部署用户返回
+  记忆正文和来源 task/message ID，但不能返回平台原始用户 ID、replyContext、
+  凭据或厂商 wire 数据。
 - health server 和控制 server 使用不同路由注册与不同响应 DTO，避免未来误把管理
   路由暴露到 TCP。
 

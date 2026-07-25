@@ -143,6 +143,74 @@ test("scheduler uses the resolved Principal workspace and leaves Agent replies u
   }
 });
 
+test("one group session carries distinct stable speaker context for each member", async () => {
+  const observed: AgentTurnInput[] = [];
+  const { fixture, scheduler } = await schedulerFixture(
+    fakeDriver(async (input) => {
+      observed.push(input);
+      return [
+        { type: "session", sessionId: "group-session" },
+        { type: "output-final", text: "ok" },
+        { type: "completed", result: "success" },
+      ];
+    }),
+  );
+  try {
+    const group = {
+      kind: "group" as const,
+      platformConversationId: "group-speakers",
+    };
+    fixture.store.ingest(
+      directMessage({
+        messageId: "speaker-one",
+        dedupeKey: "speaker-one",
+        conversation: group,
+        actor: {
+          platformUserId: "user-one",
+          platformMemberId: "member-one",
+          displayName: "同名用户",
+          role: "member",
+        },
+        parts: [{ type: "text", text: "first" }],
+      }),
+      "main",
+      "group-speakers-key",
+    );
+    fixture.store.ingest(
+      directMessage({
+        messageId: "speaker-two",
+        dedupeKey: "speaker-two",
+        conversation: group,
+        actor: {
+          platformUserId: "user-two",
+          platformMemberId: "member-two",
+          displayName: "同名用户",
+          role: "admin",
+        },
+        parts: [{ type: "text", text: "second" }],
+      }),
+      "main",
+      "group-speakers-key",
+    );
+
+    assert.equal(await scheduler.processOnce(), true);
+    assert.equal(await scheduler.processOnce(), true);
+    assert.equal(observed.length, 2);
+    assert.equal(observed[0]?.context.origin, "im");
+    assert.equal(observed[0]?.context.conversation.kind, "group");
+    assert.equal(observed[0]?.context.conversation.ref, observed[1]?.context.conversation.ref);
+    assert.notEqual(observed[0]?.context.speaker.ref, observed[1]?.context.speaker.ref);
+    assert.equal(observed[0]?.context.speaker.displayName, "同名用户");
+    assert.equal(observed[0]?.context.speaker.role, "member");
+    assert.equal(observed[1]?.context.speaker.role, "admin");
+    assert.equal(observed[0]?.prompt, "first");
+    assert.equal(observed[1]?.prompt, "second");
+  } finally {
+    await scheduler.stop();
+    await fixture.cleanup();
+  }
+});
+
 function makeTaskDue(store: Awaited<ReturnType<typeof testStore>>["store"], taskId: string): void {
   store.run(
     "UPDATE tasks SET next_attempt_at = ? WHERE id = ?",

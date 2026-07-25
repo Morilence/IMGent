@@ -15,6 +15,7 @@ import {
   type ControlMeta,
 } from "../src/control/protocol.js";
 import { IdentityService } from "../src/identity/service.js";
+import { MemoryService } from "../src/memory/service.js";
 import { CredentialStore } from "../src/security/credential-store.js";
 import { resolveInstanceEndpoint } from "../src/service/instance.js";
 import { IMGentService } from "../src/service/lifecycle.js";
@@ -180,6 +181,83 @@ test("control plane owns one dataDir instance and reports configuration drift", 
         service.instanceId,
       );
     }
+  } finally {
+    await service?.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("control v3 exposes read-only paginated memory audit resources", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-memory-control-"));
+  const configPath = join(directory, "imgent.json");
+  let service: IMGentService | undefined;
+  try {
+    await writeConfig(configPath, {
+      ...defaultConfig(directory),
+      dataDir: "./state",
+      server: { host: "127.0.0.1", port: await availablePort() },
+    });
+    const store = await openTestStore(configPath);
+    const ingested = store.ingest(
+      directMessage({
+        messageId: "control-memory",
+        dedupeKey: "control-memory",
+      }),
+      "main",
+      "control-memory",
+      undefined,
+      false,
+    );
+    const memory = new MemoryService(store);
+    const record = memory.remember(
+      {
+        agentProfileId: "main",
+        principalId: ingested.principalId,
+        conversationSpaceId: ingested.conversationSpaceId,
+        conversationKey: "control-memory",
+        conversationKind: "direct",
+        sourceMessageIds: ["control-memory"],
+      },
+      {
+        target: "self",
+        kind: "preference",
+        value: "控制面审计偏好",
+      },
+    );
+    store.close();
+
+    service = await IMGentService.start(configPath);
+    const discovery = await ControlClient.discover(await loadConfig(configPath));
+    assert.equal(discovery.state, "running");
+    if (discovery.state !== "running") return;
+    const page = await discovery.client.get<{
+      records: Array<{ id: string; value: string }>;
+      nextCursor?: string;
+    }>("/v3/memory-records?scope=personal_private&status=active&limit=1");
+    assert.equal(page.records.length, 1);
+    assert.equal(page.records[0]?.id, record.id);
+    assert.equal(page.records[0]?.value, "控制面审计偏好");
+    const shown = await discovery.client.get<Record<string, unknown>>(
+      `/v3/memory-records/${encodeURIComponent(record.id)}`,
+    );
+    assert.equal(shown.id, record.id);
+    assert.equal(shown.value, "控制面审计偏好");
+    assert.equal("platformUserId" in shown, false);
+    assert.equal("replyContext" in shown, false);
+    const status = await discovery.client.get<{
+      records: { total: number };
+      curation: { outbox: unknown[] };
+    }>("/v3/memory-curation-status");
+    assert.equal(status.records.total, 1);
+    assert.deepEqual(status.curation.outbox, []);
+    await assert.rejects(
+      discovery.client.get("/v3/memory-records?limit=101"),
+      hasCode("CLI_USAGE_INVALID"),
+    );
+    await assert.rejects(
+      discovery.client.get("/v3/memory-records/memory_missing"),
+      hasCode("MEMORY_RECORD_NOT_FOUND"),
+    );
   } finally {
     await service?.stop();
     await rm(directory, { recursive: true, force: true });

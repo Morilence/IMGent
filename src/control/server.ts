@@ -3,6 +3,12 @@ import { chmod } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { connect } from "node:net";
 import { IMGentError, normalizeError } from "@imgent/contracts";
+import {
+  MEMORY_ORIGIN_VALUES,
+  MEMORY_SCOPE_VALUES,
+  MEMORY_STATUS_VALUES,
+  type MemoryListInput,
+} from "../memory/admin.js";
 import { Logger } from "../runtime/logger.js";
 import { parseCreateScheduleInput, parseUpdateScheduleInput } from "../schedule/service.js";
 import {
@@ -124,6 +130,10 @@ export class ControlServer {
         data = admin.groups();
       } else if (method === "GET" && url.pathname === "/v3/conversations") {
         data = admin.conversations();
+      } else if (method === "GET" && url.pathname === "/v3/memory-records") {
+        data = admin.memoryRecords(parseMemoryListQuery(url.searchParams));
+      } else if (method === "GET" && url.pathname === "/v3/memory-curation-status") {
+        data = admin.memoryCurationStatus();
       } else if (method === "GET" && url.pathname === "/v3/schedules") {
         data = admin.schedules();
       } else if (method === "POST" && url.pathname === "/v3/schedules") {
@@ -140,6 +150,7 @@ export class ControlServer {
         const pairing = url.pathname.match(/^\/v3\/pairings\/([^/]+)\/confirm$/u);
         const identityWorkspace = url.pathname.match(/^\/v3\/identities\/([^/]+)\/workspace$/u);
         const group = url.pathname.match(/^\/v3\/groups\/([^/]+)\/authorize$/u);
+        const memoryRecord = url.pathname.match(/^\/v3\/memory-records\/([^/]+)$/u);
         const scheduleHistory = url.pathname.match(/^\/v3\/schedules\/([^/]+)\/history$/u);
         const scheduleAction = url.pathname.match(
           /^\/v3\/schedules\/([^/]+)\/(update|pause|resume|remove|run|reset-context)$/u,
@@ -180,6 +191,8 @@ export class ControlServer {
             throw new IMGentError("CLI_USAGE_INVALID");
           }
           data = admin.authorizeGroup(decodePathSegment(group[1]!), body.principalId);
+        } else if (method === "GET" && memoryRecord) {
+          data = admin.memoryRecord(decodePathSegment(memoryRecord[1]!));
         } else if (method === "GET" && scheduleHistory) {
           data = admin.scheduleHistory(decodePathSegment(scheduleHistory[1]!));
         } else if (method === "POST" && scheduleAction) {
@@ -303,6 +316,51 @@ function decodePathSegment(value: string): string {
   }
 }
 
+function parseMemoryListQuery(search: URLSearchParams): MemoryListInput {
+  const allowed = new Set([
+    "scope",
+    "principal",
+    "conversation",
+    "origin",
+    "status",
+    "limit",
+    "cursor",
+  ]);
+  for (const key of search.keys()) {
+    const values = search.getAll(key);
+    if (!allowed.has(key) || values.length !== 1 || values[0]?.length === 0) {
+      throw new IMGentError("CLI_USAGE_INVALID");
+    }
+  }
+  const scope = search.get("scope");
+  const origin = search.get("origin");
+  const status = search.get("status");
+  if (scope && !MEMORY_SCOPE_VALUES.includes(scope as (typeof MEMORY_SCOPE_VALUES)[number])) {
+    throw new IMGentError("CLI_USAGE_INVALID");
+  }
+  if (origin && !MEMORY_ORIGIN_VALUES.includes(origin as (typeof MEMORY_ORIGIN_VALUES)[number])) {
+    throw new IMGentError("CLI_USAGE_INVALID");
+  }
+  if (status && !MEMORY_STATUS_VALUES.includes(status as (typeof MEMORY_STATUS_VALUES)[number])) {
+    throw new IMGentError("CLI_USAGE_INVALID");
+  }
+  const rawLimit = search.get("limit");
+  if (rawLimit !== null && !/^[1-9]\d{0,2}$/u.test(rawLimit)) {
+    throw new IMGentError("CLI_USAGE_INVALID");
+  }
+  const limit = rawLimit === null ? undefined : Number(rawLimit);
+  if (limit !== undefined && limit > 100) throw new IMGentError("CLI_USAGE_INVALID");
+  return {
+    ...(scope ? { scope: scope as (typeof MEMORY_SCOPE_VALUES)[number] } : {}),
+    ...(search.get("principal") ? { principal: search.get("principal")! } : {}),
+    ...(search.get("conversation") ? { conversation: search.get("conversation")! } : {}),
+    ...(origin ? { origin: origin as (typeof MEMORY_ORIGIN_VALUES)[number] } : {}),
+    ...(status ? { status: status as (typeof MEMORY_STATUS_VALUES)[number] } : {}),
+    ...(limit === undefined ? {} : { limit }),
+    ...(search.get("cursor") ? { cursor: search.get("cursor")! } : {}),
+  };
+}
+
 function sendJson(response: ServerResponse, status: number, value: unknown): void {
   const body = JSON.stringify(value);
   response.writeHead(status, {
@@ -330,6 +388,7 @@ function routeLabel(path: string): string {
     return "/v3/identities/:id/workspace";
   }
   if (/^\/v3\/groups\/[^/]+\/authorize$/u.test(path)) return "/v3/groups/:id/authorize";
+  if (/^\/v3\/memory-records\/[^/]+$/u.test(path)) return "/v3/memory-records/:id";
   if (/^\/v3\/schedules\/[^/]+\/history$/u.test(path)) return "/v3/schedules/:id/history";
   if (/^\/v3\/schedules\/[^/]+\/[^/]+$/u.test(path)) return "/v3/schedules/:id/:action";
   return path.slice(0, 128);

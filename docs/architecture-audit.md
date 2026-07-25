@@ -1,6 +1,6 @@
 # IMGent architecture audit
 
-> Audit date: 2026-07-25
+> Audit date: 2026-07-26
 > Scope: product/design documents, all production TypeScript, tests, package graph, and executable
 > smoke paths.
 
@@ -47,6 +47,22 @@ The service lifecycle owns the public starting/ready/degraded/stopping states; t
 a smaller created/running/closed guard for resource ownership. Runtime readiness uses a
 single-flight refresh so startup and maintenance cannot duplicate probes. The status and health
 DTOs remain separate: the loopback health surface cannot accidentally inherit management data.
+
+### Post-audit identity and memory extension
+
+The 2026-07-26 extension keeps the same runtime and storage ownership boundaries:
+
+- `AgentTurnInput` now requires one provider-neutral context contract; Codex and Claude Code share
+  one formatter instead of duplicating attribution logic.
+- Stable short person/conversation references are derived from existing Principal and
+  ConversationSpace facts. No raw platform identity is exposed to the Agent and no identity cache
+  or second directory was added.
+- Hybrid recall and Curator recent-window reads query existing `memory_records` and `tasks`.
+  SQLite FTS5 remains authoritative, and strict scope predicates remain in the Memory Service.
+- Memory audit uses the existing AdminService/OfflineAdminService split and additive read-only
+  Control v3 routes. Online CLI never opens SQLite; offline CLI still takes the ownership lease.
+- Existing schema v6 already contains all required facts, so this extension adds no migration,
+  schema version, compatibility branch, vector store, or public management server.
 
 ## Data model and state
 

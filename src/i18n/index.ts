@@ -107,6 +107,8 @@ const zhCN = {
   "error.identity_operation_rejected.action": "请确认配对、会话和管理员权限。",
   "error.memory_operation_rejected.message": "当前会话不能执行这项记忆操作。",
   "error.memory_operation_rejected.action": "请确认记忆存在且属于当前允许的作用域。",
+  "error.memory_record_not_found.message": "指定的记忆记录不存在。",
+  "error.memory_record_not_found.action": "请使用 imgent memory list 获取有效的记忆 ID。",
   "error.memory_curation_failed.message": "后台记忆整理暂时未完成，不影响本次回复。",
   "error.memory_curation_failed.action": "IMGent 将自动重试，无需重复发送消息。",
   "error.internal_unexpected_error.message": "IMGent 遇到未预期的内部错误。",
@@ -255,6 +257,8 @@ const enUS = {
     "This conversation cannot perform the requested memory operation.",
   "error.memory_operation_rejected.action":
     "Check that the memory exists and belongs to an allowed scope.",
+  "error.memory_record_not_found.message": "The requested memory record does not exist.",
+  "error.memory_record_not_found.action": "Use imgent memory list to find a valid memory ID.",
   "error.memory_curation_failed.message":
     "Background memory curation is incomplete, but the current reply is unaffected.",
   "error.memory_curation_failed.action":

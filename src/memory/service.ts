@@ -40,6 +40,17 @@ export interface MemoryRecord {
   updatedAt: string;
 }
 
+interface MemoryRecordRow {
+  id: string;
+  scope_type: MemoryScope;
+  value: string;
+  fact_key: string | null;
+  kind: MemoryKind;
+  origin: MemoryOrigin;
+  confidence: number;
+  updated_at: string;
+}
+
 const FACT_KEY = /^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$/;
 const SENSITIVE =
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|(?:api[_-]?key|token|password|passwd|secret)\s*[:=]\s*\S+|Bearer\s+[A-Za-z0-9._~+/=-]{12,}/i;
@@ -223,18 +234,8 @@ export class MemoryService {
       context.conversationKind === "direct"
         ? [context.principalId, context.principalId, context.conversationKey]
         : [context.conversationSpaceId, context.conversationSpaceId, context.principalId];
-    type SearchRow = {
-      id: string;
-      scope_type: MemoryScope;
-      value: string;
-      fact_key: string | null;
-      kind: MemoryKind;
-      origin: MemoryOrigin;
-      confidence: number;
-      updated_at: string;
-    };
     const boundedLimit = Math.max(1, Math.min(limit, 50));
-    const rows = this.store.all<SearchRow>(
+    const rows = this.store.all<MemoryRecordRow>(
       `SELECT m.id, m.scope_type, m.value, m.fact_key, m.kind, m.origin,
               m.confidence, m.updated_at
        FROM memory_fts f
@@ -252,16 +253,22 @@ export class MemoryService {
       ...scopeParams,
       boundedLimit,
     );
-    return rows.map((row) => ({
-      id: row.id,
-      scopeType: row.scope_type,
-      value: row.value,
-      ...(row.fact_key ? { factKey: row.fact_key } : {}),
-      kind: row.kind,
-      origin: row.origin,
-      confidence: row.confidence,
-      updatedAt: row.updated_at,
-    }));
+    return rows.map(memoryRecord);
+  }
+
+  recall(context: MemoryContext, query: string): MemoryRecord[] {
+    const baseline = this.baseline(context);
+    const relevant = query.trim() ? this.search(context, query, 8) : [];
+    const episodes = this.recentEpisodes(context, 2);
+    const merged: MemoryRecord[] = [];
+    const seen = new Set<string>();
+    for (const record of [...baseline, ...relevant, ...episodes]) {
+      if (seen.has(record.id)) continue;
+      seen.add(record.id);
+      merged.push(record);
+      if (merged.length === 12) break;
+    }
+    return merged;
   }
 
   forget(context: MemoryContext, memoryId: string): boolean {
@@ -403,18 +410,108 @@ export class MemoryService {
     }
     return result;
   }
+
+  private baseline(context: MemoryContext): MemoryRecord[] {
+    const current = now();
+    if (context.conversationKind === "direct") {
+      return this.store
+        .all<MemoryRecordRow>(
+          `SELECT id, scope_type, value, fact_key, kind, origin, confidence, updated_at
+           FROM memory_records
+           WHERE agent_profile_id = ?
+             AND scope_type = 'personal_private'
+             AND principal_id = ?
+             AND kind IN ('fact', 'preference', 'decision', 'plan')
+             AND status = 'active'
+             AND (expires_at IS NULL OR expires_at > ?)
+           ORDER BY confidence DESC, updated_at DESC, id DESC
+           LIMIT 6`,
+          context.agentProfileId,
+          context.principalId,
+          current,
+        )
+        .map(memoryRecord);
+    }
+    const member = this.store
+      .all<MemoryRecordRow>(
+        `SELECT id, scope_type, value, fact_key, kind, origin, confidence, updated_at
+         FROM memory_records
+         WHERE agent_profile_id = ?
+           AND scope_type = 'group_member'
+           AND conversation_space_id = ?
+           AND principal_id = ?
+           AND kind IN ('fact', 'preference', 'decision', 'plan')
+           AND status = 'active'
+           AND (expires_at IS NULL OR expires_at > ?)
+         ORDER BY confidence DESC, updated_at DESC, id DESC
+         LIMIT 3`,
+        context.agentProfileId,
+        context.conversationSpaceId,
+        context.principalId,
+        current,
+      )
+      .map(memoryRecord);
+    const shared = this.store
+      .all<MemoryRecordRow>(
+        `SELECT id, scope_type, value, fact_key, kind, origin, confidence, updated_at
+         FROM memory_records
+         WHERE agent_profile_id = ?
+           AND scope_type = 'group_shared'
+           AND conversation_space_id = ?
+           AND kind IN ('fact', 'preference', 'decision', 'plan')
+           AND status = 'active'
+           AND (expires_at IS NULL OR expires_at > ?)
+         ORDER BY confidence DESC, updated_at DESC, id DESC
+         LIMIT 3`,
+        context.agentProfileId,
+        context.conversationSpaceId,
+        current,
+      )
+      .map(memoryRecord);
+    return [...member, ...shared];
+  }
+
+  private recentEpisodes(context: MemoryContext, limit: number): MemoryRecord[] {
+    const current = now();
+    const rows =
+      context.conversationKind === "direct"
+        ? this.store.all<MemoryRecordRow>(
+            `SELECT id, scope_type, value, fact_key, kind, origin, confidence, updated_at
+             FROM memory_records
+             WHERE agent_profile_id = ?
+               AND scope_type = 'private_episode'
+               AND principal_id = ?
+               AND source_conversation_key = ?
+               AND status = 'active'
+               AND (expires_at IS NULL OR expires_at > ?)
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?`,
+            context.agentProfileId,
+            context.principalId,
+            context.conversationKey,
+            current,
+            limit,
+          )
+        : this.store.all<MemoryRecordRow>(
+            `SELECT id, scope_type, value, fact_key, kind, origin, confidence, updated_at
+             FROM memory_records
+             WHERE agent_profile_id = ?
+               AND scope_type = 'group_episode'
+               AND conversation_space_id = ?
+               AND status = 'active'
+               AND (expires_at IS NULL OR expires_at > ?)
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?`,
+            context.agentProfileId,
+            context.conversationSpaceId,
+            current,
+            limit,
+          );
+    return rows.map(memoryRecord);
+  }
 }
 
-function memoryRecord(row: {
-  id: string;
-  scope_type: MemoryScope;
-  value: string;
-  fact_key: string | null;
-  kind: MemoryKind;
-  origin: MemoryOrigin;
-  confidence: number;
-  updated_at: string;
-}): MemoryRecord {
+function memoryRecord(row: MemoryRecordRow): MemoryRecord {
   return {
     id: row.id,
     scopeType: row.scope_type,

@@ -78,6 +78,9 @@ flowchart LR
 - 平台事件确认与耗时较长的 Agent 工作相互独立。
 - 重复投递会在创建第二个任务前被去重。
 - 一个会话同一时间只运行一个 turn，后续消息按 FIFO 等待；不同会话可以并发。
+- 每个 Agent turn 都以宿主生成的 `[IMGent Context]` JSON 行开始，其中包含稳定、匿名化的会话
+  和发言者引用。群成员共享群 Agent session，但每条消息仍能区分具体发言者；可变昵称只是不可信
+  展示标签。
 - 私聊记忆、QQ 群共享记忆和群成员档案是独立作用域。群聊 turn 永远不会加载成员的私聊记忆。
 - 高风险 Host Tool 请求会把审批发回原会话。只有原请求对应的已授权 Principal 可以允许、
   拒绝或回答。
@@ -163,11 +166,11 @@ npx --package imgent@alpha imgent --help
 
 每个管理命令都会声明自己如何访问状态：
 
-| 模式      | 可运行条件                                         | 命令                                                                                             |
-| --------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `offline` | 同一数据目录的 `imgent start` 已停止               | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`                      |
-| `online`  | 常驻服务正在运行；始终走本地控制面                 | `pair`、`identity workspace set`、`group authorize`、`conversation list`、所有 `schedule` 子命令 |
-| `dual`    | 运行时访问服务，停服时取得短期离线 ownership lease | `doctor`、`status`、`identity list`、`group list`、`skills list`、`skills validate`、`backup`    |
+| 模式      | 可运行条件                                         | 命令                                                                                                                     |
+| --------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `offline` | 同一数据目录的 `imgent start` 已停止               | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`                                              |
+| `online`  | 常驻服务正在运行；始终走本地控制面                 | `pair`、`identity workspace set`、`group authorize`、`conversation list`、所有 `schedule` 子命令                         |
+| `dual`    | 运行时访问服务，停服时取得短期离线 ownership lease | `doctor`、`status`、`identity list`、`group list`、`memory status/list/show`、`skills list`、`skills validate`、`backup` |
 
 `imgent start` 本身是常驻进程。服务运行时执行 offline 命令会返回
 `RUNTIME_SERVICE_MUST_STOP`；服务停止时执行 online 命令会返回
@@ -297,6 +300,15 @@ Agent：工作树干净；当前分支是 main，并且与 origin/main 一致。
 回复由选定的本地 Agent 在该 Principal 工作区中生成。如果 Agent 需要高风险 Host Tool 或补充信息，
 IMGent 会把 request ID 发回同一会话；按下文说明使用 `/imgent allow`、`/imgent deny` 或
 `/imgent answer` 回答。发送 `/imgent cancel` 或“取消”可以取消该会话运行中和排队中的工作。
+
+原始请求进入 Codex 或 Claude Code 前，IMGent 会增加一行紧凑的宿主元数据，例如：
+
+```text
+[IMGent Context] {"conversation":{"kind":"group","ref":"group_7bc41a930f","platform":"qq","botInstanceId":"qq-main"},"speaker":{"ref":"person_a42f9c10de","displayName":"示例用户","role":"member"}}
+```
+
+同一 Principal 和 ConversationSpace 的引用保持稳定，但不会暴露 QQ/微信原始用户 ID。该行是
+宿主元数据，不是用户指令。
 
 配对、群授权、排队、审批、询问、错误和命令回执等 IMGent 控制消息使用
 `[IMGent: 状态]` 首行；微信 iLink 的未配对提示不会出现群聊说明。Agent 的正式回答不加前缀。
@@ -941,6 +953,28 @@ imgent --config /srv/imgent/imgent.json conversation list
 把 `id` 用作 `--conversation`。存在多个候选 Principal 的群还需要传入 `--principal`。
 不要为 `supportsProactiveSend` 为 `false` 的目标创建计划。
 
+#### `memory status`、`memory list`、`memory show`：审计本机记忆
+
+**模式：** dual。
+
+```bash
+imgent --config /srv/imgent/imgent.json memory status
+imgent --config /srv/imgent/imgent.json memory list \
+  --scope group_member \
+  --conversation conversation_qq_group_01 \
+  --status active \
+  --limit 50
+imgent --config /srv/imgent/imgent.json memory show memory_01
+```
+
+`status` 按作用域、状态和来源统计记忆，并显示 Memory Curator outbox 状态及最近成功/失败时间。
+`list` 支持 `--principal`、`--conversation`、`--scope`、`--origin`、`--status`、
+`--limit` 和上一页返回的不透明 `--cursor`。`show` 返回指定记录的正文、生命周期以及来源
+task/message ID。
+
+这些命令只供本机部署者审计：服务运行时走 Control v3，停服时取得短期离线 ownership lease；
+不会返回 reply context、平台原始用户 ID 或凭据，也不新增对应的 IM 聊天命令。
+
 #### `schedule add`：创建一次性或 cron 任务
 
 **模式：** online。
@@ -1305,6 +1339,8 @@ ready 时 `/readyz` 返回缓存的本地化 readiness 对象和 HTTP 200，degr
   `Accept-Language: zh-CN|en-US`；两者都不会执行深度探测。
 - 升级前先备份。SQLite schema v6 只会在空数据目录创建；不兼容 schema 会被原样拒绝。
 - QQ 全量采集默认保留未触发的群原文七天。策展后的群共享记忆遵循记忆纠正和删除规则。
+- 自动召回组合少量、作用域安全的成员/群基础画像、FTS5 相关结果和近期 episode；群聊永远
+  不会收到私聊记忆或其他成员档案。
 
 ## 3. 开发与维护 IMGent
 

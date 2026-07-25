@@ -85,10 +85,17 @@ catalog、自动召回与后台 Curator；它不影响其他 skills。
 
 IMGent 为每个新建或恢复的普通 turn 构造相同的 developer instructions：
 
-1. 完整注入 `imgent-conversation`。
-2. 记忆开启时完整注入 `imgent-memory`。
-3. 仅列出其他可见 skill 的名称和描述。
-4. 要求 Agent 在任务匹配描述或用户显式点名时先调用 `skills.load`。
+1. 在用户 prompt 前加入宿主生成的 `[IMGent Context]` JSON 行，其中
+   `conversation.ref` 和 `speaker.ref` 是稳定匿名引用；昵称只是经 JSON 转义的
+   不可信展示值。
+2. 完整注入 `imgent-conversation`。
+3. 记忆开启时完整注入 `imgent-memory`。
+4. 仅列出其他可见 skill 的名称和描述。
+5. 要求 Agent 在任务匹配描述或用户显式点名时先调用 `skills.load`。
+
+普通 IM、定时任务和后台 Curator 都必须携带统一 `AgentTurnContext`；Codex 与
+Claude Code Driver 共用同一格式化器。群里的不同成员可以复用同一个厂商 session，
+但每条消息的 `speaker.ref` 必须对应真实 Principal，不能依赖昵称区分。
 
 Host Tools：
 
@@ -119,3 +126,7 @@ skills 的 Host Tool；只有能访问本机配置和数据目录的部署者可
 影响交互记忆和后台策展的语义指令，但不会扩大任一 turn 的工具权限。
 `imgent backup` 会连同文件执行位一起备份用户层 skills，恢复时仍执行安全
 路径与权限校验；内置层由 IMGent 版本本身提供。
+
+后台 Curator 还会收到同一 conversationKey 过去 24 小时最多 6 条带发言者引用的
+近期消息。这些消息只用于解释当前 turn 的指代；只有当前 task/message 可以成为
+新记忆的来源。覆盖 `imgent-memory` 也不能改变该宿主限制。
