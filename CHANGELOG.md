@@ -1,5 +1,13 @@
 # imgent
 
+## 0.2.0-alpha.5
+
+### Minor Changes
+
+- 601afe9: Improve real QQ and WeChat operation with reliable QQ Gateway readiness and event replies,
+  platform-aware pairing guidance, formatted pre-Agent status messages, Principal workspaces, and
+  AgentProfile-specific Codex or Claude Code user homes.
+
 ## 0.2.0-alpha.4
 
 ### Patch Changes
