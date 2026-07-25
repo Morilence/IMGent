@@ -1,0 +1,13 @@
+{
+  "mode": "pre",
+  "tag": "alpha",
+  "initialVersions": {
+    "imgent": "0.1.0",
+    "@imgent/driver-claude-code": "0.1.0",
+    "@imgent/driver-codex": "0.1.0",
+    "@imgent/contracts": "0.1.0",
+    "@imgent/adapter-qq": "0.1.0",
+    "@imgent/adapter-wechat-ilink": "0.1.0"
+  },
+  "changesets": []
+}

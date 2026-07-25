@@ -68,6 +68,16 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 
+      - name: Reconcile npm prerelease dist-tags
+        if: steps.changesets.outputs.published == 'true'
+        run: node scripts/ensure-prerelease-dist-tag.mjs
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Test published package
+        if: steps.changesets.outputs.published == 'true'
+        run: pnpm verify:package "imgent@$(node --print "require('./package.json').version")"
+
       - name: Summarize
         if: steps.changesets.outputs.published == 'true'
         run: >-

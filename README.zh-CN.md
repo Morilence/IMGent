@@ -5,6 +5,9 @@
 IMGent 是一个自托管桥接器，让用户可以通过 QQ 官方机器人或微信 iLink 机器人使用本地
 Codex 或 Claude Code Agent，同时继续在本机掌控工作区、身份、审批、会话和记忆。
 
+> **Alpha：**IMGent 目前仍处于实验阶段，尚不适合生产环境。API、配置、数据库 schema、
+> 备份格式和运行行为可能发生不向后兼容的变化。
+
 本文分为三个部分：
 
 1. [认识 IMGent](#1-认识-imgent)：IMGent 能做什么、如何工作，以及能力边界。
@@ -146,14 +149,14 @@ IMGent 明确**不提供**：
 全局安装长期运行的 CLI：
 
 ```bash
-npm install --global imgent
+npm install --global imgent@alpha
 imgent --version
 ```
 
 只想临时查看帮助而不做全局安装：
 
 ```bash
-npx imgent --help
+npx --package imgent@alpha imgent --help
 ```
 
 ### 先理解命令运行模式
@@ -1385,9 +1388,25 @@ git add .changeset/*.md
 git commit -m "docs: add release changeset"
 ```
 
+仓库当前处于 Changesets `alpha` 预发布模式。首条公开预发布版本线是
+`0.2.0-alpha.x`。公开版本仍处于实验阶段时，应保持预发布模式：
+
+```bash
+pnpm changeset pre enter alpha
+```
+
+剩余发布门槛完成后，先退出预发布模式，再创建稳定版本：
+
+```bash
+pnpm changeset pre exit
+```
+
 带 changeset 的 PR 进入 `main` 后，发布 workflow 会运行验证和 npm 安装 smoke，然后创建或
 更新 `ci: release imgent` Release PR。合并 Release PR 后会更新 changelog、创建 tag 和
-GitHub Release，并发布到 npm。
+GitHub Release，并发布到 npm。发布完成后，workflow 会显式校正预发布 channel；只有在
+`latest` 指向预发布版本时才移除它，并从 registry 安装刚发布的精确版本，再执行一次包级
+smoke。公开 Alpha 使用 `imgent@alpha` 安装；不带 tag 的 `imgent` 安装保留给未来稳定版
+`latest`。
 
 workflow 可以使用 `PAT_TOKEN` 作为专用发布身份，首次发布需要 `NPM_TOKEN`。包创建后，尽量
 把仓库 workflow 配置成 npm Trusted Publisher，并移除长期写 token。

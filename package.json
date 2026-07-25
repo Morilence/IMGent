@@ -48,7 +48,7 @@
     "format": "prettier . --write",
     "format:check": "prettier . --check",
     "typecheck": "tsc -b --pretty false",
-    "test": "tsc -b && node --test --test-reporter=spec dist/tests/*.test.js",
+    "test": "tsc -b && node --test --test-reporter=spec dist/tests/*.test.js scripts/*.test.mjs",
     "verify:codex": "tsc -b && node scripts/codex-real-smoke.mjs",
     "verify:package": "node scripts/verify-package.mjs",
     "start": "node dist/src/cli/main.js start",

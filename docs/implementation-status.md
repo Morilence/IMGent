@@ -2,8 +2,9 @@
 
 > Snapshot: 2026-07-25
 > Runtime baseline: Node.js 24.18.0+
+> Release channel: Changesets `alpha`; initial public line `0.2.0-alpha.x`
 
-IMGent is implemented as one published package and one `imgent` executable. `imgent start`
+IMGent is implemented as one publishable package and one `imgent` executable. `imgent start`
 is the resident service; every other invocation is a short-lived CLI. The resident service is
 the sole online owner of SQLite, credentials, adapters, drivers, queues, and the immutable skill
 snapshot.
@@ -17,6 +18,18 @@ The repository keeps the package boundaries that have real alternate implementat
 
 There is no dynamic plugin market, remote control API, daemon binary, hot reload, cloud memory,
 or vector database.
+
+## Release posture
+
+The public package is intentionally an alpha rather than a stable release. Documentation installs
+`imgent@alpha` and states that compatibility and production readiness are not guaranteed.
+Changesets owns version calculation through `.changeset/pre.json`; versions are not edited
+manually.
+
+The publish workflow tests the source and packed artifact before publication. After publication it
+reconciles npm dist-tags so the prerelease channel points to the exact published version, removes
+`latest` only when it points to a prerelease, and installs the exact registry version through the
+same package smoke. A future stable release requires explicitly exiting Changesets prerelease mode.
 
 ## Current architecture
 

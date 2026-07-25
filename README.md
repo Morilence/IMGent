@@ -6,6 +6,9 @@ IMGent is a self-hosted bridge that lets people use a local Codex or Claude Code
 official QQ bot or a WeChat iLink bot, without giving up local control of workspaces, identities,
 approvals, conversations, or memory.
 
+> **Alpha:** IMGent is experimental and is not production-ready. APIs, configuration, database
+> schemas, backup formats, and runtime behavior may change without backward compatibility.
+
 This README has three parts:
 
 1. [Meet IMGent](#1-meet-imgent) — what it does, how it works, and where its boundaries are.
@@ -161,14 +164,14 @@ endpoints, and real user identifiers are never shown.
 Install the long-running CLI globally:
 
 ```bash
-npm install --global imgent
+npm install --global imgent@alpha
 imgent --version
 ```
 
 For a temporary help lookup without installing globally:
 
 ```bash
-npx imgent --help
+npx --package imgent@alpha imgent --help
 ```
 
 ### Understand command modes first
@@ -1435,9 +1438,27 @@ git add .changeset/*.md
 git commit -m "docs: add release changeset"
 ```
 
+The repository is currently in Changesets `alpha` prerelease mode. The initial public prerelease
+line is `0.2.0-alpha.x`. Keep prerelease mode on while the public channel remains experimental:
+
+```bash
+pnpm changeset pre enter alpha
+```
+
+When the remaining release gates are complete, exit prerelease mode before creating the stable
+release:
+
+```bash
+pnpm changeset pre exit
+```
+
 After a changeset PR reaches `main`, the publish workflow runs validation and npm installation
 smoke tests, then creates or updates the `ci: release imgent` Release PR. Merging that Release PR
-updates the changelog, creates the tag and GitHub Release, and publishes to npm.
+updates the changelog, creates the tag and GitHub Release, and publishes to npm. After publication,
+the workflow makes the prerelease channel explicit, removes `latest` only if it points to a
+prerelease, and installs the exact published version from the registry for another package smoke.
+Users install the public alpha with `imgent@alpha`; an unqualified `imgent` install is reserved for
+a future stable `latest`.
 
 The workflow can use `PAT_TOKEN` for a dedicated release identity and needs `NPM_TOKEN` for the
 first publication. After the package exists, configure the repository workflow as an npm Trusted

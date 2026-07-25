@@ -30,11 +30,12 @@ async function run(file, args, options = {}) {
 
 try {
   await mkdir(workspace);
-  let archivePath;
+  let installSource;
   if (process.argv[2]) {
-    archivePath = await realpath(resolve(process.argv[2]));
-    if (!archivePath.endsWith(".tgz")) {
-      throw new Error(`Expected a .tgz package archive, received ${archivePath}`);
+    if (process.argv[2].endsWith(".tgz")) {
+      installSource = await realpath(resolve(process.argv[2]));
+    } else {
+      installSource = process.argv[2];
     }
   } else {
     await mkdir(artifactsDirectory);
@@ -43,10 +44,10 @@ try {
     if (archives.length !== 1) {
       throw new Error(`Expected one package archive, found ${archives.length}`);
     }
-    archivePath = join(artifactsDirectory, archives[0]);
+    installSource = join(artifactsDirectory, archives[0]);
   }
 
-  await run("npm", ["install", "--global", "--prefix", installPrefix, archivePath]);
+  await run("npm", ["install", "--global", "--prefix", installPrefix, installSource]);
   const npmRoot = (await run("npm", ["root", "--global", "--prefix", installPrefix])).stdout.trim();
   const cliPath = join(npmRoot, packageJson.name, packageJson.bin.imgent);
   await access(cliPath);
