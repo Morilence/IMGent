@@ -1455,10 +1455,11 @@ pnpm changeset pre exit
 After a changeset PR reaches `main`, the publish workflow runs validation and npm installation
 smoke tests, then creates or updates the `ci: release imgent` Release PR. Merging that Release PR
 updates the changelog, creates the tag and GitHub Release, and publishes to npm. After publication,
-the workflow makes the prerelease channel explicit, removes `latest` only if it points to a
-prerelease, and installs the exact published version from the registry for another package smoke.
-Users install the public alpha with `imgent@alpha`; an unqualified `imgent` install is reserved for
-a future stable `latest`.
+the workflow makes the prerelease channel explicit and installs the exact published version from
+the registry for another package smoke. npm requires every package to have a `latest` tag, so before
+IMGent has its first stable release both `alpha` and `latest` point to the current alpha. Users
+should install the experimental channel explicitly with `imgent@alpha`; the first stable release
+will move `latest` to a non-prerelease version.
 
 The workflow can use `PAT_TOKEN` for a dedicated release identity and needs `NPM_TOKEN` for the
 first publication. After the package exists, configure the repository workflow as an npm Trusted

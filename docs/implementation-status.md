@@ -27,9 +27,10 @@ Changesets owns version calculation through `.changeset/pre.json`; versions are 
 manually.
 
 The publish workflow tests the source and packed artifact before publication. After publication it
-reconciles npm dist-tags so the prerelease channel points to the exact published version, removes
-`latest` only when it points to a prerelease, and installs the exact registry version through the
-same package smoke. A future stable release requires explicitly exiting Changesets prerelease mode.
+reconciles npm dist-tags so the prerelease channel points to the exact published version and
+installs the exact registry version through the same package smoke. npm requires `latest` to exist,
+so it follows the current alpha until IMGent has a stable version. A future stable release requires
+explicitly exiting Changesets prerelease mode and will move `latest` to that stable version.
 
 ## Current architecture
 

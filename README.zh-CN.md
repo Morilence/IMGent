@@ -1403,10 +1403,10 @@ pnpm changeset pre exit
 
 带 changeset 的 PR 进入 `main` 后，发布 workflow 会运行验证和 npm 安装 smoke，然后创建或
 更新 `ci: release imgent` Release PR。合并 Release PR 后会更新 changelog、创建 tag 和
-GitHub Release，并发布到 npm。发布完成后，workflow 会显式校正预发布 channel；只有在
-`latest` 指向预发布版本时才移除它，并从 registry 安装刚发布的精确版本，再执行一次包级
-smoke。公开 Alpha 使用 `imgent@alpha` 安装；不带 tag 的 `imgent` 安装保留给未来稳定版
-`latest`。
+GitHub Release，并发布到 npm。发布完成后，workflow 会显式校正预发布 channel，并从
+registry 安装刚发布的精确版本，再执行一次包级 smoke。npm 要求每个包都有 `latest` tag，
+因此 IMGent 发布首个稳定版前，`alpha` 和 `latest` 都会指向当前 Alpha。用户应显式使用
+`imgent@alpha` 安装实验版本；发布首个稳定版时，`latest` 才会转到非预发布版本。
 
 workflow 可以使用 `PAT_TOKEN` 作为专用发布身份，首次发布需要 `NPM_TOKEN`。包创建后，尽量
 把仓库 workflow 配置成 npm Trusted Publisher，并移除长期写 token。

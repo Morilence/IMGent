@@ -73,7 +73,7 @@ export async function ensurePrereleaseDistTag({
 }) {
   const tag = prereleaseTagForVersion(version);
   if (tag === undefined) {
-    return { tag: undefined, removedLatest: false };
+    return { tag: undefined, prereleaseLatest: false };
   }
 
   await runNpm(["dist-tag", "add", `${name}@${version}`, tag]);
@@ -83,31 +83,28 @@ export async function ensurePrereleaseDistTag({
     return parseDistTags(result.stdout);
   };
 
-  let tags = await waitForDistTags(readDistTags, (candidate) => candidate[tag] === version, wait);
-  let removedLatest = false;
-  if (typeof tags.latest === "string" && prereleaseTagForVersion(tags.latest) !== undefined) {
-    await runNpm(["dist-tag", "rm", name, "latest"]);
-    removedLatest = true;
-    tags = await waitForDistTags(
-      readDistTags,
-      (candidate) =>
-        candidate[tag] === version &&
-        !(
-          typeof candidate.latest === "string" &&
-          prereleaseTagForVersion(candidate.latest) !== undefined
-        ),
-      wait,
-    );
-  }
+  const tags = await waitForDistTags(
+    readDistTags,
+    (candidate) =>
+      candidate[tag] === version &&
+      !(
+        typeof candidate.latest === "string" &&
+        prereleaseTagForVersion(candidate.latest) !== undefined &&
+        candidate.latest !== version
+      ),
+    wait,
+  );
 
   if (tags[tag] !== version) {
     throw new Error(`Expected npm dist-tag ${tag} to point to ${version}`);
   }
   if (typeof tags.latest === "string" && prereleaseTagForVersion(tags.latest) !== undefined) {
-    throw new Error(`npm dist-tag latest still points to prerelease ${tags.latest}`);
+    if (tags.latest !== version) {
+      throw new Error(`npm dist-tag latest points to stale prerelease ${tags.latest}`);
+    }
   }
 
-  return { tag, removedLatest };
+  return { tag, prereleaseLatest: tags.latest === version };
 }
 
 async function main() {
@@ -126,7 +123,9 @@ async function main() {
     return;
   }
 
-  const latestResult = result.removedLatest ? "; removed prerelease latest tag" : "";
+  const latestResult = result.prereleaseLatest
+    ? "; latest remains on the prerelease until the first stable release"
+    : "";
   process.stdout.write(
     `Verified ${packageJson.name}@${packageJson.version}: ${result.tag} dist-tag${latestResult}\n`,
   );

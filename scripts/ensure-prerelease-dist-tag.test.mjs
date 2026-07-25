@@ -19,10 +19,6 @@ function fakeNpm(initialTags = {}, options = {}) {
         }
         return { stdout: "" };
       }
-      if (args[0] === "dist-tag" && args[1] === "rm") {
-        delete tags[args[3]];
-        return { stdout: "" };
-      }
       if (args[0] === "view") {
         if (remainingViewFailures > 0) {
           remainingViewFailures -= 1;
@@ -51,11 +47,11 @@ test("leaves dist-tags unchanged for stable versions", async () => {
     runNpm: npm.run,
   });
 
-  assert.deepEqual(result, { tag: undefined, removedLatest: false });
+  assert.deepEqual(result, { tag: undefined, prereleaseLatest: false });
   assert.deepEqual(npm.calls, []);
 });
 
-test("keeps alpha current and removes a prerelease latest tag", async () => {
+test("keeps alpha current and accepts the required prerelease latest tag", async () => {
   const npm = fakeNpm({ latest: "0.2.0-alpha.0" });
   const result = await ensurePrereleaseDistTag({
     name: "imgent",
@@ -64,8 +60,11 @@ test("keeps alpha current and removes a prerelease latest tag", async () => {
     wait: noWait,
   });
 
-  assert.deepEqual(result, { tag: "alpha", removedLatest: true });
-  assert.deepEqual(npm.tags, { alpha: "0.2.0-alpha.0" });
+  assert.deepEqual(result, { tag: "alpha", prereleaseLatest: true });
+  assert.deepEqual(npm.tags, {
+    latest: "0.2.0-alpha.0",
+    alpha: "0.2.0-alpha.0",
+  });
 });
 
 test("preserves a stable latest tag while advancing alpha", async () => {
@@ -77,7 +76,7 @@ test("preserves a stable latest tag while advancing alpha", async () => {
     wait: noWait,
   });
 
-  assert.deepEqual(result, { tag: "alpha", removedLatest: false });
+  assert.deepEqual(result, { tag: "alpha", prereleaseLatest: false });
   assert.deepEqual(npm.tags, {
     latest: "0.1.0",
     alpha: "0.2.0-alpha.1",
@@ -108,7 +107,7 @@ test("retries while a newly published package becomes visible", async () => {
     wait: async (milliseconds) => waits.push(milliseconds),
   });
 
-  assert.deepEqual(result, { tag: "alpha", removedLatest: false });
+  assert.deepEqual(result, { tag: "alpha", prereleaseLatest: false });
   assert.deepEqual(waits, [1000, 2000]);
   assert.equal(npm.tags.alpha, "0.2.0-alpha.1");
 });
