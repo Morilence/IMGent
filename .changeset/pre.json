@@ -11,6 +11,7 @@
   },
   "changesets": [
     "add-scheduled-agent-tasks",
+    "align-npm-latest",
     "clean-runtime-boundaries",
     "retry-npm-visibility",
     "tidy-tools-publish"

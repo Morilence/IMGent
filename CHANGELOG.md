@@ -1,5 +1,12 @@
 # imgent
 
+## 0.2.0-alpha.2
+
+### Patch Changes
+
+- b332f63: Align prerelease dist-tag verification with npm's requirement that every new package retains a
+  `latest` tag until its first stable release.
+
 ## 0.2.0-alpha.1
 
 ### Patch Changes
