@@ -9,5 +9,10 @@
     "@imgent/adapter-qq": "0.1.0",
     "@imgent/adapter-wechat-ilink": "0.1.0"
   },
-  "changesets": ["add-scheduled-agent-tasks", "clean-runtime-boundaries", "tidy-tools-publish"]
+  "changesets": [
+    "add-scheduled-agent-tasks",
+    "clean-runtime-boundaries",
+    "retry-npm-visibility",
+    "tidy-tools-publish"
+  ]
 }

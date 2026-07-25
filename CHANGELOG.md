@@ -1,5 +1,12 @@
 # imgent
 
+## 0.2.0-alpha.1
+
+### Patch Changes
+
+- 0f2a9c7: Retry npm dist-tag reconciliation while a newly published prerelease becomes visible in the
+  registry.
+
 ## 0.2.0-alpha.0
 
 ### Minor Changes
