@@ -1,6 +1,6 @@
 {
   "name": "imgent",
-  "version": "0.1.0",
+  "version": "0.2.0-alpha.0",
   "description": "IMGent is a self-hosted bridge from QQ and WeChat iLink to local Codex and Claude Code agents",
   "license": "Apache-2.0",
   "keywords": [
