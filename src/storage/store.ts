@@ -804,15 +804,25 @@ export class IMGentStore {
 
   recoverAfterRestart(): { requeued: number; deadLettered: number } {
     return this.transaction(() => {
+      const timestamp = now();
       this.run(
         `UPDATE approvals SET status = 'expired', decided_at = ?
          WHERE status = 'pending'
            AND task_id IN (
              SELECT id FROM tasks WHERE status = 'waiting_approval'
            )`,
-        now(),
+        timestamp,
       );
       const recoveryError = new IMGentError("PROCESS_RESTART_RECOVERY").descriptor;
+      this.run(
+        `UPDATE memory_outbox
+         SET status = CASE WHEN attempt >= 3 THEN 'dead_letter' ELSE 'retry_wait' END,
+             next_attempt_at = ?, last_error_json = ?, updated_at = ?
+         WHERE status = 'processing'`,
+        timestamp,
+        JSON.stringify(recoveryError),
+        timestamp,
+      );
       const requeued = this.database
         .prepare(
           `UPDATE tasks SET status = 'retry_wait', error_json = ?,
@@ -820,7 +830,12 @@ export class IMGentStore {
            WHERE status = 'active'
              AND dangerous_side_effect_started = 0`,
         )
-        .run(JSON.stringify(recoveryError), recoveryError.incidentId ?? null, now(), now()).changes;
+        .run(
+          JSON.stringify(recoveryError),
+          recoveryError.incidentId ?? null,
+          timestamp,
+          timestamp,
+        ).changes;
       const unsafeError = new IMGentError("TASK_UNSAFE_REPLAY").descriptor;
       const deadLettered = this.database
         .prepare(
@@ -829,7 +844,7 @@ export class IMGentStore {
            WHERE status = 'waiting_approval'
               OR (status = 'active' AND dangerous_side_effect_started = 1)`,
         )
-        .run(JSON.stringify(unsafeError), unsafeError.incidentId ?? null, now()).changes;
+        .run(JSON.stringify(unsafeError), unsafeError.incidentId ?? null, timestamp).changes;
       return {
         requeued: Number(requeued),
         deadLettered: Number(deadLettered),

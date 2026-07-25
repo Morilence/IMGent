@@ -35,7 +35,8 @@ explicitly exiting Changesets prerelease mode and will move `latest` to that sta
 ## Current architecture
 
 - The control plane is HTTP/JSON protocol v3 over a protected Unix socket or user-scoped Windows
-  Named Pipe. All routes use `/v3`; incompatible clients fail explicitly.
+  Named Pipe. Unix endpoint discovery is derived from UID plus canonical data directory and is
+  independent of `XDG_RUNTIME_DIR`. All routes use `/v3`; incompatible clients fail explicitly.
 - `/healthz`, `/readyz`, `status`, and the readiness control route only project a cached runtime
   snapshot. They never perform vendor network, account, or model probes on the request path.
 - `doctor` is the explicit diagnostic boundary. Online it calls `POST /v3/diagnostics`; offline it
@@ -46,10 +47,10 @@ explicitly exiting Changesets prerelease mode and will move `latest` to that sta
   bootstrap flow, and successful `pair` results return executable `nextSteps` for discovered,
   unauthorized groups in the same AgentProfile.
 - Pairing accepts `--workspace`; omission resolves through the pairing route to the selected
-  AgentProfile's required `agentUserHome`, so Codex and Claude Code profiles may use different
-  local-user homes. Principal workspaces drive direct turns, while QQ groups use the authorizing
-  Principal's workspace. Workspace changes are local-control-only and reset affected Agent
-  sessions.
+  AgentProfile's required `agentUserHome`. That legacy field is a default/allowed workspace root,
+  not an operating-system execution identity or `HOME` override. Principal workspaces drive direct
+  turns, while QQ groups use the authorizing Principal's workspace. Workspace changes are
+  local-control-only and reset affected Agent sessions.
 - Host/control messages use `[IMGent: <localized status>]`. Direct-only adapters omit all group
   guidance, while Agent final output remains unprefixed.
 - Every Codex/Claude turn receives a required, shared `AgentTurnContext`. The driver prepends a
@@ -66,17 +67,18 @@ Shutdown remains idempotent, and endpoint cleanup happens on partial startup fai
 
 ## Persistence and compatibility
 
-The current SQLite schema version is 6.
+The current SQLite schema version is 7.
 
-- An empty data directory creates schema v6.
-- Any existing non-v6 database fails with `STORAGE_SCHEMA_UNSUPPORTED` and remains unchanged.
+- An empty data directory creates schema v7.
+- Any existing non-v7 database fails with `STORAGE_SCHEMA_UNSUPPORTED` and remains unchanged.
 - Redundant `agent_profile_id` columns were removed where the profile follows from a referenced
   principal, task, or conversation space.
 - Duplicate unique indexes were removed. Due-work indexes match task, outbound, and memory outbox
-  claim predicates.
+  claim predicates; recent Curator context and memory audit pagination have dedicated indexes.
 - Database open/schema validation and media cleanup are separate storage modules; the store keeps
   transaction-oriented domain operations.
-- Schema v6 includes persistent schedule definitions/runs and Principal workspaces.
+- Schema v7 includes persistent schedule definitions/runs, Principal workspaces, and the bounded
+  context/audit query indexes.
 
 ## Scheduled Agent tasks
 
@@ -131,10 +133,10 @@ parity and rejects template braces.
 
 ## Validation coverage
 
-The automated suite currently contains 90 passing tests and covers:
+The automated suite currently contains 92 passing tests and covers:
 
 - strict configuration and capability routing;
-- schema v6 creation, legacy-schema rejection without mutation, foreign keys, FTS5, and query
+- schema v7 creation, legacy-schema rejection without mutation, foreign keys, FTS5, and query
   plans;
 - schedule timing, proactive capability rejection, fresh/series session isolation, run history,
   and proactive outbound envelopes;

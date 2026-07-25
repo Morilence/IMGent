@@ -129,6 +129,32 @@ test("restart recovery requeues safe work and dead-letters possibly executed wor
     risk: "high",
     expiresAt: new Date(Date.now() + 60_000).toISOString(),
   });
+  const retryCuration = store.ingest(
+    directMessage({ messageId: "curation-retry", dedupeKey: "curation-retry" }),
+    "main",
+    "curation-retry",
+  );
+  const retryCurationTask = store.claimNextTask();
+  assert.equal(retryCurationTask?.id, retryCuration.taskId);
+  assert.equal(store.completeTask(retryCurationTask!.id, "done", true), true);
+  const exhaustedCuration = store.ingest(
+    directMessage({ messageId: "curation-exhausted", dedupeKey: "curation-exhausted" }),
+    "main",
+    "curation-exhausted",
+  );
+  const exhaustedCurationTask = store.claimNextTask();
+  assert.equal(exhaustedCurationTask?.id, exhaustedCuration.taskId);
+  assert.equal(store.completeTask(exhaustedCurationTask!.id, "done", true), true);
+  store.run(
+    `UPDATE memory_outbox SET status = 'processing', attempt = 1
+     WHERE task_id = ?`,
+    retryCurationTask!.id,
+  );
+  store.run(
+    `UPDATE memory_outbox SET status = 'processing', attempt = 3
+     WHERE task_id = ?`,
+    exhaustedCurationTask!.id,
+  );
   store.markDangerousSideEffect(second.taskId!);
   store.close();
   store = await IMGentStore.open(path, new SecretBox(key));
@@ -137,6 +163,20 @@ test("restart recovery requeues safe work and dead-letters possibly executed wor
   assert.equal(store.task(first.taskId!)?.status, "retry_wait");
   assert.equal(store.task(second.taskId!)?.status, "dead_letter");
   assert.equal(store.task(third.taskId!)?.status, "dead_letter");
+  assert.equal(
+    store.get<{ status: string }>(
+      "SELECT status FROM memory_outbox WHERE task_id = ?",
+      retryCurationTask!.id,
+    )?.status,
+    "retry_wait",
+  );
+  assert.equal(
+    store.get<{ status: string }>(
+      "SELECT status FROM memory_outbox WHERE task_id = ?",
+      exhaustedCurationTask!.id,
+    )?.status,
+    "dead_letter",
+  );
   store.close();
   await (
     await import("node:fs/promises")
@@ -185,6 +225,39 @@ test("pairing and explicit cross-platform binding merge principals without displ
       fixture.directory,
     );
     assert.equal(identities.workspace(first.principalId), fixture.directory);
+    const memory = new MemoryService(fixture.store);
+    memory.remember(
+      {
+        agentProfileId: "main",
+        principalId: first.principalId,
+        conversationSpaceId: first.conversationSpaceId,
+        conversationKey: "qq-conversation",
+        conversationKind: "direct",
+        sourceMessageIds: ["message-1"],
+      },
+      {
+        target: "self",
+        kind: "preference",
+        factKey: "response.length",
+        value: "回答保持简洁",
+      },
+    );
+    memory.remember(
+      {
+        agentProfileId: "main",
+        principalId: second.principalId,
+        conversationSpaceId: second.conversationSpaceId,
+        conversationKey: "wechat-conversation",
+        conversationKind: "direct",
+        sourceMessageIds: ["wx-1"],
+      },
+      {
+        target: "self",
+        kind: "preference",
+        factKey: "reply.style",
+        value: "回答保持简洁",
+      },
+    );
     const code = identities.createBindingCode(first.platformIdentityId);
     const result = identities.consumeBindingCode(code, second.platformIdentityId);
     assert.equal(result.principalId, first.principalId);
@@ -197,6 +270,26 @@ test("pairing and explicit cross-platform binding merge principals without displ
     );
     assert.equal(identities.isPaired(second.platformIdentityId), true);
     assert.equal(identities.locale(first.principalId), "en-US");
+    assert.deepEqual(
+      fixture.store
+        .all<{ principal_id: string; value: string; status: string }>(
+          `SELECT principal_id, value, status FROM memory_records
+           WHERE value = '回答保持简洁' ORDER BY status`,
+        )
+        .map((row) => ({ ...row })),
+      [
+        {
+          principal_id: first.principalId,
+          value: "回答保持简洁",
+          status: "active",
+        },
+        {
+          principal_id: first.principalId,
+          value: "回答保持简洁",
+          status: "superseded",
+        },
+      ],
+    );
     const directContext = agentTurnContext(
       {
         agentProfileId: "main",
@@ -919,13 +1012,34 @@ test("full-mode group context gets seven-day retention and asynchronous scoped c
       ingested.eventId,
     );
     assert.equal(cleanupExpiredRawEvents(fixture.store), 1);
-    assert.equal(
-      fixture.store.get<{ message_json: string }>(
-        "SELECT message_json FROM inbound_events WHERE id = ?",
-        ingested.eventId,
-      )?.message_json,
-      '{"expired":true}',
+    const expiredEvent = fixture.store.get<{
+      message_json: string;
+      reply_context_cipher: Uint8Array | null;
+      raw_expires_at: string | null;
+    }>(
+      `SELECT message_json, reply_context_cipher, raw_expires_at
+       FROM inbound_events WHERE id = ?`,
+      ingested.eventId,
     );
+    assert.equal(expiredEvent?.message_json, '{"expired":true}');
+    assert.equal(expiredEvent?.reply_context_cipher, null);
+    assert.equal(expiredEvent?.raw_expires_at, null);
+    const expiredTask = fixture.store.get<{
+      message_json: string;
+      reply_context_cipher: Uint8Array | null;
+    }>(
+      `SELECT message_json, reply_context_cipher
+       FROM tasks WHERE inbound_event_id = ?`,
+      ingested.eventId,
+    );
+    assert.ok(expiredTask);
+    assert.equal(expiredTask.reply_context_cipher, null);
+    assert.doesNotMatch(expiredTask.message_json, /本群发布前必须运行集成测试/);
+    assert.deepEqual(
+      (JSON.parse(expiredTask.message_json) as { parts: unknown[]; mentions: unknown[] }).parts,
+      [],
+    );
+    assert.equal(cleanupExpiredRawEvents(fixture.store), 0);
   } finally {
     await fixture.cleanup();
   }

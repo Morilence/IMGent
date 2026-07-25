@@ -1,10 +1,10 @@
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export const SCHEMA = `
 CREATE TABLE schema_meta (
   version INTEGER NOT NULL
 ) STRICT;
-INSERT INTO schema_meta(version) VALUES (6);
+INSERT INTO schema_meta(version) VALUES (7);
 
 CREATE TABLE principals (
   id TEXT PRIMARY KEY,
@@ -169,6 +169,9 @@ CREATE TABLE tasks (
 CREATE INDEX tasks_fifo_idx ON tasks(execution_key, status, created_at);
 CREATE INDEX tasks_claim_idx ON tasks(created_at, next_attempt_at)
   WHERE status IN ('queued', 'retry_wait');
+CREATE INDEX tasks_recent_context_idx ON tasks(
+  agent_profile_id, conversation_space_id, conversation_key, created_at DESC
+) WHERE inbound_event_id IS NOT NULL;
 
 CREATE TABLE approvals (
   request_id TEXT PRIMARY KEY,
@@ -245,6 +248,8 @@ CREATE UNIQUE INDEX memory_source_task_fact_idx
     fact_key
   )
   WHERE source_task_id IS NOT NULL AND fact_key IS NOT NULL;
+
+CREATE INDEX memory_audit_idx ON memory_records(updated_at DESC, id DESC);
 
 CREATE VIRTUAL TABLE memory_fts USING fts5(
   memory_id UNINDEXED,

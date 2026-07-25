@@ -424,39 +424,51 @@ export class IdentityService {
       );
     }
     this.clearSessionsForPrincipal(fromPrincipalId);
-    const activeFacts = this.store.all<{
+    const activeRecords = this.store.all<{
       id: string;
       agent_profile_id: string;
       scope_type: string;
       conversation_space_id: string | null;
+      source_conversation_key: string;
       fact_key: string | null;
+      value: string;
       updated_at: string;
     }>(
-      `SELECT id, agent_profile_id, scope_type, conversation_space_id, fact_key, updated_at
+      `SELECT id, agent_profile_id, scope_type, conversation_space_id,
+              source_conversation_key, fact_key, value, updated_at
        FROM memory_records WHERE principal_id = ? AND status = 'active'`,
       fromPrincipalId,
     );
-    for (const record of activeFacts) {
-      if (!record.fact_key) continue;
-      const conflict = this.store.get<{ id: string; updated_at: string }>(
+    for (const record of activeRecords) {
+      const conflicts = this.store.all<{ id: string; updated_at: string }>(
         `SELECT id, updated_at FROM memory_records
          WHERE agent_profile_id = ? AND scope_type = ?
            AND principal_id = ? AND COALESCE(conversation_space_id, '') = COALESCE(?, '')
-           AND fact_key = ? AND status = 'active'`,
+           AND (scope_type <> 'private_episode' OR source_conversation_key = ?)
+           AND status = 'active'
+           AND ((? IS NOT NULL AND fact_key = ?) OR value = ?)
+         ORDER BY updated_at DESC, id DESC`,
         record.agent_profile_id,
         record.scope_type,
         toPrincipalId,
         record.conversation_space_id,
+        record.source_conversation_key,
         record.fact_key,
+        record.fact_key,
+        record.value,
       );
-      if (conflict) {
-        const obsolete = conflict.updated_at >= record.updated_at ? record.id : conflict.id;
+      for (const conflict of conflicts) {
+        const sourceIsNewer =
+          record.updated_at > conflict.updated_at ||
+          (record.updated_at === conflict.updated_at && record.id > conflict.id);
+        const obsolete = sourceIsNewer ? conflict.id : record.id;
         this.store.run(
           "UPDATE memory_records SET status = 'superseded', updated_at = ? WHERE id = ?",
           now(),
           obsolete,
         );
         this.store.run("DELETE FROM memory_fts WHERE memory_id = ?", obsolete);
+        if (!sourceIsNewer) break;
       }
     }
     this.store.run(

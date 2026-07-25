@@ -71,6 +71,7 @@ function fakeAdapter(): ImAdapter {
 async function schedulerFixture(
   driver: AgentDriver,
   workspaceFor?: (principalId: string, conversationSpaceId: string) => string | undefined,
+  memoryEnabled = false,
 ): Promise<{
   fixture: Awaited<ReturnType<typeof testStore>>;
   scheduler: ConversationScheduler;
@@ -90,7 +91,7 @@ async function schedulerFixture(
     workspace: fixture.directory,
     skills: ["*"],
     permissions: { maxMode: "ask" },
-    memory: { enabled: false },
+    memory: { enabled: memoryEnabled },
   };
   const outbound = new OutboundDispatcher(fixture.store);
   const scheduler = new ConversationScheduler({
@@ -205,6 +206,71 @@ test("one group session carries distinct stable speaker context for each member"
     assert.equal(observed[1]?.context.speaker.role, "admin");
     assert.equal(observed[0]?.prompt, "first");
     assert.equal(observed[1]?.prompt, "second");
+  } finally {
+    await scheduler.stop();
+    await fixture.cleanup();
+  }
+});
+
+test("attachment-only turns still receive scoped baseline memory", async () => {
+  let observed: AgentTurnInput | undefined;
+  const { fixture, scheduler } = await schedulerFixture(
+    fakeDriver(async (input) => {
+      observed = input;
+      return [
+        { type: "output-final", text: "ok" },
+        { type: "completed", result: "success" },
+      ];
+    }),
+    undefined,
+    true,
+  );
+  try {
+    const identity = fixture.store.ingest(
+      directMessage({
+        messageId: "attachment-identity",
+        dedupeKey: "attachment-identity",
+      }),
+      "main",
+      "attachment-memory",
+      undefined,
+      false,
+    );
+    new MemoryService(fixture.store).remember(
+      {
+        agentProfileId: "main",
+        principalId: identity.principalId,
+        conversationSpaceId: identity.conversationSpaceId,
+        conversationKey: "attachment-memory",
+        conversationKind: "direct",
+        sourceMessageIds: ["attachment-identity"],
+      },
+      {
+        target: "self",
+        kind: "preference",
+        factKey: "reply.style",
+        value: "回答保持简洁",
+      },
+    );
+    fixture.store.ingest(
+      directMessage({
+        messageId: "attachment-only",
+        dedupeKey: "attachment-only",
+        parts: [
+          {
+            type: "audio",
+            attachment: { name: "voice.ogg" },
+            transcript: "",
+          },
+        ],
+      }),
+      "main",
+      "attachment-memory",
+    );
+
+    assert.equal(await scheduler.processOnce(), true);
+    assert.equal(observed?.prompt, "");
+    assert.ok(observed?.memoryContext.some((entry) => entry.includes("回答保持简洁")));
   } finally {
     await scheduler.stop();
     await fixture.cleanup();

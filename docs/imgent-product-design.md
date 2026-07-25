@@ -82,7 +82,10 @@ IMGent 是一个自托管的消息 Agent 框架。它把 QQ 官方机器人和�
 
 角色或权限无法验证时拒绝切换。开启前的消息不回填；关闭后立即停止持久化新的普通群消息。
 
-`full` 模式下未触发机器人的普通群消息原文默认保留 7 天，到期删除。被策展为 `group_shared` 的确认记忆继续按记忆纠正和删除规则保留。
+`full` 模式下未触发机器人的普通群消息原文默认保留 7 天，到期同时清除
+`inbound_events` 正文、策展 task 中的正文副本和两处 reply context；task 只保留无
+正文的身份/会话信封与运行结果。被策展为 `group_shared` 的确认记忆继续按记忆纠正
+和删除规则保留。
 
 ### 2.2 微信能力边界
 
@@ -276,8 +279,9 @@ lease，直到本地数据操作完成，避免与并发 `imgent start` 形成 T
 
 常驻服务额外监听受操作系统权限保护的本地 endpoint：
 
-- Linux/macOS：由规范化 dataDir 生成稳定 instance key，在受保护的用户 runtime
-  目录创建 Unix socket，并校验平台路径长度。
+- Linux/macOS：由当前 UID 与规范化 dataDir 生成稳定 instance key，在
+  `/tmp/imgent-<uid>` 的 `0700` 目录创建 Unix socket，并校验平台路径长度；不依赖
+  `XDG_RUNTIME_DIR`。
 - Windows：由 instance key 和当前用户派生的用户范围 Named Pipe。
 - 协议：HTTP/1.1 + JSON，路由统一使用 `/v3` 版本前缀。
 - `status`、`readiness` 与 `/readyz` 读取最近一次 runtime 快照；只有
@@ -748,6 +752,8 @@ queued -> active -> succeeded
 - 重启后 safe active 进入 retry_wait；已经开始危险副作用的 active 直接进入
   dead letter。所有 `waiting_approval` 审批先标记 expired，task 直接进入 dead
   letter，不提供跨进程审批恢复。
+- 重启时 `processing` Curator outbox 若尚未达到 3 次则进入 retry_wait；第 3 次
+  处理中断则进入 dead letter。记忆写入仍依赖 source task/fact 幂等约束。
 - 厂商 session 恢复在产生输出前失败时，Driver 建立新 session，并继续使用
   IMGent 长期记忆；不依赖独立的最近对话摘要补偿。
 
@@ -789,9 +795,9 @@ interface ErrorDescriptor {
 
 #### `AgentProfile`
 
-定义 AgentDriver、该 Agent CLI 本地用户 Home、系统任务回退工作区、人格提示、
-IMGent skills、权限上限和记忆命名空间。Codex 与 Claude Code Profile 可以分别连接
-不同的本地操作系统用户。
+定义 AgentDriver、默认/隐式允许工作区根、系统任务回退工作区、人格提示、IMGent
+skills、权限上限和记忆命名空间。当前 Driver 子进程始终继承 IMGent 服务的操作系统
+用户与环境；AgentProfile 不负责切换本地用户或 `HOME`。
 
 #### `Principal`
 
@@ -1026,6 +1032,8 @@ scope、Principal、ConversationSpace、origin 和 status 过滤。响应可以�
 ### 11.10 保留与删除
 
 - QQ `full` 模式未触发普通消息原文默认保留 7 天。
+- 到期清理覆盖 inbound event 与策展 task 的正文、附件、mention 和 reply context
+  副本，不删除已确认的长期记忆或 task 运行结果。
 - 其他原始事件只按故障恢复所需的最短期限保存，并支持配置。
 - 自动 episode 可以设置过期时间。
 - 已确认稳定记忆默认不自动删除。
@@ -1161,9 +1169,9 @@ decidedAt
 
 - AgentProfile 保留一个绝对工作区，作为没有 Principal 上下文的系统任务回退值。
 - 新配对 Principal 通过 `imgent pair <code> [--workspace <path>]` 固定工作区；
-  未传选项时使用配对路由所选 AgentProfile 的 `agentUserHome`。该字段表示实际连接
-  该 Profile 的 Codex 或 Claude Code 本地用户 Home，而不是 IMGent 服务用户 Home
-  或 `pair` 命令的当前目录。
+  未传选项时使用配对路由所选 AgentProfile 的 `agentUserHome`。该历史字段名当前
+  表示默认/隐式允许工作区根，不表示操作系统执行身份，不修改 `HOME`，也不加载其他
+  用户的 Agent 登录状态。
 - QQ 群使用授权该群的 Principal 工作区，不使用当前发言者的工作区，因此同一群会话
   不会被不同成员切换目录。
 - 当前 AgentProfile 的 `agentUserHome` 是隐式允许根；显式路径还可以位于
@@ -1497,7 +1505,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
   在用户表面、持久化错误或默认日志。
 - health server 默认只绑定 loopback；control server 只绑定当前部署用户可访问的
   Unix socket/Named Pipe。
-- schema v6 只接受空目录初始化；其他 schema 和 backup v1 均被明确拒绝。
+- schema v7 只接受空目录初始化；其他 schema 和 backup v1 均被明确拒绝。
 - FTS5 不可用时启动失败，不静默退化。
 - 备份可恢复到新的空数据目录并通过完整性检查。
 

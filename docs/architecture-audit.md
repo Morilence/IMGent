@@ -15,7 +15,7 @@ Ranked findings use Ponytail's deletion-first labels:
 
 1. `delete:` Health and status requests synchronously triggered platform, account, and model probes; they now return a cached runtime-readiness snapshot, while `doctor` alone invokes `/v3/diagnostics`.
 2. `delete:` Legacy migration code preserved pre-release layouts and error translation; current
-   schema v6 initializes only an empty data directory and rejects any other version unchanged.
+   schema v7 initializes only an empty data directory and rejects any other version unchanged.
 3. `native:` Fastify served two loopback GET endpoints; `node:http` now provides the complete health surface without a framework dependency.
 4. `delete:` ICU formatting and message/action parameter types had no current dynamic messages; catalogs are static, brace-free, and no longer depend on `intl-messageformat`.
 5. `shrink:` Online and offline administration duplicated identities, groups, status, and database-count SQL; both now call the same read-only query functions.
@@ -61,12 +61,12 @@ The 2026-07-26 extension keeps the same runtime and storage ownership boundaries
   SQLite FTS5 remains authoritative, and strict scope predicates remain in the Memory Service.
 - Memory audit uses the existing AdminService/OfflineAdminService split and additive read-only
   Control v3 routes. Online CLI never opens SQLite; offline CLI still takes the ownership lease.
-- Existing schema v6 already contains all required facts, so this extension adds no migration,
-  schema version, compatibility branch, vector store, or public management server.
+- Schema v7 adds only the two indexes required by the measured Curator recent-window and memory
+  audit paths; it adds no compatibility branch, vector store, or public management server.
 
 ## Data model and state
 
-Schema v6 treats configuration as the authority for profiles, bots, routes, and static policy.
+Schema v7 treats configuration as the authority for profiles, bots, routes, and static policy.
 SQLite stores runtime facts and references stable configuration IDs only where the relation cannot
 be derived. Principal, conversation-space, and task relations now determine the profile for group
 authorizations, sessions, and approvals.
@@ -88,7 +88,7 @@ when there is actual supported user data to preserve.
 | Direct runtime dependencies   |                 9 |            7 |                   -2 |
 | Installed dependency packages | baseline lockfile | baseline -47 |                  -47 |
 | CLI executable entry          |         807 lines |      5 lines |                 -802 |
-| Schema compatibility paths    |     v1-v5 layouts |      v6 only | legacy paths removed |
+| Schema compatibility paths    |     v1-v6 layouts |      v7 only | legacy paths removed |
 
 The line count excludes generated `dist` declarations. Moving command registration into
 `program.ts` is not counted as a line reduction by itself. The dependency-package result is the
@@ -101,6 +101,10 @@ scanned `tasks_claim_idx`, used `tasks_fifo_idx` for both correlated guards, and
 primary-key index without a temporary sort. Query-plan regressions are executable assertions rather
 than timing gates, which avoids machine-dependent CI failures. Full-suite wall-clock changes are
 reported only as smoke evidence, not as an architectural speed claim.
+
+Schema v7 also asserts that Curator recent-window reads use `tasks_recent_context_idx` and default
+memory audit pagination uses `memory_audit_idx`; both remain ordinary SQLite indexes and preserve
+FTS5 as the only lexical retrieval engine.
 
 ## Remaining intentional complexity
 

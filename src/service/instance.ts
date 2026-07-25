@@ -11,7 +11,6 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { IMGentError } from "@imgent/contracts";
 import {
@@ -95,11 +94,7 @@ async function canonicalDataDir(dataDir: string, create: boolean): Promise<strin
 
 async function secureRuntimeDirectory(): Promise<string> {
   const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
-  const configured = process.env.XDG_RUNTIME_DIR;
-  const root =
-    process.platform !== "win32" && configured
-      ? resolve(configured, "imgent")
-      : join(tmpdir(), `imgent-${await userKey()}`);
+  const root = join("/tmp", `imgent-${await userKey()}`);
   let existed = true;
   try {
     await lstat(root);

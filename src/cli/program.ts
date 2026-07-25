@@ -111,7 +111,7 @@ profile
       .makeOptionMandatory(),
   )
   .option("--command <path>", "CLI 命令；默认与驱动同名")
-  .option("--agent-user-home <path>", "该 Agent CLI 本地用户的 Home", homedir())
+  .option("--agent-user-home <path>", "Profile 默认及隐式允许的工作区根", homedir())
   .option("--workspace <path>", "固定工作区", process.cwd())
   .addOption(
     new Option("--max-mode <mode>", "权限上限").choices(["deny", "ask", "allow"]).default("ask"),

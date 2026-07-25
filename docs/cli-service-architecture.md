@@ -263,10 +263,10 @@ send。调度、能力检查、幂等与上下文隔离均由宿主保证，不�
 ### 7.1 Transport
 
 - 每个实例用“规范化 dataDir + 操作系统用户”生成稳定 `instanceKey`。
-- Linux/macOS：优先使用受保护的用户 runtime 目录
-  `<runtimeDir>/imgent/<instanceKey>.sock`；resolver 必须校验平台 socket 路径长度。
-- 没有可用用户 runtime 目录时，在系统临时目录下创建当前 UID 专属的 `0700`
-  目录；普通文件、符号链接或 owner/mode 不符时拒绝使用。
+- Linux/macOS：固定使用
+  `/tmp/imgent-<uid>/<instanceKey>.sock`，不读取 `XDG_RUNTIME_DIR` 或调用进程的临时
+  目录环境变量；resolver 必须校验平台 socket 路径长度。
+- UID 专属父目录权限为 `0700`；普通文件、符号链接或 owner/mode 不符时拒绝使用。
 - Windows：用户范围 Named Pipe，名称包含当前用户 SID 派生值与 `instanceKey`。
 - Unix socket 权限为 `0600`，父目录权限为 `0700`。
 - Windows 发布基线要求 Named Pipe ACL 只允许运行 IMGent 的操作系统用户和显式
@@ -454,7 +454,7 @@ SQLite 保存运行事实：
 复制并原子落到目标路径。
 
 `restore` 始终要求目标实例停止，并验证目标目录、控制 endpoint、manifest、
-schema version、权限和 SQLite integrity。当前 schema v6 只允许空数据目录初始化；
+schema version、权限和 SQLite integrity。当前 schema v7 只允许空数据目录初始化；
 其他版本保持不变并返回 `STORAGE_SCHEMA_UNSUPPORTED`。`--force` 不能绕过活动实例检查。
 
 ## 9. 安全边界
@@ -665,7 +665,7 @@ degraded、stopping、stopped 和协议不兼容。
 
 - Control protocol 版本不兼容、实例不匹配、endpoint 失联和“不得离线回退”。
 - Unix socket 与 instance metadata 的权限、同一 dataDir 单实例和当前用户 stale
-  socket 安全处理。
+  socket 安全处理，以及 service/CLI 的 `XDG_RUNTIME_DIR` 不同时 endpoint 仍一致。
 - canonical config hash drift；drift 不影响只读 online 查询。
 - offline/online/dual 代表命令、online pairing/group mutation 和 offline mutation
   拒绝。
@@ -677,10 +677,9 @@ degraded、stopping、stopped 和协议不兼容。
 - 在线/离线 backup 生成同格式 archive；运行中 restore（包括 `--force`）被拒绝，
   停服后 restore 通过完整性校验。
 
-Windows Named Pipe 的实际 ACL、Windows Service 身份，以及 systemd/launchd
-runtime directory 行为属于对应平台发布前 smoke；Linux CI 只验证跨平台名称派生
-逻辑，不能替代 Windows ACL 验证。未完成该 smoke 时只能确认代码路径存在，不能
-宣称 Windows 权限边界已验收。
+Windows Named Pipe 的实际 ACL 与 Windows Service 身份属于对应平台发布前 smoke；
+Linux CI 只验证跨平台名称派生逻辑，不能替代 Windows ACL 验证。未完成该 smoke
+时只能确认代码路径存在，不能宣称 Windows 权限边界已验收。
 
 ### 13.2 两进程验收
 

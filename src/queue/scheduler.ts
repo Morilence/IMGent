@@ -128,11 +128,9 @@ export class ConversationScheduler {
     let memories: string[] = [];
     if (profile.memory.enabled) {
       const query = textOf(task.message.parts);
-      if (query) {
-        memories = this.options.memory.renderContext(
-          this.options.memory.recall(memoryContext, query),
-        );
-      }
+      memories = this.options.memory.renderContext(
+        this.options.memory.recall(memoryContext, query),
+      );
     }
     const existingSession = task.sessionKey
       ? this.options.store.session(task.sessionKey)

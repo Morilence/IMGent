@@ -114,8 +114,10 @@ flowchart TB
 
 The resident service is the only online owner of SQLite, credentials, adapters, drivers, queues,
 scheduled work, and the immutable skill snapshot. Online CLI commands use a protected Unix socket
-or user-scoped Windows Named Pipe. Health endpoints bind to loopback and expose only
-`/healthz` and `/readyz`; they are not a management API.
+or user-scoped Windows Named Pipe. On Unix the endpoint is deterministically derived from the
+deployment UID and canonical data directory under `/tmp/imgent-<uid>`; it does not depend on
+`XDG_RUNTIME_DIR`. Health endpoints bind to loopback and expose only `/healthz` and `/readyz`;
+they are not a management API.
 
 IMGent deliberately does **not** provide:
 
@@ -275,9 +277,10 @@ imgent --config /srv/imgent/imgent.json pair ABCD-EFGH
 ```
 
 Without `--workspace`, the working directory defaults to `agentUserHome` on the AgentProfile
-selected by the pairing route. That path is the home of the local account connected to Codex or
-Claude Code; it is not inferred from the IMGent service account or the shell directory that invokes
-`pair`. The local operator can also choose it explicitly:
+selected by the pairing route. Despite the legacy field name, that path is a configured default
+workspace root. It does not select an operating-system account, change `HOME`, or load another
+user's Agent credentials; Codex and Claude Code still run as the IMGent service account. The local
+operator can also choose it explicitly:
 
 ```bash
 imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
@@ -497,9 +500,9 @@ imgent --config /srv/imgent/imgent.json profile add main \
 Options:
 
 - `--command <path>` overrides the default `codex` or `claude` executable.
-- `--agent-user-home <path>` records the home of the local user connected to this profile's Codex
-  or Claude Code CLI. It defaults to the user running `profile add`; specify it when the Agent CLI
-  runs as another user.
+- `--agent-user-home <path>` records the profile's default and implicitly allowed workspace root.
+  It defaults to the home directory visible to `profile add`, but it does not change the runtime
+  operating-system user or process environment.
 - `--max-mode deny|ask|allow` sets the Host Tool permission ceiling; default is `ask`.
 - `--no-memory` disables IMGent long-term memory and hides the built-in memory skill for this
   profile.
@@ -1385,10 +1388,11 @@ degraded.
   validate, then start it again.
 - `/healthz` means the process is alive. `/readyz` reflects cached readiness and supports
   `Accept-Language: zh-CN|en-US`; neither endpoint performs a deep probe.
-- Back up before upgrading. SQLite schema v6 is created only in an empty data directory;
+- Back up before upgrading. SQLite schema v7 is created only in an empty data directory;
   incompatible schemas are rejected without mutation.
 - QQ full ingestion retains untriggered raw group messages for seven days by default. Curated
-  group-shared memory follows memory correction/deletion rules instead.
+  group-shared memory follows memory correction/deletion rules instead. Expiry clears both the
+  inbound-event body and the task copy used for curation, including encrypted reply context.
 - Automatic recall combines a small scope-safe member/group baseline, FTS5 relevance, and recent
   episodes. A group never receives private direct-message memory or another member's profile.
 

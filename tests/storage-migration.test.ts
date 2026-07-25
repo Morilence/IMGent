@@ -10,7 +10,7 @@ import { SecretBox } from "../src/security/secret-box.js";
 import { SCHEMA_VERSION } from "../src/storage/migrations.js";
 import { IMGentStore } from "../src/storage/store.js";
 
-test("fresh storage creates schema 6 with Principal workspaces and due-work indexes", async () => {
+test("fresh storage creates schema 7 with Principal workspaces and query indexes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "imgent-schema-"));
   const path = join(directory, "state.sqlite");
   try {
@@ -22,6 +22,8 @@ test("fresh storage creates schema 6 with Principal workspaces and due-work inde
       );
       for (const [table, index] of [
         ["tasks", "tasks_claim_idx"],
+        ["tasks", "tasks_recent_context_idx"],
+        ["memory_records", "memory_audit_idx"],
         ["memory_outbox", "memory_outbox_claim_idx"],
         ["outbound_messages", "outbound_claim_idx"],
         ["schedules", "schedules_due_idx"],
@@ -63,6 +65,46 @@ test("fresh storage creates schema 6 with Principal workspaces and due-work inde
           .join("\n");
         assert.match(plan, new RegExp(index), `${index} is not used:\n${plan}`);
       }
+      const recentContextPlan = store
+        .all<{ detail: string }>(
+          `EXPLAIN QUERY PLAN
+           SELECT rowid, id FROM tasks
+           WHERE inbound_event_id IS NOT NULL
+             AND agent_profile_id = 'main'
+             AND conversation_space_id = 'space'
+             AND conversation_key = 'conversation'
+             AND created_at >= '2026-07-25T00:00:00.000Z'
+             AND (
+               created_at < '2026-07-26T00:00:00.000Z'
+               OR (
+                 created_at = '2026-07-26T00:00:00.000Z'
+                 AND rowid < 100
+               )
+             )
+           ORDER BY created_at DESC, rowid DESC
+           LIMIT 6`,
+        )
+        .map((entry) => entry.detail)
+        .join("\n");
+      assert.match(
+        recentContextPlan,
+        /tasks_recent_context_idx/,
+        `tasks_recent_context_idx is not used:\n${recentContextPlan}`,
+      );
+      const memoryAuditPlan = store
+        .all<{ detail: string }>(
+          `EXPLAIN QUERY PLAN
+           SELECT id FROM memory_records
+           ORDER BY updated_at DESC, id DESC
+           LIMIT 51`,
+        )
+        .map((entry) => entry.detail)
+        .join("\n");
+      assert.match(
+        memoryAuditPlan,
+        /memory_audit_idx/,
+        `memory_audit_idx is not used:\n${memoryAuditPlan}`,
+      );
       assert.equal(
         store
           .all<{ name: string }>("PRAGMA table_info(approvals)")
@@ -96,7 +138,7 @@ test("legacy schemas are rejected without mutation", async () => {
     const legacy = new DatabaseSync(path);
     legacy.exec(`
       CREATE TABLE schema_meta(version INTEGER NOT NULL) STRICT;
-      INSERT INTO schema_meta(version) VALUES (5);
+      INSERT INTO schema_meta(version) VALUES (6);
     `);
     legacy.close();
     const bytesBefore = await readFile(path);
@@ -111,7 +153,7 @@ test("legacy schemas are rejected without mutation", async () => {
     const unchanged = new DatabaseSync(path);
     assert.equal(
       (unchanged.prepare("SELECT version FROM schema_meta").get() as { version: number }).version,
-      5,
+      6,
     );
     unchanged.close();
     assert.deepEqual(await readFile(path), bytesBefore);

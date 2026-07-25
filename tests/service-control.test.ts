@@ -50,6 +50,30 @@ test("control metadata version matches the package manifest", async () => {
   assert.equal(CONTROL_APP_VERSION, manifest.version);
 });
 
+test("Unix control endpoint does not depend on XDG_RUNTIME_DIR", async (context) => {
+  if (process.platform === "win32") {
+    context.skip("XDG_RUNTIME_DIR is not used for Windows Named Pipes");
+    return;
+  }
+  const directory = await mkdtemp(join(tmpdir(), "imgent-endpoint-"));
+  const original = process.env.XDG_RUNTIME_DIR;
+  try {
+    process.env.XDG_RUNTIME_DIR = join(directory, "service-runtime");
+    const serviceEndpoint = await resolveInstanceEndpoint(directory, {
+      createDataDir: true,
+    });
+    process.env.XDG_RUNTIME_DIR = join(directory, "cli-runtime");
+    const cliEndpoint = await resolveInstanceEndpoint(directory);
+    assert.equal(cliEndpoint.instanceKey, serviceEndpoint.instanceKey);
+    assert.equal(cliEndpoint.endpoint, serviceEndpoint.endpoint);
+    assert.match(cliEndpoint.endpoint, /^\/tmp\/imgent-[^/]+\//u);
+  } finally {
+    if (original === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = original;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("control client rejects incompatible, mismatched, and unreachable endpoints without fallback", async () => {
   const directory = await mkdtemp(join(tmpdir(), "imgent-handshake-"));
   const configPath = join(directory, "imgent.json");
