@@ -1467,4 +1467,7 @@ Publisher and remove the long-lived write token when possible.
 
 ### License
 
-IMGent is licensed under the [Apache License 2.0](LICENSE).
+Copyright © 2026 Morilence.
+
+IMGent is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for the
+distribution attribution.

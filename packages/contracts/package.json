@@ -1,6 +1,11 @@
 {
   "name": "@imgent/contracts",
   "version": "0.1.0",
+  "author": {
+    "name": "Morilence",
+    "url": "https://github.com/Morilence"
+  },
+  "license": "Apache-2.0",
   "type": "module",
   "private": true,
   "main": "./dist/index.js",

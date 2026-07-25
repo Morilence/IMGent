@@ -120,8 +120,8 @@ The automated suite covers:
 - backup v2 checksum, permissions, online/offline ownership, restore, and v1 rejection.
 
 The package verification builds the npm tarball in an empty installation and checks the executable
-surface. A real local Codex app-server smoke validates initialize, login status, a new thread, a
-turn, and final output.
+surface, package author/license metadata, and distributed LICENSE/NOTICE files. A real local Codex
+app-server smoke validates initialize, login status, a new thread, a turn, and final output.
 
 Windows Named Pipe ACL and Windows Service identity remain platform release gates and are not
 proven by Linux CI. Claude Code is covered by build and mock/contract tests; a real Claude model

@@ -1413,4 +1413,6 @@ workflow 可以使用 `PAT_TOKEN` 作为专用发布身份，首次发布需要 
 
 ### 许可证
 
-IMGent 使用 [Apache License 2.0](LICENSE)。
+Copyright © 2026 Morilence.
+
+IMGent 使用 [Apache License 2.0](LICENSE)，分发归属信息见 [NOTICE](NOTICE)。

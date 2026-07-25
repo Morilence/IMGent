@@ -49,8 +49,27 @@ try {
 
   await run("npm", ["install", "--global", "--prefix", installPrefix, installSource]);
   const npmRoot = (await run("npm", ["root", "--global", "--prefix", installPrefix])).stdout.trim();
-  const cliPath = join(npmRoot, packageJson.name, packageJson.bin.imgent);
+  const installedPackageRoot = join(npmRoot, packageJson.name);
+  const cliPath = join(installedPackageRoot, packageJson.bin.imgent);
   await access(cliPath);
+
+  const installedPackageJson = JSON.parse(
+    await readFile(join(installedPackageRoot, "package.json"), "utf8"),
+  );
+  if (
+    installedPackageJson.author?.name !== "Morilence" ||
+    installedPackageJson.author?.url !== "https://github.com/Morilence"
+  ) {
+    throw new Error("Installed package is missing the Morilence author metadata");
+  }
+  if (installedPackageJson.license !== "Apache-2.0") {
+    throw new Error("Installed package is missing the Apache-2.0 license metadata");
+  }
+  await access(join(installedPackageRoot, "LICENSE"));
+  const notice = await readFile(join(installedPackageRoot, "NOTICE"), "utf8");
+  if (!notice.includes("Copyright 2026 Morilence")) {
+    throw new Error("Installed package is missing the Morilence copyright notice");
+  }
 
   const binDirectory = process.platform === "win32" ? installPrefix : join(installPrefix, "bin");
   const binName = process.platform === "win32" ? "imgent.cmd" : "imgent";
@@ -88,7 +107,7 @@ try {
   }
 
   process.stdout.write(
-    `Verified ${packageJson.name}@${packageJson.version}: global bin, CLI, and built-in skills\n`,
+    `Verified ${packageJson.name}@${packageJson.version}: metadata, notices, global bin, CLI, and built-in skills\n`,
   );
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
