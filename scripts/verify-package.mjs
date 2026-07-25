@@ -65,7 +65,10 @@ try {
   if (installedPackageJson.license !== "Apache-2.0") {
     throw new Error("Installed package is missing the Apache-2.0 license metadata");
   }
-  await access(join(installedPackageRoot, "LICENSE"));
+  const license = await readFile(join(installedPackageRoot, "LICENSE"), "utf8");
+  if (!license.includes("Copyright 2026 Morilence")) {
+    throw new Error("Installed package LICENSE is missing the Morilence copyright notice");
+  }
   const notice = await readFile(join(installedPackageRoot, "NOTICE"), "utf8");
   if (!notice.includes("Copyright 2026 Morilence")) {
     throw new Error("Installed package is missing the Morilence copyright notice");
