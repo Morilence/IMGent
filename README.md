@@ -204,3 +204,18 @@ Docker 镜像不内置也不代管 Codex/Claude 的登录凭据；容器部署�
 ## 许可证
 
 本项目采用 [Apache License 2.0](LICENSE)。
+
+## 发布
+
+发布由 [Publish workflow](.github/workflows/publish.yml) 完成。先在 `main` 更新
+`package.json` 版本并通过测试，再创建并推送同版本 tag：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+workflow 会再次运行测试、构建 tarball、在临时目录全局安装并验证 CLI/内置
+skills，最后把同一个 tarball 发布到 npm。首次发布需要仓库 secret
+`NPM_TOKEN`；首次发布后可在 npm 包设置中把 `Morilence/IMGent` 的
+`publish.yml` 配置为 Trusted Publisher，再移除长期写 token。
