@@ -1,5 +1,11 @@
 # imgent
 
+## 0.2.0-alpha.4
+
+### Patch Changes
+
+- 285831c: Replace the Apache license appendix placeholder with the IMGent copyright year and owner.
+
 ## 0.2.0-alpha.3
 
 ### Patch Changes
