@@ -1,7 +1,7 @@
 # IMGent产品设计与落地指南
 
-> 状态：v0.3 已实现架构基线
-> 最后核验：2026-07-24
+> 状态：v0.4 已实现定时 Agent 任务
+> 最后核验：2026-07-25
 > 本文同时定义产品边界、架构约束、核心接口、数据模型和 v1 验收标准。
 
 配套文档：
@@ -154,7 +154,28 @@ v1 的审批等待只在当前 IMGent/Driver 进程内有效。进程重启时�
 `waiting_approval` task 进入 dead letter，系统不猜测 Driver 是否已接受过答复，
 也不自动重放可能产生副作用的 turn。
 
-### 3.6 跨平台身份绑定
+### 3.6 定时 Agent 任务
+
+部署者可以在服务运行时从已发现的 ConversationSpace 创建一次性或五字段 cron
+计划。计划到期后，IMGent 创建普通 Agent task，完成后把带计划名和约定时间的结果
+主动发送到目标 IM。目标 Adapter 必须声明 `supportsProactiveSend`；不支持时在
+创建、恢复或运行前拒绝，而不是执行后丢弃结果。当前 QQ 支持，微信 iLink 不支持。
+
+默认 `fresh` 为每次运行创建 ephemeral Agent session，但仍加载 Profile、skills、
+工作区和当前 scope 允许的 IMGent 长期记忆。`series` 只复用
+`schedule:<id>` 对应的计划专属 session。计划永不默认复用目标 IM 的普通聊天
+session；计划执行互斥也不会阻塞该 IM 中的新消息。
+
+错过多个 cron 时间点时只补跑一次；前一轮仍未终结时跳过并累计计数。计划结果和
+审批不携带入站 reply context，统一使用主动发送。计划运行默认不进入自动 Memory
+Curator。计时、幂等、能力检查和 session 隔离是宿主能力，不依赖也不新增内置
+skill。
+
+修改名称、prompt 或上下文模式不会隐式恢复暂停、完成或 blocked 的计划；修改执行
+时间或显式 `resume` 才会重新激活。删除采用软删除，之后仍可按计划 ID 查询既有
+运行与投递历史。
+
+### 3.7 跨平台身份绑定
 
 已配对身份 A 在私聊中取得短期一次性绑定码，身份 B 在自己的私聊中提交该码；
 提交动作本身就是确认并立即建立绑定。系统不要求两端分别生成码，也不根据昵称
@@ -196,6 +217,8 @@ imgent bot add wechat-ilink
 imgent bot authorize <bot-instance>
 imgent profile add
 imgent pair
+imgent conversation list
+imgent schedule add|list|update|pause|resume|remove|run|reset-context|history
 imgent doctor
 imgent --locale en-US status
 imgent --json doctor
@@ -219,7 +242,7 @@ imgent restore <file>
 | 能力    | 行为                                        | 代表命令                                                             |
 | ------- | ------------------------------------------- | -------------------------------------------------------------------- |
 | offline | 直接原子操作停服状态；服务运行时拒绝        | `init`、`profile add`、`bot add/authorize`、`skills init`、`restore` |
-| online  | 只通过本地控制面；服务未运行时拒绝          | `pair`、`group authorize`                                            |
+| online  | 只通过本地控制面；服务未运行时拒绝          | `pair`、`group authorize`、`conversation list`、`schedule *`         |
 | dual    | 在线走控制面，停服走受限离线路径并标记 mode | `doctor`、`status`、列表/校验命令、`backup`                          |
 
 CLI 已发现控制 endpoint 但握手失败时，不得静默回退为直接打开 SQLite。
@@ -233,9 +256,9 @@ lease，直到本地数据操作完成，避免与并发 `imgent start` 形成 T
 - Linux/macOS：由规范化 dataDir 生成稳定 instance key，在受保护的用户 runtime
   目录创建 Unix socket，并校验平台路径长度。
 - Windows：由 instance key 和当前用户派生的用户范围 Named Pipe。
-- 协议：HTTP/1.1 + JSON，路由统一使用 `/v2` 版本前缀。
+- 协议：HTTP/1.1 + JSON，路由统一使用 `/v3` 版本前缀。
 - `status`、`readiness` 与 `/readyz` 读取最近一次 runtime 快照；只有
-  `doctor` 的 `/v2/diagnostics` 显式执行平台、账号和模型深度探测。
+  `doctor` 的 `/v3/diagnostics` 显式执行平台、账号和模型深度探测。
 - TCP 上的 `/healthz` 和 `/readyz` 与控制面分离，不承载管理 mutation。
 
 服务运行时是 SQLite 和凭据存储的唯一在线所有者。`status`、配对、身份与群管理
@@ -1120,6 +1143,8 @@ SQLite 保存：
   FTS5 `search_text`。
 - task、outbound、memory outbox 的标准错误 descriptor、incident ID、尝试次数
   和 next attempt；不保存渲染后的语言文本。
+- schedule 定义、下一次运行时间、跳过计数、schedule run 来源，以及 task 的
+  conversation/execution/session 三个独立 key。
 - 出站幂等键、发送结果和标准错误 dead letter。
 - 群采集策略、同意记录和原文过期时间。
 - 审计事件。
@@ -1133,6 +1158,7 @@ SQLite 只用稳定 ID 引用它们并保存运行事实；不得把同一可变
 以下操作必须原子完成：
 
 - 入站事件、去重键、队列任务和 Transport checkpoint。
+- 到期计划推进、唯一 schedule run 和对应队列任务。
 - task succeeded、最终回复 outbox 和 memory outbox。
 - waiting_approval 状态和审批提示 outbox。
 - 明确记忆写入与工具成功结果。
@@ -1147,11 +1173,11 @@ Principal、conversation 和过期时间，再由 Driver 接受答复，最后�
 
 ### 14.3 迁移
 
-- 当前数据库 schema version 为 4，只支持在空数据目录中创建。
-- 启动时发现任何非 v4 数据库都返回 `STORAGE_SCHEMA_UNSUPPORTED`，不会原地修改、
+- 当前数据库 schema version 为 5，只支持在空数据目录中创建。
+- 启动时发现任何非 v5 数据库都返回 `STORAGE_SCHEMA_UNSUPPORTED`，不会原地修改、
   自动备份或猜测兼容性。
-- v4 删除可由关系推导的 `agent_profile_id` 冗余列和重复唯一索引，并为 task、
-  outbound 与 memory outbox 的到期工作查询建立与实际谓词一致的索引。
+- v5 在 v4 的精简边界上增加 schedule/schedule run、计划到期索引，以及 task
+  来源和 conversation/execution/session key 分离。
 - 这一破坏性边界是有意为之：预发布数据需导出所需业务数据后重新初始化，旧
   schema 与备份格式不属于兼容承诺。
 
@@ -1389,7 +1415,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
   在用户表面、持久化错误或默认日志。
 - health server 默认只绑定 loopback；control server 只绑定当前部署用户可访问的
   Unix socket/Named Pipe。
-- schema v4 只接受空目录初始化；旧 schema 和 backup v1 均被明确拒绝。
+- schema v5 只接受空目录初始化；旧 schema 和 backup v1 均被明确拒绝。
 - FTS5 不可用时启动失败，不静默退化。
 - 备份可恢复到新的空数据目录并通过完整性检查。
 

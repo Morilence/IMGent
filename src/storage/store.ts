@@ -28,12 +28,16 @@ export interface IngestResult {
 
 export interface StoredTask {
   id: string;
-  inboundEventId: string;
+  inboundEventId?: string;
+  scheduleRunId?: string;
   agentProfileId: string;
   principalId: string;
   conversationSpaceId: string;
   conversationKey: string;
+  executionKey: string;
+  sessionKey?: string;
   idempotencyKey: string;
+  curateMemory: boolean;
   status: TaskStatus;
   attempt: number;
   dangerousSideEffectStarted: boolean;
@@ -213,16 +217,21 @@ export class IMGentStore {
         this.run(
           `INSERT INTO tasks(
             id, inbound_event_id, agent_profile_id, principal_id,
-            conversation_space_id, conversation_key, idempotency_key, status,
+            conversation_space_id, conversation_key, execution_key, session_key,
+            idempotency_key, message_json, reply_context_cipher, curate_memory, status,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'succeeded', ?, ?)`,
           contextTaskId,
           eventId,
           agentProfileId,
           identity.principalId,
           spaceId,
           conversationKey,
+          conversationKey,
+          conversationKey,
           `context:${message.botInstanceId}:${message.dedupeKey}`,
+          JSON.stringify(stripReplyContext(message)),
+          replyContextCipher,
           timestamp,
           timestamp,
         );
@@ -233,16 +242,21 @@ export class IMGentStore {
         this.run(
           `INSERT INTO tasks(
             id, inbound_event_id, agent_profile_id, principal_id,
-            conversation_space_id, conversation_key, idempotency_key, status,
+            conversation_space_id, conversation_key, execution_key, session_key,
+            idempotency_key, message_json, reply_context_cipher, curate_memory, status,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'queued', ?, ?)`,
           taskId,
           eventId,
           agentProfileId,
           identity.principalId,
           spaceId,
           conversationKey,
+          conversationKey,
+          conversationKey,
           `turn:${message.botInstanceId}:${message.dedupeKey}`,
+          JSON.stringify(stripReplyContext(message)),
+          replyContextCipher,
           timestamp,
           timestamp,
         );
@@ -276,9 +290,10 @@ export class IMGentStore {
         bot_instance_id: string;
         dedupe_key: string;
         message_json: string;
+        reply_context_cipher: Uint8Array | null;
       }>(
         `SELECT principal_id, conversation_space_id, bot_instance_id,
-                dedupe_key, message_json
+                dedupe_key, message_json, reply_context_cipher
          FROM inbound_events WHERE id = ?`,
         eventId,
       );
@@ -290,16 +305,21 @@ export class IMGentStore {
       this.run(
         `INSERT INTO tasks(
           id, inbound_event_id, agent_profile_id, principal_id,
-          conversation_space_id, conversation_key, idempotency_key, status,
+          conversation_space_id, conversation_key, execution_key, session_key,
+          idempotency_key, message_json, reply_context_cipher, curate_memory, status,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'queued', ?, ?)`,
         taskId,
         eventId,
         agentProfileId,
         event.principal_id,
         event.conversation_space_id,
         conversationKey,
+        conversationKey,
+        conversationKey,
         `turn:${event.bot_instance_id}:${event.dedupe_key}`,
+        event.message_json,
+        event.reply_context_cipher,
         timestamp,
         timestamp,
       );
@@ -446,12 +466,16 @@ export class IMGentStore {
     return this.transaction(() => {
       const row = this.get<{
         id: string;
-        inbound_event_id: string;
+        inbound_event_id: string | null;
+        schedule_run_id: string | null;
         agent_profile_id: string;
         principal_id: string;
         conversation_space_id: string;
         conversation_key: string;
+        execution_key: string;
+        session_key: string | null;
         idempotency_key: string;
+        curate_memory: number;
         status: TaskStatus;
         attempt: number;
         dangerous_side_effect_started: number;
@@ -459,19 +483,18 @@ export class IMGentStore {
         reply_context_cipher: Uint8Array | null;
         created_at: string;
       }>(
-        `SELECT t.*, e.message_json, e.reply_context_cipher
+        `SELECT t.*
          FROM tasks t INDEXED BY tasks_claim_idx
-         JOIN inbound_events e ON e.id = t.inbound_event_id
          WHERE t.status IN ('queued', 'retry_wait')
            AND (t.status = 'queued' OR t.next_attempt_at <= ?)
            AND NOT EXISTS (
              SELECT 1 FROM tasks active
-             WHERE active.conversation_key = t.conversation_key
+             WHERE active.execution_key = t.execution_key
                AND active.status IN ('active', 'waiting_approval')
            )
            AND NOT EXISTS (
              SELECT 1 FROM tasks earlier
-             WHERE earlier.conversation_key = t.conversation_key
+             WHERE earlier.execution_key = t.execution_key
                AND earlier.status IN ('queued', 'retry_wait', 'active', 'waiting_approval')
                AND (
                  earlier.created_at < t.created_at
@@ -495,12 +518,16 @@ export class IMGentStore {
       if (replyContext) message.replyContext = replyContext;
       return {
         id: row.id,
-        inboundEventId: row.inbound_event_id,
+        ...(row.inbound_event_id ? { inboundEventId: row.inbound_event_id } : {}),
+        ...(row.schedule_run_id ? { scheduleRunId: row.schedule_run_id } : {}),
         agentProfileId: row.agent_profile_id,
         principalId: row.principal_id,
         conversationSpaceId: row.conversation_space_id,
         conversationKey: row.conversation_key,
+        executionKey: row.execution_key,
+        ...(row.session_key ? { sessionKey: row.session_key } : {}),
         idempotencyKey: row.idempotency_key,
+        curateMemory: row.curate_memory === 1,
         status: "active",
         attempt: row.attempt + 1,
         dangerousSideEffectStarted: row.dangerous_side_effect_started === 1,
@@ -618,12 +645,16 @@ export class IMGentStore {
   task(taskId: string): StoredTask | undefined {
     const row = this.get<{
       id: string;
-      inbound_event_id: string;
+      inbound_event_id: string | null;
+      schedule_run_id: string | null;
       agent_profile_id: string;
       principal_id: string;
       conversation_space_id: string;
       conversation_key: string;
+      execution_key: string;
+      session_key: string | null;
       idempotency_key: string;
+      curate_memory: number;
       status: TaskStatus;
       attempt: number;
       dangerous_side_effect_started: number;
@@ -633,24 +664,23 @@ export class IMGentStore {
       error_json: string | null;
       next_attempt_at: string | null;
       created_at: string;
-    }>(
-      `SELECT t.*, e.message_json, e.reply_context_cipher
-       FROM tasks t JOIN inbound_events e ON e.id = t.inbound_event_id
-       WHERE t.id = ?`,
-      taskId,
-    );
+    }>(`SELECT t.* FROM tasks t WHERE t.id = ?`, taskId);
     if (!row) return undefined;
     const message = JSON.parse(row.message_json) as InboundMessage;
     const replyContext = this.decryptReplyContext(row.reply_context_cipher);
     if (replyContext) message.replyContext = replyContext;
     return {
       id: row.id,
-      inboundEventId: row.inbound_event_id,
+      ...(row.inbound_event_id ? { inboundEventId: row.inbound_event_id } : {}),
+      ...(row.schedule_run_id ? { scheduleRunId: row.schedule_run_id } : {}),
       agentProfileId: row.agent_profile_id,
       principalId: row.principal_id,
       conversationSpaceId: row.conversation_space_id,
       conversationKey: row.conversation_key,
+      executionKey: row.execution_key,
+      ...(row.session_key ? { sessionKey: row.session_key } : {}),
       idempotencyKey: row.idempotency_key,
+      curateMemory: row.curate_memory === 1,
       status: row.status,
       attempt: row.attempt,
       dangerousSideEffectStarted: row.dangerous_side_effect_started === 1,

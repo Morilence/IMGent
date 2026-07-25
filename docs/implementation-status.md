@@ -20,11 +20,11 @@ or vector database.
 
 ## Current architecture
 
-- The control plane is HTTP/JSON protocol v2 over a protected Unix socket or user-scoped Windows
-  Named Pipe. All routes use `/v2`; incompatible clients fail explicitly.
+- The control plane is HTTP/JSON protocol v3 over a protected Unix socket or user-scoped Windows
+  Named Pipe. All routes use `/v3`; incompatible clients fail explicitly.
 - `/healthz`, `/readyz`, `status`, and the readiness control route only project a cached runtime
   snapshot. They never perform vendor network, account, or model probes on the request path.
-- `doctor` is the explicit diagnostic boundary. Online it calls `POST /v2/diagnostics`; offline it
+- `doctor` is the explicit diagnostic boundary. Online it calls `POST /v3/diagnostics`; offline it
   runs the restricted environment checks without constructing adapters.
 - Runtime readiness is refreshed during startup and maintenance with single-flight coordination.
   Diagnostic checks have a separate depth and timeout.
@@ -39,17 +39,35 @@ Shutdown remains idempotent, and endpoint cleanup happens on partial startup fai
 
 ## Persistence and compatibility
 
-The current SQLite schema version is 4.
+The current SQLite schema version is 5.
 
-- Only an empty data directory can create schema v4.
-- Any existing non-v4 database fails with `STORAGE_SCHEMA_UNSUPPORTED` and remains unchanged.
-- There is no v1/v2/v3 migration chain or pre-migration backup path.
+- Only an empty data directory can create schema v5.
+- Any existing non-v5 database fails with `STORAGE_SCHEMA_UNSUPPORTED` and remains unchanged.
+- There is no v1-v4 migration chain or pre-migration backup path.
 - Redundant `agent_profile_id` columns were removed where the profile follows from a referenced
   principal, task, or conversation space.
 - Duplicate unique indexes were removed. Due-work indexes match task, outbound, and memory outbox
   claim predicates.
 - Database open/schema validation and media cleanup are separate storage modules; the store keeps
   transaction-oriented domain operations.
+- Schema v5 adds persistent schedule definitions and runs, and separates a task's IM conversation,
+  execution-serialization key, and optional Agent session key.
+
+## Scheduled Agent tasks
+
+- `imgent conversation list` discovers stable delivery targets and eligible Principals.
+- `imgent schedule` supports one-shot RFC 3339 times and five-field cron expressions with IANA
+  timezones, plus list/update/pause/resume/remove/run/reset-context/history.
+- The resident `SchedulePlanner` atomically advances a due definition and creates at most one task
+  per `scheduleId + scheduledFor`. Missed recurring work coalesces to one catch-up; overlap is
+  skipped and counted instead of building a replay backlog.
+- `fresh` turns are ephemeral and never load or save a vendor session. `series` turns use a
+  schedule-only session key; neither mode reuses the target conversation's ordinary session.
+- Scheduled turns can recall permitted IMGent memory but do not enter automatic curation.
+- Results, approvals, and questions omit reply context and use proactive delivery. The existing
+  Adapter capability contract rejects unsupported targets before work is accepted; QQ supports
+  this path and current WeChat iLink does not.
+- Scheduling is a host/runtime feature. No built-in skill was added.
 
 Backup format is `imgent-backup/v2`. Restore validates its manifest and checksums; backup v1 is
 rejected. Archives contain IMGent configuration, local encrypted platform credentials, the SQLite
@@ -73,7 +91,9 @@ parity and rejects template braces.
 The automated suite covers:
 
 - strict configuration and capability routing;
-- schema v4 creation, legacy-schema rejection without mutation, foreign keys, FTS5, and query plans;
+- schema v5 creation, legacy-schema rejection without mutation, foreign keys, FTS5, and query plans;
+- schedule timing, proactive capability rejection, fresh/series session isolation, run history,
+  and proactive outbound envelopes;
 - atomic inbound/task/outbound flows, FIFO, retry safety, cancellation, and dead letters;
 - pairing, identity binding, group authorization, approval ownership, and idempotency;
 - skill validation, profile filtering, immutable startup snapshots, and read-only materialization;

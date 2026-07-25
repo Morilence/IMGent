@@ -33,6 +33,16 @@ export function persistentStatus(store: IMGentStore): Record<string, unknown> {
          WHERE status IN ('queued', 'active', 'retry_wait', 'waiting_approval')
          ORDER BY created_at LIMIT 1`,
       ) ?? null,
+    schedules: store.all(
+      `SELECT status, count(*) AS count FROM schedules
+       GROUP BY status ORDER BY status`,
+    ),
+    nextSchedule:
+      store.get(
+        `SELECT id, name, next_run_at AS nextRunAt FROM schedules
+         WHERE status = 'active' AND next_run_at IS NOT NULL
+         ORDER BY next_run_at LIMIT 1`,
+      ) ?? null,
   };
 }
 
@@ -77,4 +87,46 @@ export function groups(store: IMGentStore): unknown[] {
      WHERE cs.kind = 'group'
      ORDER BY cs.created_at`,
   );
+}
+
+export function conversations(store: IMGentStore): Array<Record<string, unknown>> {
+  return store
+    .all<{
+      id: string;
+      agentProfileId: string;
+      platform: string;
+      botInstanceId: string;
+      kind: "direct" | "group";
+      platformConversationId: string;
+    }>(
+      `SELECT id, agent_profile_id AS agentProfileId, platform,
+              bot_instance_id AS botInstanceId, kind,
+              platform_conversation_id AS platformConversationId
+       FROM conversation_spaces ORDER BY created_at`,
+    )
+    .map((space) => {
+      const principals =
+        space.kind === "direct"
+          ? store.all<{ principalId: string; displayName: string | null }>(
+              `SELECT principal_id AS principalId, display_name AS displayName
+               FROM platform_identities
+               WHERE agent_profile_id = ? AND platform = ? AND bot_instance_id = ?
+                 AND platform_user_id = ? AND paired = 1`,
+              space.agentProfileId,
+              space.platform,
+              space.botInstanceId,
+              space.platformConversationId,
+            )
+          : store.all<{
+              principalId: string;
+              displayName: string | null;
+              role: string;
+            }>(
+              `SELECT principal_id AS principalId, display_name AS displayName, role
+               FROM group_memberships WHERE conversation_space_id = ?
+               ORDER BY confirmed_at`,
+              space.id,
+            );
+      return { ...space, principals };
+    });
 }

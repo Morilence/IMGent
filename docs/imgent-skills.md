@@ -24,6 +24,11 @@ IMGent 在启动时读取两层目录：
 - `imgent-memory`：`memory.enabled` 时始终注入；同一技能按 Host 选择的模式
   同时指导普通会话中的记忆操作和后台 Curator 的保守策展。
 
+定时任务没有单独的内置 skill。计划解析、持久化、到期 claim、主动投递能力检查、
+幂等和 `fresh`/`series` session 隔离都由 IMGent 宿主实现；计划 turn 只接收宿主
+生成的执行元数据，并继续使用当前 Profile 可见的普通 skills。未来如果开放聊天内
+创建计划，必须先增加受权限约束的 schedule Host Tools，再评估是否需要指导 skill。
+
 ## 包格式
 
 最小示例：

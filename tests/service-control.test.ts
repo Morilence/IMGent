@@ -132,7 +132,7 @@ test("control plane owns one dataDir instance and reports configuration drift", 
     const status = await discovery.client.get<{
       service: { instanceId: string; state: string };
       readiness: { ready: boolean };
-    }>("/v2/status");
+    }>("/v3/status");
     assert.equal(status.service.instanceId, discovery.meta.instanceId);
     assert.equal(status.service.state, "degraded");
     assert.equal(status.readiness.ready, false);
@@ -176,7 +176,7 @@ test("control plane owns one dataDir instance and reports configuration drift", 
     if (drifted.state === "running") {
       assert.equal(drifted.configDrift, true);
       assert.equal(
-        (await drifted.client.get<{ instanceId: string }>("/v2/meta")).instanceId,
+        (await drifted.client.get<{ instanceId: string }>("/v3/meta")).instanceId,
         service.instanceId,
       );
     }

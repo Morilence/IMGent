@@ -34,7 +34,7 @@ src/
   cli/              # 五行入口与命令程序
   service/          # composition、lifecycle、readiness、admin queries
   control/ health/  # 本地管理协议与 node:http 健康面
-  config/ runtime/ queue/ storage/
+  config/ runtime/ queue/ schedule/ storage/
   identity/ approvals/ memory/ skills/ security/ backup/
 ```
 
@@ -116,17 +116,47 @@ imgent group authorize <conversation-space-id> \
   --principal <paired-principal-id>
 ```
 
+服务运行后可以为支持主动消息的平台创建一次性或 cron Agent 任务。先查找稳定的
+会话 ID，再创建计划：
+
+```bash
+imgent conversation list
+
+imgent schedule add morning-report \
+  --conversation <conversation-space-id> \
+  --prompt "检查工作区状态并给出简短报告" \
+  --cron "0 9 * * 1-5" \
+  --timezone Asia/Shanghai
+
+imgent schedule add release-reminder \
+  --conversation <conversation-space-id> \
+  --prompt-file ./release-check.md \
+  --at 2026-08-01T10:00:00+08:00 \
+  --context series
+
+imgent schedule list
+imgent schedule history <schedule-id>
+imgent schedule pause <schedule-id>
+```
+
+默认 `fresh` 在每次运行时创建全新 Agent session；`series` 只复用该计划自己的
+session，不复用目标 IM 的普通聊天 session。计划执行前会通过统一 Adapter
+capability 检查主动发送：当前 QQ 支持，微信 iLink 不支持，因此微信目标会在创建
+或恢复计划时明确拒绝，不会先运行 Agent 再丢失结果。调度由常驻服务和 SQLite
+保证，不需要也没有新增内置 skill。
+
 ## 运行与安全
 
 - 配置默认是当前目录的 `imgent.json`，可用全局
   `--config <path>` 指定。
 - 健康服务只允许配置 loopback 地址，默认监听 `127.0.0.1:8787`，提供
   `/healthz` 和 `/readyz`，不承载管理操作，也不在请求路径执行平台或模型探测。
-- 本机管理使用 HTTP/JSON `/v2` over Unix socket 或 Windows Named Pipe；endpoint
+- 本机管理使用 HTTP/JSON `/v3` over Unix socket 或 Windows Named Pipe；endpoint
   由规范化 `dataDir` 和操作系统用户生成，不开放管理 TCP 端口。
 - `init`、Profile/Bot/skill 修改、微信授权和 `restore` 是 offline 命令，检测到
   活动实例时会拒绝；执行期间会短暂持有 ownership lease，阻止服务并发启动。
-  `pair` 和 `group authorize` 是 online 命令。
+  `pair`、`group authorize`、`conversation list` 和所有 `schedule` 命令是 online
+  命令。
 - `status`、`doctor`、列表/校验和 `backup` 是 dual 命令，输出明确包含
   `mode: "online" | "offline"`；endpoint 异常时不会回退为直接访问 SQLite。
 - `status` 和健康端点读取缓存的 runtime readiness；`doctor` 是显式深度诊断，
@@ -139,7 +169,7 @@ imgent group authorize <conversation-space-id> \
 - 备份包含本地平台凭据、加密密钥与用户 skills，但不包含 Codex/Claude 的
   外部登录目录。运行中备份由服务使用现有 SQLite owner 创建，停服时走离线路径；
   格式为 `imgent-backup/v2`，`restore --force` 也不能绕过停服检查。
-- SQLite schema v4 只支持空数据目录初始化；旧 schema 和 backup v1 明确拒绝，
+- SQLite schema v5 只支持空数据目录初始化；旧 schema 和 backup v1 明确拒绝，
   不执行隐式升级或兼容转换。
 - 微信只支持 direct；任何带 `group_id` 的事件都会进入兼容性死信。
 - QQ 群默认 `triggered`；`full` 只能由已配对且平台可验证的群主/管理员开启。
@@ -196,7 +226,8 @@ pnpm verify:package
 安装依赖后 Husky 会启用本地 Git hooks：提交前只检查并格式化暂存文件，
 提交信息按 Conventional Commits 校验，例如 `feat(codex): support host tools`。
 
-测试覆盖配置、SQLite 事务与恢复、FIFO、身份绑定、审批、技能覆盖与只读物化、
+测试覆盖配置、SQLite 事务与恢复、FIFO、定时计划、上下文隔离、主动投递、
+身份绑定、审批、技能覆盖与只读物化、
 五类记忆隔离、中文 FTS5、Curator 幂等、备份恢复、IM payload 规范化以及两个
 驱动的协议合约。Codex 另有真实本机 app-server smoke；`doctor` 会对 Claude
 Code 执行真实认证/协议探测，自动化测试仍使用 mock/contract 验证。

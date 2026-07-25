@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { createBackup } from "../backup/service.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
 import { SkillRegistry } from "../skills/registry.js";
-import { groups, identities, persistentStatus } from "./admin-queries.js";
+import { conversations, groups, identities, persistentStatus } from "./admin-queries.js";
 import type { IMGentApplication, ReadinessReport } from "./application.js";
+import type { CreateScheduleInput, UpdateScheduleInput } from "../schedule/service.js";
 
 export class AdminService {
   constructor(readonly application: IMGentApplication) {}
@@ -31,6 +32,52 @@ export class AdminService {
 
   groups(): unknown[] {
     return groups(this.application.store);
+  }
+
+  conversations(): unknown[] {
+    return conversations(this.application.store).map((conversation) => ({
+      ...conversation,
+      supportsProactiveSend:
+        this.application.adapters.get(String(conversation.botInstanceId))?.capabilities
+          .supportsProactiveSend ?? false,
+    }));
+  }
+
+  schedules(): unknown[] {
+    return this.application.schedules.list();
+  }
+
+  createSchedule(input: CreateScheduleInput): unknown {
+    return this.application.schedules.create(input);
+  }
+
+  updateSchedule(id: string, input: UpdateScheduleInput): unknown {
+    return this.application.schedules.update(id, input);
+  }
+
+  pauseSchedule(id: string): unknown {
+    return this.application.schedules.setStatus(id, "paused");
+  }
+
+  resumeSchedule(id: string): unknown {
+    return this.application.schedules.setStatus(id, "active");
+  }
+
+  removeSchedule(id: string): Record<string, unknown> {
+    this.application.schedules.remove(id);
+    return { result: "schedule-removed", id };
+  }
+
+  runSchedule(id: string): Record<string, unknown> {
+    return { result: "schedule-enqueued", id, taskId: this.application.schedules.trigger(id) };
+  }
+
+  resetScheduleContext(id: string): unknown {
+    return this.application.schedules.resetContext(id);
+  }
+
+  scheduleHistory(id: string): unknown[] {
+    return this.application.schedules.history(id);
   }
 
   authorizeGroup(conversationSpaceId: string, principalId: string): Record<string, unknown> {

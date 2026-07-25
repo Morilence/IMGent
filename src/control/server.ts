@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { connect } from "node:net";
 import { IMGentError, normalizeError } from "@imgent/contracts";
 import { Logger } from "../runtime/logger.js";
+import { parseCreateScheduleInput, parseUpdateScheduleInput } from "../schedule/service.js";
 import {
   endpointEntryKind,
   removeStaleEndpoint,
@@ -92,7 +93,7 @@ export class ControlServer {
       const url = new URL(request.url ?? "/", "http://localhost");
       route = url.pathname;
       const method = request.method ?? "GET";
-      const metaRequest = method === "GET" && url.pathname === "/v2/meta";
+      const metaRequest = method === "GET" && url.pathname === "/v3/meta";
       if (!metaRequest) {
         if (!this.acceptingAdminRequests) {
           throw new IMGentError("RUNTIME_CONTROL_UNREACHABLE");
@@ -106,32 +107,42 @@ export class ControlServer {
         data = this.projection.meta();
       } else if (!admin) {
         throw new IMGentError("RUNTIME_CONTROL_UNREACHABLE");
-      } else if (method === "GET" && url.pathname === "/v2/status") {
+      } else if (method === "GET" && url.pathname === "/v3/status") {
         const readiness = await this.projection.readiness();
         data = {
           service: this.projection.meta(),
           ...(await admin.status(readiness)),
         };
-      } else if (method === "GET" && url.pathname === "/v2/readiness") {
+      } else if (method === "GET" && url.pathname === "/v3/readiness") {
         data = await this.projection.readiness();
-      } else if (method === "POST" && url.pathname === "/v2/diagnostics") {
+      } else if (method === "POST" && url.pathname === "/v3/diagnostics") {
         assertEmptyObject(await readBody(request));
         data = await this.projection.diagnostics();
-      } else if (method === "GET" && url.pathname === "/v2/identities") {
+      } else if (method === "GET" && url.pathname === "/v3/identities") {
         data = admin.identities();
-      } else if (method === "GET" && url.pathname === "/v2/groups") {
+      } else if (method === "GET" && url.pathname === "/v3/groups") {
         data = admin.groups();
-      } else if (method === "GET" && url.pathname === "/v2/skills") {
+      } else if (method === "GET" && url.pathname === "/v3/conversations") {
+        data = admin.conversations();
+      } else if (method === "GET" && url.pathname === "/v3/schedules") {
+        data = admin.schedules();
+      } else if (method === "POST" && url.pathname === "/v3/schedules") {
+        data = admin.createSchedule(parseCreateScheduleInput(await readBody(request)));
+      } else if (method === "GET" && url.pathname === "/v3/skills") {
         data = admin.skills();
-      } else if (method === "POST" && url.pathname === "/v2/skills/validate") {
+      } else if (method === "POST" && url.pathname === "/v3/skills/validate") {
         assertEmptyObject(await readBody(request));
         data = await admin.validateSkills();
-      } else if (method === "POST" && url.pathname === "/v2/backups") {
+      } else if (method === "POST" && url.pathname === "/v3/backups") {
         assertEmptyObject(await readBody(request));
         data = await admin.createControlledBackup();
       } else {
-        const pairing = url.pathname.match(/^\/v2\/pairings\/([^/]+)\/confirm$/u);
-        const group = url.pathname.match(/^\/v2\/groups\/([^/]+)\/authorize$/u);
+        const pairing = url.pathname.match(/^\/v3\/pairings\/([^/]+)\/confirm$/u);
+        const group = url.pathname.match(/^\/v3\/groups\/([^/]+)\/authorize$/u);
+        const scheduleHistory = url.pathname.match(/^\/v3\/schedules\/([^/]+)\/history$/u);
+        const scheduleAction = url.pathname.match(
+          /^\/v3\/schedules\/([^/]+)\/(update|pause|resume|remove|run|reset-context)$/u,
+        );
         if (method === "POST" && pairing) {
           assertEmptyObject(await readBody(request));
           data = admin.confirmPairing(decodePathSegment(pairing[1]!));
@@ -145,6 +156,22 @@ export class ControlServer {
             throw new IMGentError("CLI_USAGE_INVALID");
           }
           data = admin.authorizeGroup(decodePathSegment(group[1]!), body.principalId);
+        } else if (method === "GET" && scheduleHistory) {
+          data = admin.scheduleHistory(decodePathSegment(scheduleHistory[1]!));
+        } else if (method === "POST" && scheduleAction) {
+          const id = decodePathSegment(scheduleAction[1]!);
+          const action = scheduleAction[2]!;
+          const body = await readBody(request);
+          if (action === "update") {
+            data = admin.updateSchedule(id, parseUpdateScheduleInput(body));
+          } else {
+            assertEmptyObject(body);
+            if (action === "pause") data = admin.pauseSchedule(id);
+            else if (action === "resume") data = admin.resumeSchedule(id);
+            else if (action === "remove") data = admin.removeSchedule(id);
+            else if (action === "run") data = admin.runSchedule(id);
+            else data = admin.resetScheduleContext(id);
+          }
         } else {
           throw new IMGentError("CLI_USAGE_INVALID");
         }
@@ -274,7 +301,9 @@ function httpStatus(kind: ReturnType<typeof normalizeError>["descriptor"]["kind"
 }
 
 function routeLabel(path: string): string {
-  if (/^\/v2\/pairings\/[^/]+\/confirm$/u.test(path)) return "/v2/pairings/:code/confirm";
-  if (/^\/v2\/groups\/[^/]+\/authorize$/u.test(path)) return "/v2/groups/:id/authorize";
+  if (/^\/v3\/pairings\/[^/]+\/confirm$/u.test(path)) return "/v3/pairings/:code/confirm";
+  if (/^\/v3\/groups\/[^/]+\/authorize$/u.test(path)) return "/v3/groups/:id/authorize";
+  if (/^\/v3\/schedules\/[^/]+\/history$/u.test(path)) return "/v3/schedules/:id/history";
+  if (/^\/v3\/schedules\/[^/]+\/[^/]+$/u.test(path)) return "/v3/schedules/:id/:action";
   return path.slice(0, 128);
 }

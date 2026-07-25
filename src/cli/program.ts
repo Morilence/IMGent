@@ -1,6 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, copyFile, lstat, mkdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -149,7 +159,7 @@ skillsCommand
         mode: "online",
         service: discovery.meta,
         configDrift: discovery.configDrift,
-        skills: await discovery.client.get<unknown[]>("/v2/skills"),
+        skills: await discovery.client.get<unknown[]>("/v3/skills"),
       });
       return;
     }
@@ -169,7 +179,7 @@ skillsCommand
         mode: "online",
         service: discovery.meta,
         configDrift: discovery.configDrift,
-        ...(await discovery.client.post<Record<string, unknown>>("/v2/skills/validate")),
+        ...(await discovery.client.post<Record<string, unknown>>("/v3/skills/validate")),
       });
       return;
     }
@@ -362,7 +372,7 @@ program
       service: discovery.meta,
       configDrift: discovery.configDrift,
       ...(await discovery.client.post<Record<string, unknown>>(
-        `/v2/pairings/${encodeURIComponent(code)}/confirm`,
+        `/v3/pairings/${encodeURIComponent(code)}/confirm`,
       )),
     });
   });
@@ -378,7 +388,7 @@ identity
         mode: "online",
         service: discovery.meta,
         configDrift: discovery.configDrift,
-        identities: await discovery.client.get<unknown[]>("/v2/identities"),
+        identities: await discovery.client.get<unknown[]>("/v3/identities"),
       });
       return;
     }
@@ -399,7 +409,7 @@ group
         mode: "online",
         service: discovery.meta,
         configDrift: discovery.configDrift,
-        groups: await discovery.client.get<unknown[]>("/v2/groups"),
+        groups: await discovery.client.get<unknown[]>("/v3/groups"),
       });
       return;
     }
@@ -420,9 +430,168 @@ group
       service: discovery.meta,
       configDrift: discovery.configDrift,
       ...(await discovery.client.post<Record<string, unknown>>(
-        `/v2/groups/${encodeURIComponent(conversationSpaceId)}/authorize`,
+        `/v3/groups/${encodeURIComponent(conversationSpaceId)}/authorize`,
         { principalId: options.principal },
       )),
+    });
+  });
+
+const conversation = program.command("conversation").description("查看可投递的 IM 会话");
+conversation
+  .command("list")
+  .description("列出已发现会话、执行主体与主动投递能力")
+  .action(async () => {
+    const discovery = await requireRunning("conversation list");
+    print({
+      mode: "online",
+      service: discovery.meta,
+      configDrift: discovery.configDrift,
+      conversations: await discovery.client.get<unknown[]>("/v3/conversations"),
+    });
+  });
+
+const schedule = program.command("schedule").description("管理定时 Agent 任务");
+
+schedule
+  .command("add <name>")
+  .description("创建一次性或 cron 计划")
+  .requiredOption("--conversation <id>", "目标 ConversationSpace ID")
+  .option("--principal <id>", "群聊执行主体 Principal ID")
+  .option("--prompt <text>", "Agent 任务提示")
+  .option("--prompt-file <path>", "从 UTF-8 文件读取 Agent 任务提示")
+  .option("--at <rfc3339>", "带时区偏移的一次性执行时间")
+  .option("--cron <expression>", "五字段 cron 表达式")
+  .option("--timezone <iana>", "cron 的 IANA 时区")
+  .addOption(
+    new Option("--context <mode>", "Agent 会话上下文")
+      .choices(["fresh", "series"])
+      .default("fresh"),
+  )
+  .action(
+    async (
+      name: string,
+      options: {
+        conversation: string;
+        principal?: string;
+        prompt?: string;
+        promptFile?: string;
+        at?: string;
+        cron?: string;
+        timezone?: string;
+        context: "fresh" | "series";
+      },
+    ) => {
+      const prompt = await promptValue(options.prompt, options.promptFile);
+      const discovery = await requireRunning("schedule add");
+      print({
+        mode: "online",
+        service: discovery.meta,
+        configDrift: discovery.configDrift,
+        schedule: await discovery.client.post<unknown>("/v3/schedules", {
+          name,
+          prompt,
+          conversationSpaceId: options.conversation,
+          ...(options.principal ? { principalId: options.principal } : {}),
+          contextMode: options.context,
+          ...(options.at ? { at: options.at } : {}),
+          ...(options.cron ? { cron: options.cron } : {}),
+          ...(options.timezone ? { timezone: options.timezone } : {}),
+        }),
+      });
+    },
+  );
+
+schedule
+  .command("list")
+  .description("列出计划")
+  .action(async () => {
+    const discovery = await requireRunning("schedule list");
+    print({
+      mode: "online",
+      schedules: await discovery.client.get<unknown[]>("/v3/schedules"),
+    });
+  });
+
+schedule
+  .command("update <id>")
+  .description("更新计划；提供时间参数时重新计算下一次运行")
+  .option("--name <name>", "新名称")
+  .option("--prompt <text>", "新 Agent 任务提示")
+  .option("--prompt-file <path>", "从 UTF-8 文件读取新提示")
+  .option("--at <rfc3339>", "带时区偏移的一次性执行时间")
+  .option("--cron <expression>", "五字段 cron 表达式")
+  .option("--timezone <iana>", "cron 的 IANA 时区")
+  .addOption(new Option("--context <mode>", "Agent 会话上下文").choices(["fresh", "series"]))
+  .action(
+    async (
+      id: string,
+      options: {
+        name?: string;
+        prompt?: string;
+        promptFile?: string;
+        at?: string;
+        cron?: string;
+        timezone?: string;
+        context?: "fresh" | "series";
+      },
+    ) => {
+      const body: Record<string, unknown> = {
+        ...(options.name ? { name: options.name } : {}),
+        ...(options.at ? { at: options.at } : {}),
+        ...(options.cron ? { cron: options.cron } : {}),
+        ...(options.timezone ? { timezone: options.timezone } : {}),
+        ...(options.context ? { contextMode: options.context } : {}),
+      };
+      if (options.prompt !== undefined || options.promptFile !== undefined) {
+        body.prompt = await promptValue(options.prompt, options.promptFile);
+      }
+      if (Object.keys(body).length === 0) throw new IMGentError("CLI_USAGE_INVALID");
+      const discovery = await requireRunning("schedule update");
+      print({
+        mode: "online",
+        schedule: await discovery.client.post<unknown>(
+          `/v3/schedules/${encodeURIComponent(id)}/update`,
+          body,
+        ),
+      });
+    },
+  );
+
+for (const action of ["pause", "resume", "remove", "run", "reset-context"] as const) {
+  schedule
+    .command(`${action} <id>`)
+    .description(
+      action === "pause"
+        ? "暂停未来触发"
+        : action === "resume"
+          ? "恢复计划并重新计算下次时间"
+          : action === "remove"
+            ? "移除计划并保留既有任务审计数据"
+            : action === "run"
+              ? "立即手动运行一次"
+              : "清除 series 模式的 Agent session",
+    )
+    .action(async (id: string) => {
+      const discovery = await requireRunning(`schedule ${action}`);
+      print({
+        mode: "online",
+        result: await discovery.client.post<unknown>(
+          `/v3/schedules/${encodeURIComponent(id)}/${action}`,
+        ),
+      });
+    });
+}
+
+schedule
+  .command("history <id>")
+  .description("显示计划运行及投递历史")
+  .action(async (id: string) => {
+    const discovery = await requireRunning("schedule history");
+    print({
+      mode: "online",
+      history: await discovery.client.get<unknown[]>(
+        `/v3/schedules/${encodeURIComponent(id)}/history`,
+      ),
     });
   });
 
@@ -516,7 +685,7 @@ program
     if (discovery.state === "running") {
       const status = await discovery.client.get<
         Record<string, unknown> & { readiness: ReadinessReport }
-      >("/v2/status");
+      >("/v3/status");
       print({
         ...status,
         mode: "online",
@@ -562,7 +731,7 @@ program
         artifact: string;
         files: number;
         bytes: number;
-      }>("/v2/backups");
+      }>("/v3/backups");
       const path = await deliverControlledBackup(controlled.artifact, output);
       print({
         mode: "online",
@@ -643,11 +812,30 @@ async function routeCommand(
 }
 
 async function requireRunning(
-  command: Extract<CommandName, "pair" | "group authorize">,
+  command: Extract<
+    CommandName,
+    | "pair"
+    | "group authorize"
+    | "conversation list"
+    | "schedule add"
+    | "schedule list"
+    | "schedule update"
+    | "schedule pause"
+    | "schedule resume"
+    | "schedule remove"
+    | "schedule run"
+    | "schedule reset-context"
+    | "schedule history"
+  >,
 ): Promise<Extract<ControlDiscovery, { state: "running" }>> {
   const discovery = await routeCommand(command);
   if (discovery.state === "stopped") throw new IMGentError("RUNTIME_SERVICE_NOT_RUNNING");
   return discovery;
+}
+
+async function promptValue(inline?: string, file?: string): Promise<string> {
+  if (Boolean(inline) === Boolean(file)) throw new IMGentError("CLI_USAGE_INVALID");
+  return inline ?? (await readFile(resolve(file!), "utf8"));
 }
 
 async function requireStopped(command: Extract<CommandName, "restore">, config: IMGentConfig) {

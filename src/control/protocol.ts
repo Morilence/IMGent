@@ -1,7 +1,7 @@
 import { IMGENT_VERSION } from "../version.js";
 import type { ErrorDescriptor } from "@imgent/contracts";
 
-export const CONTROL_PROTOCOL_VERSION = 2;
+export const CONTROL_PROTOCOL_VERSION = 3;
 export const CONTROL_APP_VERSION = IMGENT_VERSION;
 export const CONTROL_BODY_LIMIT = 1024 * 1024;
 export const CONTROL_REQUEST_TIMEOUT_MS = 2_000;

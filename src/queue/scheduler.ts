@@ -128,7 +128,9 @@ export class ConversationScheduler {
         );
       }
     }
-    const existingSession = this.options.store.session(task.conversationKey);
+    const existingSession = task.sessionKey
+      ? this.options.store.session(task.sessionKey)
+      : undefined;
     if (
       existingSession &&
       (existingSession.driver !== profile.driver || existingSession.workspace !== profile.workspace)
@@ -147,26 +149,29 @@ export class ConversationScheduler {
     try {
       for await (const event of driver.runTurn({
         turnId: task.id,
-        conversationKey: task.conversationKey,
+        conversationKey: task.sessionKey ?? `${task.executionKey}:${task.id}`,
         ...(existingSession ? { sessionId: existingSession.sessionId } : {}),
         profile,
         prompt: textOf(task.message.parts),
         parts: task.message.parts,
         memoryContext: memories,
-        developerInstructions: this.options.skills.developerInstructions(
-          profile.skills,
-          profile.memory.enabled,
-        ),
+        developerInstructions: [
+          this.options.skills.developerInstructions(profile.skills, profile.memory.enabled),
+          ...(task.scheduleRunId ? [this.scheduleInstructions(task)] : []),
+        ].join("\n\n"),
+        ...(task.scheduleRunId && !task.sessionKey ? { ephemeral: true } : {}),
         hostTools: allowedHostTools,
       })) {
         switch (event.type) {
           case "session":
-            this.options.store.saveSession(
-              task.conversationKey,
-              profile.driver,
-              event.sessionId,
-              profile.workspace,
-            );
+            if (task.sessionKey) {
+              this.options.store.saveSession(
+                task.sessionKey,
+                profile.driver,
+                event.sessionId,
+                profile.workspace,
+              );
+            }
             break;
           case "output-delta":
             streamed += event.text;
@@ -241,7 +246,12 @@ export class ConversationScheduler {
       }
       const answer = finalText || streamed || "任务已完成。";
       const message = this.replyMessage(task, answer, "final");
-      this.options.store.completeTaskWithOutbound(task.id, answer, profile.memory.enabled, message);
+      this.options.store.completeTaskWithOutbound(
+        task.id,
+        answer,
+        profile.memory.enabled && task.curateMemory,
+        message,
+      );
       void this.options.outbound.drain(this.options.adapters);
     } catch (error) {
       await driver.interrupt(task.id).catch(() => undefined);
@@ -355,14 +365,49 @@ export class ConversationScheduler {
   }
 
   private replyMessage(task: StoredTask, text: string, suffix: string): OutboundMessage {
+    const scheduled = task.scheduleRunId
+      ? this.options.store.get<{ name: string; scheduled_for: string }>(
+          `SELECT s.name, sr.scheduled_for
+           FROM schedule_runs sr JOIN schedules s ON s.id = sr.schedule_id
+           WHERE sr.id = ?`,
+          task.scheduleRunId,
+        )
+      : undefined;
     return {
       botInstanceId: task.message.botInstanceId,
       conversation: task.message.conversation,
-      parts: [{ type: "text", text }],
-      replyTo: { messageId: task.message.messageId },
-      ...(task.message.replyContext ? { replyContext: task.message.replyContext } : {}),
+      parts: [
+        {
+          type: "text",
+          text: scheduled
+            ? `[定时任务：${scheduled.name}]\n计划时间：${scheduled.scheduled_for}\n\n${text}`
+            : text,
+        },
+      ],
+      ...(scheduled
+        ? {}
+        : {
+            replyTo: { messageId: task.message.messageId },
+            ...(task.message.replyContext ? { replyContext: task.message.replyContext } : {}),
+          }),
       idempotencyKey: `${task.id}:${suffix}`,
     };
+  }
+
+  private scheduleInstructions(task: StoredTask): string {
+    const scheduled = this.options.store.get<{ name: string; scheduled_for: string }>(
+      `SELECT s.name, sr.scheduled_for
+       FROM schedule_runs sr JOIN schedules s ON s.id = sr.schedule_id
+       WHERE sr.id = ?`,
+      task.scheduleRunId!,
+    );
+    return [
+      "# IMGent scheduled execution",
+      `This turn was started by schedule ${JSON.stringify(scheduled?.name ?? "unknown")}.`,
+      `Scheduled time: ${scheduled?.scheduled_for ?? "unknown"}.`,
+      "Complete the supplied task now and return a self-contained result for proactive IM delivery.",
+      "Do not claim that a user just sent the prompt. Approval and user questions still use the host-mediated IM flow.",
+    ].join("\n");
   }
 
   private async reply(task: StoredTask, text: string, suffix: string): Promise<void> {

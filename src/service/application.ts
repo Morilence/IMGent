@@ -16,6 +16,7 @@ import { ConversationScheduler } from "../queue/scheduler.js";
 import { IMGENT_HOST_TOOLS, IMGentHostTools } from "../runtime/host-tools.js";
 import { Logger } from "../runtime/logger.js";
 import { OutboundDispatcher } from "../runtime/outbound.js";
+import { SchedulePlanner, ScheduleService } from "../schedule/service.js";
 import { CredentialStore } from "../security/credential-store.js";
 import { SkillHostTools } from "../skills/host-tools.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
@@ -52,11 +53,13 @@ export class IMGentApplication {
   readonly drivers = new Map<string, AgentDriver>();
   readonly profiles: ReadonlyMap<string, AgentProfile>;
   readonly skills: SkillRegistry;
+  readonly schedules: ScheduleService;
 
   private readonly logger = new Logger("application");
   private readonly hostTools: IMGentHostTools;
   private readonly scheduler: ConversationScheduler;
   private readonly curator: MemoryCurator;
+  private readonly schedulePlanner: SchedulePlanner;
   private readonly routes: ReadonlyMap<string, string>;
   private readonly botAssemblyIssues = new Map<string, ErrorDescriptor[]>();
   private readonly adapterStartIssues = new Map<string, ErrorDescriptor[]>();
@@ -89,6 +92,13 @@ export class IMGentApplication {
     this.memory = new MemoryService(store);
     this.approvals = new ApprovalService(store);
     this.outbound = new OutboundDispatcher(store);
+    this.schedules = new ScheduleService(
+      store,
+      this.adapters,
+      new Set(this.profiles.keys()),
+      this.routes,
+    );
+    this.schedulePlanner = new SchedulePlanner(this.schedules);
     this.skills = skills;
     this.hostTools = new IMGentHostTools(
       new MemoryHostTools(this.memory),
@@ -349,6 +359,7 @@ export class IMGentApplication {
         this.logger.errorFrom("adapter.start-failed", error, { botInstanceId: botId });
       }
     }
+    this.schedulePlanner.start();
     this.phase = "running";
     this.logger.info("application.started", {
       bots: this.adapters.size,
@@ -362,6 +373,7 @@ export class IMGentApplication {
     const failures: unknown[] = [];
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
     this.maintenanceTimer = undefined;
+    this.schedulePlanner.stop();
     await Promise.allSettled([...this.adapters.values()].map((adapter) => adapter.stop()));
     try {
       await this.scheduler.stop();

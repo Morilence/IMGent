@@ -10,7 +10,7 @@ import { SecretBox } from "../src/security/secret-box.js";
 import { SCHEMA_VERSION } from "../src/storage/migrations.js";
 import { IMGentStore } from "../src/storage/store.js";
 
-test("fresh storage creates only schema 4 with due-work indexes", async () => {
+test("fresh storage creates only schema 5 with due-work indexes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "imgent-schema-"));
   const path = join(directory, "state.sqlite");
   try {
@@ -24,6 +24,7 @@ test("fresh storage creates only schema 4 with due-work indexes", async () => {
         ["tasks", "tasks_claim_idx"],
         ["memory_outbox", "memory_outbox_claim_idx"],
         ["outbound_messages", "outbound_claim_idx"],
+        ["schedules", "schedules_due_idx"],
       ] as const) {
         const indexes = store.all<{ name: string }>(`PRAGMA index_list(${table})`);
         assert.ok(

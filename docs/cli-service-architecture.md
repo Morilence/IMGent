@@ -34,7 +34,7 @@ API。systemd、launchd、Windows Service 或 Docker 负责拉起、重启、日
 - `imgent start` 由 `IMGentService` 组装 Application、Control Server 与 Health
   Server，并等待退出信号；QQ 仍使用 Gateway WebSocket，微信仍使用 HTTP long
   polling。
-- Control Server 在 Unix socket 或 Windows Named Pipe 上承载 `/v2` 管理协议；
+- Control Server 在 Unix socket 或 Windows Named Pipe 上承载 `/v3` 管理协议；
   Health Server 在 loopback TCP 上只提供 `/healthz` 与 `/readyz`。
 - `status`、在线 `doctor`、identity/group/skill 查询和在线备份通过 Control
   Client 查询同一 `instanceId`，不再创建第二个 Application。
@@ -179,7 +179,7 @@ BotInstance → AgentProfile 路由可以服务。`degraded` 不是崩溃态。
 | 类型     | 数据路径                               | 服务运行时行为         | 命令                                                                                |
 | -------- | -------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------- |
 | 离线配置 | 直接读取/原子写入配置、凭据或 skills   | 明确拒绝，提示停止服务 | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`         |
-| 在线管理 | 只通过本地控制面                       | 服务未运行时明确失败   | `pair`、`group authorize`，以及未来的 `task cancel`、`reload`、`stop`               |
+| 在线管理 | 只通过本地控制面                       | 服务未运行时明确失败   | `pair`、`group authorize`、`conversation list`、`schedule *`                        |
 | 双模式   | 运行时走控制面；停服时使用受限离线路径 | 不做不透明降级         | `doctor`、`status`、`identity list`、`group list`、`skills list/validate`、`backup` |
 
 双模式命令必须在输出中声明 `mode: "online" | "offline"`：
@@ -198,7 +198,7 @@ BotInstance → AgentProfile 路由可以服务。`degraded` 不是崩溃态。
 每个命令显式声明 `offline`、`online` 或 `dual` capability。CLI 执行时：
 
 1. 从已解析的 `configPath` 得到 `dataDir` 和控制 endpoint。
-2. 尝试 `GET /v2/meta` 握手。
+2. 尝试 `GET /v3/meta` 握手。
 3. 握手成功时，online/dual 命令走 Control Client；offline 命令返回
    `RUNTIME_SERVICE_MUST_STOP`。
 4. endpoint 确认不存在时，offline/dual 命令走离线路径；online 命令返回
@@ -226,6 +226,32 @@ v1 配置和用户 skills 是启动快照：
 这比“CLI 写完文件，再提示可能需要重启”更严格，但能保证配置文件、运行内存和
 实际连接始终对应同一个快照。
 
+### 6.4 定时任务语义
+
+计划是 SQLite 中的运行事实，因此创建、修改、暂停、恢复、删除、立即运行与历史
+查询都是 online 命令。CLI 先通过 `conversation list` 选择已发现的
+ConversationSpace；服务再按当前 Adapter 的
+`capabilities.supportsProactiveSend` 校验是否能在没有近期入站消息时投递。
+
+常驻 `SchedulePlanner` 每秒查询到期索引，并在单个事务中推进计划和创建
+schedule run/task。幂等键为 `scheduleId + scheduledFor`。服务停机错过多个 cron
+时间点时只产生一次 catch-up；前一轮仍未终结时跳过本轮并累计计数，不形成补跑
+队列。
+
+名称、prompt 或上下文模式等元数据更新保持计划当前状态；只有显式修改执行时间或
+执行 `resume` 才会重新激活计划。`remove` 使用软删除，计划不再触发或出现在列表
+中，但 `history` 仍可按原 ID 查询既有运行和投递记录。
+
+计划 task 明确拆分三个 key：
+
+- `conversationKey`：目标 IM、Principal、审批、记忆和聊天取消的边界。
+- `executionKey`：计划自己的 FIFO/互斥边界，不阻塞目标会话中的普通聊天。
+- `sessionKey`：`fresh` 不设置并以 ephemeral turn 执行；`series` 使用
+  `schedule:<id>`，永不隐式复用普通聊天 session。
+
+计划结果、审批和 Agent 问题不携带 `replyTo` 或 `replyContext`，统一走 proactive
+send。调度、能力检查、幂等与上下文隔离均由宿主保证，不新增内置 skill。
+
 ## 7. 本地控制面
 
 ### 7.1 Transport
@@ -246,7 +272,7 @@ v1 配置和用户 skills 是启动快照：
 执行本地数据操作期间短暂持有 lease。服务绑定前先探测 endpoint：
 
 - 任意活动监听者能够接受连接：视为已有服务或 ownership lease，启动失败且不删除
-  endpoint；CLI 另通过 `/v2/meta` 区分真实服务和不可达控制面。
+  endpoint；CLI 另通过 `/v3/meta` 区分真实服务和不可达控制面。
 - 无活动监听者：只有确认是当前用户拥有的 socket 特殊文件时，才可清理 stale
   endpoint。
 - 普通文件、符号链接、其他用户拥有的路径一律拒绝删除。
@@ -281,7 +307,7 @@ PID 和 PID 重用。
 - 路由、状态码、超时和请求体上限容易审计。
 - 将来可以为 Web UI 复用 application service，但不承诺直接暴露相同 transport。
 
-所有路径带协议版本 `/v2`。握手响应至少包含：
+所有路径带协议版本 `/v3`。握手响应至少包含：
 
 ```json
 {
@@ -331,19 +357,24 @@ PID 和 PID 重用。
 
 ### 7.3 v2 路由
 
-| Method | Path                         | 用途                                   |
-| ------ | ---------------------------- | -------------------------------------- |
-| `GET`  | `/v2/meta`                   | 握手、版本与实例身份                   |
-| `GET`  | `/v2/status`                 | 运行状态与缓存的 runtime readiness     |
-| `GET`  | `/v2/readiness`              | 缓存的 runtime readiness 快照          |
-| `POST` | `/v2/diagnostics`            | 显式执行平台、账号和模型深度探测       |
-| `GET`  | `/v2/identities`             | 身份映射列表                           |
-| `POST` | `/v2/pairings/:code/confirm` | 消费一次性配对码                       |
-| `GET`  | `/v2/groups`                 | QQ 群空间和授权状态                    |
-| `POST` | `/v2/groups/:id/authorize`   | 由指定 Principal 授权群                |
-| `GET`  | `/v2/skills`                 | 当前活动的 skill 启动快照              |
-| `POST` | `/v2/skills/validate`        | 在服务 owner 内校验磁盘与 Profile 引用 |
-| `POST` | `/v2/backups`                | 由服务创建一致性备份                   |
+| Method | Path                         | 用途                                     |
+| ------ | ---------------------------- | ---------------------------------------- |
+| `GET`  | `/v3/meta`                   | 握手、版本与实例身份                     |
+| `GET`  | `/v3/status`                 | 运行状态与缓存的 runtime readiness       |
+| `GET`  | `/v3/readiness`              | 缓存的 runtime readiness 快照            |
+| `POST` | `/v3/diagnostics`            | 显式执行平台、账号和模型深度探测         |
+| `GET`  | `/v3/identities`             | 身份映射列表                             |
+| `POST` | `/v3/pairings/:code/confirm` | 消费一次性配对码                         |
+| `GET`  | `/v3/groups`                 | QQ 群空间和授权状态                      |
+| `POST` | `/v3/groups/:id/authorize`   | 由指定 Principal 授权群                  |
+| `GET`  | `/v3/conversations`          | 可主动投递的会话与 Principal             |
+| `GET`  | `/v3/schedules`              | 计划列表                                 |
+| `POST` | `/v3/schedules`              | 创建计划                                 |
+| `GET`  | `/v3/schedules/:id/history`  | 计划运行历史                             |
+| `POST` | `/v3/schedules/:id/:action`  | 更新、暂停、恢复、删除、运行或重置上下文 |
+| `GET`  | `/v3/skills`                 | 当前活动的 skill 启动快照                |
+| `POST` | `/v3/skills/validate`        | 在服务 owner 内校验磁盘与 Profile 引用   |
+| `POST` | `/v3/backups`                | 由服务创建一致性备份                     |
 
 `reload`、`shutdown`、实时日志、任务取消和 dead-letter 管理只有在明确产品语义与
 权限后再增加；它们不是为了显得“像完整 API”而预留空路由。
@@ -358,7 +389,7 @@ PID 和 PID 重用。
 
 它们不能执行 mutation，不能返回身份、队列明细、配置、平台 ID 或本机路径。
 `imgent status` 使用控制面并同样读取缓存快照；只有 `imgent doctor` 通过
-`POST /v2/diagnostics` 主动执行深度探测。
+`POST /v3/diagnostics` 主动执行深度探测。
 
 ## 8. 状态与数据所有权
 
@@ -400,19 +431,19 @@ SQLite 保存运行事实：
 
 `imgent backup` 是双模式命令：
 
-- 服务在线：通过 `/v2/backups` 请求服务执行 SQLite backup，并在同一配置快照下
+- 服务在线：通过 `/v3/backups` 请求服务执行 SQLite backup，并在同一配置快照下
   收集配置、凭据和用户 skills。
 - 服务离线：CLI 可以直接执行同一 backup application service。
 
 两种模式都生成 `imgent-backup/v2` archive、manifest 和校验和；backup v1
 明确拒绝恢复。CLI 不在控制请求中传递任意
 服务端输出路径；默认由服务写入数据目录下的受控临时文件，再通过安全的文件移动或
-流式响应交付到 CLI 指定位置。当前 `/v2/backups` 只返回受控 artifact 名称和
+流式响应交付到 CLI 指定位置。当前 `/v3/backups` 只返回受控 artifact 名称和
 统计，不返回服务端绝对路径；CLI 在已知 backup 目录内解析、校验 owner/mode 后
 复制并原子落到目标路径。
 
 `restore` 始终要求目标实例停止，并验证目标目录、控制 endpoint、manifest、
-schema version、权限和 SQLite integrity。当前 schema v4 只允许空数据目录初始化，
+schema version、权限和 SQLite integrity。当前 schema v5 只允许空数据目录初始化，
 任何旧 schema 都保持不变并返回 `STORAGE_SCHEMA_UNSUPPORTED`。`--force` 不能绕过
 活动实例检查。
 
@@ -471,6 +502,7 @@ imgent/
 │  │  ├─ migrations.ts
 │  │  └─ store.ts
 │  ├─ queue/
+│  ├─ schedule/
 │  ├─ identity/
 │  ├─ approvals/
 │  ├─ memory/
@@ -579,7 +611,7 @@ esbuild 只收敛 npm 发布边界，不改变运行时模块边界。只有出�
 
 - 引入 `service/lifecycle`、状态机和实例元数据。
 - 拆分 health server 与 control server。
-- 实现 Unix socket/Named Pipe endpoint、`GET /v2/meta` 和单实例保护。
+- 实现 Unix socket/Named Pipe endpoint、`GET /v3/meta` 和单实例保护。
 - 先建立协议、权限与单实例测试，再迁移命令。
 
 完成标准：第二个 `imgent start` 被可靠拒绝；CLI 可以区分 starting、ready、
@@ -640,7 +672,7 @@ runtime directory 行为属于对应平台发布前 smoke；Linux CI 只验证�
 
 当前真实子进程测试包含：
 
-1. 启动 `imgent start`，等待 `/v2/meta`。
+1. 启动 `imgent start`，等待 `/v3/meta`。
 2. 在第二进程执行 online `status`，并验证 lifecycle 与 readiness。
 3. 验证第二个 `start` 被拒绝，所有 online 输出携带同一 `instanceId`。
 4. 执行 pairing 和 group authorization mutation，并验证服务内数据库事实。

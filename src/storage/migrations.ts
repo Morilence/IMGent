@@ -1,10 +1,10 @@
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export const SCHEMA = `
 CREATE TABLE schema_meta (
   version INTEGER NOT NULL
 ) STRICT;
-INSERT INTO schema_meta(version) VALUES (4);
+INSERT INTO schema_meta(version) VALUES (5);
 
 CREATE TABLE principals (
   id TEXT PRIMARY KEY,
@@ -98,14 +98,55 @@ CREATE TABLE agent_sessions (
   updated_at TEXT NOT NULL
 ) STRICT;
 
+CREATE TABLE schedules (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  conversation_space_id TEXT NOT NULL REFERENCES conversation_spaces(id),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  agent_profile_id TEXT NOT NULL,
+  schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('once', 'cron')),
+  schedule_expression TEXT NOT NULL,
+  timezone TEXT,
+  context_mode TEXT NOT NULL CHECK(context_mode IN ('fresh', 'series')),
+  status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'completed', 'blocked')),
+  next_run_at TEXT,
+  skipped_run_count INTEGER NOT NULL DEFAULT 0,
+  blocked_reason TEXT,
+  removed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK(
+    (schedule_kind = 'once' AND timezone IS NULL)
+    OR (schedule_kind = 'cron' AND timezone IS NOT NULL)
+  )
+) STRICT;
+
+CREATE INDEX schedules_due_idx ON schedules(next_run_at, created_at)
+  WHERE status = 'active' AND next_run_at IS NOT NULL;
+
+CREATE TABLE schedule_runs (
+  id TEXT PRIMARY KEY,
+  schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+  scheduled_for TEXT NOT NULL,
+  enqueued_at TEXT NOT NULL,
+  UNIQUE(schedule_id, scheduled_for)
+) STRICT;
+
 CREATE TABLE tasks (
   id TEXT PRIMARY KEY,
-  inbound_event_id TEXT NOT NULL REFERENCES inbound_events(id),
+  inbound_event_id TEXT REFERENCES inbound_events(id),
+  schedule_run_id TEXT UNIQUE REFERENCES schedule_runs(id),
   agent_profile_id TEXT NOT NULL,
   principal_id TEXT NOT NULL REFERENCES principals(id),
   conversation_space_id TEXT NOT NULL REFERENCES conversation_spaces(id),
   conversation_key TEXT NOT NULL,
+  execution_key TEXT NOT NULL,
+  session_key TEXT,
   idempotency_key TEXT NOT NULL UNIQUE,
+  message_json TEXT NOT NULL,
+  reply_context_cipher BLOB,
+  curate_memory INTEGER NOT NULL DEFAULT 1 CHECK(curate_memory IN (0, 1)),
   status TEXT NOT NULL CHECK(status IN (
     'queued', 'active', 'retry_wait', 'waiting_approval',
     'succeeded', 'cancelled', 'failed', 'dead_letter'
@@ -117,10 +158,14 @@ CREATE TABLE tasks (
   incident_id TEXT,
   next_attempt_at TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  CHECK(
+    (inbound_event_id IS NOT NULL AND schedule_run_id IS NULL)
+    OR (inbound_event_id IS NULL AND schedule_run_id IS NOT NULL)
+  )
 ) STRICT;
 
-CREATE INDEX tasks_fifo_idx ON tasks(conversation_key, status, created_at);
+CREATE INDEX tasks_fifo_idx ON tasks(execution_key, status, created_at);
 CREATE INDEX tasks_claim_idx ON tasks(created_at, next_attempt_at)
   WHERE status IN ('queued', 'retry_wait');
 

@@ -47,7 +47,7 @@ export class ControlClient {
     const expectedHash = configHash(config);
     let meta: ControlMeta;
     try {
-      meta = await rawRequest<ControlMeta>(endpoint, "GET", "/v2/meta");
+      meta = await rawRequest<ControlMeta>(endpoint, "GET", "/v3/meta");
     } catch (error) {
       const code =
         error && typeof error === "object" && "code" in error
@@ -90,7 +90,7 @@ export class ControlClient {
   }
 
   diagnostics<T>(): Promise<T> {
-    return this.post<T>("/v2/diagnostics", {}, CONTROL_DIAGNOSTIC_TIMEOUT_MS);
+    return this.post<T>("/v3/diagnostics", {}, CONTROL_DIAGNOSTIC_TIMEOUT_MS);
   }
 }
 
