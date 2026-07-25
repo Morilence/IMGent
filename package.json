@@ -83,6 +83,7 @@
     "@imgent/driver-codex": "workspace:*",
     "@types/node": "^24.10.0",
     "@types/qrcode-terminal": "^0.12.2",
+    "@types/ws": "8.18.1",
     "esbuild": "0.28.1",
     "eslint": "10.7.0",
     "eslint-config-prettier": "10.1.8",
