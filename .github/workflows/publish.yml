@@ -1,35 +1,39 @@
 name: Publish
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing release tag, for example v0.1.0
-        required: true
-        type: string
+  pull_request_target:
+    types:
+      - closed
+    branches:
+      - main
+    paths:
+      - ".changeset/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
 
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
   id-token: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   publish:
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request_target' &&
+           github.event.pull_request.merged == true &&
+           github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          ref: ${{ inputs.tag || github.ref }}
 
       - uses: pnpm/action-setup@v6
         with:
@@ -41,69 +45,31 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
-      - name: Validate release tag
-        id: release
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch origin main
-          git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"
-          git merge-base --is-ancestor HEAD origin/main
-
-          package_name="$(node -p "require('./package.json').name")"
-          package_version="$(node -p "require('./package.json').version")"
-          if [[ "${RELEASE_TAG}" != "v${package_version}" ]]; then
-            echo "Tag ${RELEASE_TAG} does not match ${package_name}@${package_version}" >&2
-            exit 1
-          fi
-          if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
-            echo "${package_name}@${package_version} is already published" >&2
-            exit 1
-          fi
-
-          npm_tag="latest"
-          if [[ "${package_version}" == *-* ]]; then
-            npm_tag="next"
-          fi
-          echo "name=${package_name}" >> "${GITHUB_OUTPUT}"
-          echo "version=${package_version}" >> "${GITHUB_OUTPUT}"
-          echo "npm-tag=${npm_tag}" >> "${GITHUB_OUTPUT}"
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Test
         run: pnpm test
 
-      - name: Pack
-        id: pack
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir release
-          pnpm pack --pack-destination release
-          archive="$(find release -maxdepth 1 -type f -name '*.tgz' -print -quit)"
-          if [[ -z "${archive}" ]]; then
-            echo "pnpm pack did not create an archive" >&2
-            exit 1
-          fi
-          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
-
       - name: Test packed package
-        run: node scripts/verify-package.mjs "${{ steps.pack.outputs.archive }}"
+        run: pnpm verify:package
 
-      - name: Publish to npm
-        run: >-
-          npm publish "${{ steps.pack.outputs.archive }}"
-          --access public
-          --tag "${{ steps.release.outputs.npm-tag }}"
-          --provenance
+      - name: Create release PR or publish
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          publish: pnpm ci:publish
+          version: pnpm ci:version
+          commit: "ci: release imgent"
+          title: "ci: release imgent"
         env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN || github.token }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
 
       - name: Summarize
+        if: steps.changesets.outputs.published == 'true'
         run: >-
-          echo "Published
-          ${{ steps.release.outputs.name }}@${{ steps.release.outputs.version }}
-          with npm tag ${{ steps.release.outputs.npm-tag }}"
+          echo "Published ${{ steps.changesets.outputs.publishedPackages }}"
           >> "${GITHUB_STEP_SUMMARY}"

@@ -207,15 +207,23 @@ Docker 镜像不内置也不代管 Codex/Claude 的登录凭据；容器部署�
 
 ## 发布
 
-发布由 [Publish workflow](.github/workflows/publish.yml) 完成。先在 `main` 更新
-`package.json` 版本并通过测试，再创建并推送同版本 tag：
+发布由 [Changesets](https://github.com/changesets/changesets) 和
+[Publish workflow](.github/workflows/publish.yml) 完成。开发者无需手动修改版本或
+创建 tag；每个面向用户的变更只需在开发分支生成 changeset，并把生成的 Markdown
+文件与代码一起提交：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+pnpm changeset
+git add .changeset/*.md
+git commit -m "docs: add release changeset"
 ```
 
-workflow 会再次运行测试、构建 tarball、在临时目录全局安装并验证 CLI/内置
-skills，最后把同一个 tarball 发布到 npm。首次发布需要仓库 secret
-`NPM_TOKEN`；首次发布后可在 npm 包设置中把 `Morilence/IMGent` 的
-`publish.yml` 配置为 Trusted Publisher，再移除长期写 token。
+包含 changeset 的 PR 合并到 `main` 后，workflow 会运行测试和 npm 安装烟测，
+然后自动创建或更新 `ci: release imgent` Release PR；该 PR 负责更新版本和生成
+`CHANGELOG.md`。合并 Release PR 后，同一个 workflow 会再次通过测试和烟测，
+创建 Git tag 和 GitHub Release，并发布到 npm。
+
+仓库可配置 `PAT_TOKEN` 让 Release PR 使用专用机器人身份；未配置时使用
+`github.token`。首次发布需要仓库 secret `NPM_TOKEN`。首次发布后可在 npm 包设置
+中把 `Morilence/IMGent` 的 `publish.yml` 配置为 Trusted Publisher，再移除长期
+写 token。

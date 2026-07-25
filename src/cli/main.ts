@@ -18,6 +18,7 @@ import { resolveInstanceEndpoint } from "../service/instance.js";
 import { IMGentService } from "../service/lifecycle.js";
 import { OfflineAdminService } from "../service/offline-admin-service.js";
 import { OfflineLease } from "../service/offline-lease.js";
+import { IMGENT_VERSION } from "../version.js";
 import { COMMAND_CAPABILITIES, type CommandName } from "./command-capability.js";
 import { openAdminContext } from "./context.js";
 import { ControlClient, type ControlDiscovery } from "./control-client.js";
@@ -38,7 +39,7 @@ const offlineLeases = new Map<string, OfflineLease>();
 program
   .name("imgent")
   .description("将 QQ 与微信 iLink 安全桥接到本地 Codex / Claude Code")
-  .version("0.1.0")
+  .version(IMGENT_VERSION)
   .option("-c, --config <path>", "配置文件路径", resolve("imgent.json"))
   .option("--locale <locale>", "输出语言：zh-CN 或 en-US")
   .option("--json", "输出稳定 JSON envelope", false)

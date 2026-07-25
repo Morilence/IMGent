@@ -30,13 +30,16 @@
     "skills"
   ],
   "bin": {
-    "imgent": "./dist/src/cli/main.js"
+    "imgent": "dist/src/cli/main.js"
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
     "build": "tsc -b && node scripts/build.mjs",
+    "changeset": "changeset",
+    "ci:publish": "changeset publish",
+    "ci:version": "changeset version",
     "clean": "tsc -b --clean",
     "prepare": "husky",
     "prepack": "npm run build",
@@ -64,6 +67,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@changesets/cli": "2.31.1",
     "@commitlint/cli": "21.2.1",
     "@commitlint/config-conventional": "21.2.0",
     "@commitlint/types": "21.2.0",
