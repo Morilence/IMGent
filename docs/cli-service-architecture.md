@@ -533,16 +533,16 @@ flowchart TD
 ### 11.3 构建与发行
 
 - 仓库由 pnpm workspace 管理，TypeScript project references 通过 `tsc -b`
-  直接输出 ESM JavaScript。
-- 当前不使用 esbuild、Rollup、Webpack 或其他 bundler；Node.js 直接执行
-  `dist/src/cli/main.js`。
+  做类型检查、测试编译并为 workspace 产出 ESM JavaScript。
+- npm 发布前由 esbuild 将内部 `@imgent/*` workspace 包合并到
+  `dist/src/cli/main.js`；第三方运行时依赖保持 external，由 npm 正常安装。
 - `package.json#bin`、`pnpm imgent` 和 `pnpm start` 最终都进入同一个 CLI
   composition root；是否常驻由命令决定，不由构建产物决定。
 - CLI/Service 的代码分层不会生成两套 npm 包或两个二进制。Docker 与本机安装也
   复用同一个产物，外部 supervisor 只改变进程托管方式。
 
-只有出现单文件分发、启动性能、源码隐藏或跨平台原生可执行文件等明确需求时，才
-评估 bundler 或 SEA/安装器；它们不是当前进程边界成立的前提。
+esbuild 只收敛 npm 发布边界，不改变运行时模块边界。只有出现跨平台原生可执行
+文件等明确需求时，才评估 SEA 或安装器。
 
 ### 11.4 未来拆分条件
 

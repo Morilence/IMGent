@@ -13,9 +13,10 @@ pnpm monorepo 结构：
 - 根 `skills/` 与 `src/skills/`：IMGent 托管的内置技能包、两层注册表、启动
   快照和 per-turn 只读物化。
 
-构建使用 pnpm workspace、TypeScript project references 和 `tsc -b`，直接输出
-Node.js ESM；当前没有 bundler。CLI 与常驻服务共享
-`dist/src/cli/main.js` 入口，进程形态由子命令决定而不是由不同构建产物决定。
+构建使用 pnpm workspace、TypeScript project references 和 `tsc -b` 做类型检查
+与测试编译；npm 发布时由 esbuild 合并内部 workspace 包，第三方运行时依赖保持
+external。CLI 与常驻服务共享 `dist/src/cli/main.js` 入口，进程形态由子命令
+决定而不是由不同构建产物决定。
 
 不包含飞书、Telegram、动态插件市场、云端记忆或向量数据库。
 
@@ -78,6 +79,7 @@ language 命令；CLI 支持 `--locale`、`--json` 与固定退出码，IM 支�
 pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
+pnpm verify:package
 pnpm verify:codex
 ```
 

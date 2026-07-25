@@ -1460,6 +1460,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
 ### 阶段五：发布准备
 
 - Docker 单容器。
+- 单一 `imgent` npm 包、全局 CLI 安装与 tarball 空目录 smoke。
 - 数据迁移、备份恢复和死信诊断。
 - 官方 payload fixture 与端到端验收。
 - 安装、升级、权限和故障指南。

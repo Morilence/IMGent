@@ -17,21 +17,15 @@ importers:
 
   .:
     dependencies:
-      '@imgent/adapter-qq':
-        specifier: workspace:*
-        version: link:packages/im-adapters/qq
-      '@imgent/adapter-wechat-ilink':
-        specifier: workspace:*
-        version: link:packages/im-adapters/wechat-ilink
-      '@imgent/contracts':
-        specifier: workspace:*
-        version: link:packages/contracts
-      '@imgent/driver-claude-code':
-        specifier: workspace:*
-        version: link:packages/agent-drivers/claude-code
-      '@imgent/driver-codex':
-        specifier: workspace:*
-        version: link:packages/agent-drivers/codex
+      '@anthropic-ai/claude-agent-sdk':
+        specifier: ^0.3.218
+        version: 0.3.218(@anthropic-ai/sdk@0.113.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(zod@4.4.3)
+      '@anthropic-ai/sdk':
+        specifier: ^0.113.0
+        version: 0.113.0(zod@4.4.3)
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@4.4.3)
       commander:
         specifier: ^15.0.0
         version: 15.0.0
@@ -44,6 +38,9 @@ importers:
       qrcode-terminal:
         specifier: ^0.12.0
         version: 0.12.0
+      ws:
+        specifier: ^8.21.1
+        version: 8.21.1
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -60,12 +57,30 @@ importers:
       '@eslint/js':
         specifier: 10.0.1
         version: 10.0.1(eslint@10.7.0(jiti@2.6.1))
+      '@imgent/adapter-qq':
+        specifier: workspace:*
+        version: link:packages/im-adapters/qq
+      '@imgent/adapter-wechat-ilink':
+        specifier: workspace:*
+        version: link:packages/im-adapters/wechat-ilink
+      '@imgent/contracts':
+        specifier: workspace:*
+        version: link:packages/contracts
+      '@imgent/driver-claude-code':
+        specifier: workspace:*
+        version: link:packages/agent-drivers/claude-code
+      '@imgent/driver-codex':
+        specifier: workspace:*
+        version: link:packages/agent-drivers/codex
       '@types/node':
         specifier: ^24.10.0
         version: 24.13.3
       '@types/qrcode-terminal':
         specifier: ^0.12.2
         version: 0.12.2
+      esbuild:
+        specifier: 0.28.1
+        version: 0.28.1
       eslint:
         specifier: 10.7.0
         version: 10.7.0(jiti@2.6.1)

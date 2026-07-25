@@ -12,7 +12,6 @@ Claude Code。
 ## 要求
 
 - Node.js 24.18.0 或更高版本
-- pnpm 11.16.0（仓库通过 `packageManager` 固定版本）
 - 已安装并登录的 `codex`；使用 Claude Code 时还需安装并登录 `claude`
 - QQ 官方机器人凭据，或可完成微信 iLink QR 授权的微信账号
 
@@ -40,18 +39,28 @@ src/
 插件市场或动态第三方适配器加载。
 
 仓库使用 pnpm workspace 管理依赖，使用 TypeScript project references 和
-`tsc -b` 直接输出 ESM JavaScript；当前没有使用 esbuild、Rollup、Webpack 等
-bundler。CLI 与 Service 共享 `dist/src/cli/main.js` 这一个可执行入口，不是两套
-构建产物。
+`tsc -b` 做类型检查与测试编译。发布时由 esbuild 把内部 `@imgent/*` workspace
+包合并到 `dist/src/cli/main.js`，第三方运行时依赖仍由 npm 安装。CLI 与 Service
+共享这一个可执行入口，不是两套构建产物。
+
+## 安装
+
+推荐把长期运行的 CLI 安装到全局：
+
+```bash
+npm install --global imgent
+imgent --version
+```
+
+临时查看帮助或试用时也可以不安装：
+
+```bash
+npx imgent --help
+```
 
 ## 开始
 
 ```bash
-corepack enable
-pnpm install --frozen-lockfile
-pnpm build
-pnpm link --global
-
 imgent init --workspace /absolute/path/to/workspace
 imgent profile add main \
   --driver codex \
@@ -61,9 +70,6 @@ imgent skills init project-conventions \
   --description "Apply this project's local conventions"
 imgent skills validate
 ```
-
-不希望创建全局链接时，可把下文的 `imgent` 替换为
-`pnpm imgent`。
 
 添加 QQ 时，从环境变量读取 AppSecret 并立即加密落盘：
 
@@ -165,11 +171,19 @@ Principal、BotInstance、全局默认值、`zh-CN` 的顺序。
 
 ## 开发与验证
 
+从源码开发时需要 pnpm 11.16.0：
+
 ```bash
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
+pnpm link --global
+
 pnpm lint
 pnpm format:check
 pnpm typecheck
 pnpm test
+pnpm verify:package
 ```
 
 安装依赖后 Husky 会启用本地 Git hooks：提交前只检查并格式化暂存文件，
@@ -186,3 +200,7 @@ Code 执行真实认证/协议探测，自动化测试仍使用 mock/contract �
 
 Docker 镜像不内置也不代管 Codex/Claude 的登录凭据；容器部署者需要在自己的
 派生镜像中安装对应 CLI，或把受控的可执行文件与认证目录按最小权限挂载进容器。
+
+## 许可证
+
+本项目采用 [Apache License 2.0](LICENSE)。
