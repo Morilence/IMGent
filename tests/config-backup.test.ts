@@ -11,6 +11,20 @@ import { CredentialStore } from "../src/security/credential-store.js";
 
 test("configuration is strict and only exposes implemented adapters and drivers", () => {
   const base = defaultConfig(process.cwd());
+  assert.equal(
+    configSchema.safeParse({
+      ...base,
+      agentProfiles: [
+        {
+          id: "missing-agent-user-home",
+          driver: "codex",
+          command: "codex",
+          workspace: process.cwd(),
+        },
+      ],
+    }).success,
+    false,
+  );
   const legacyProfile = configSchema.parse({
     ...base,
     agentProfiles: [
@@ -18,6 +32,7 @@ test("configuration is strict and only exposes implemented adapters and drivers"
         id: "legacy",
         driver: "codex",
         command: "codex",
+        agentUserHome: process.cwd(),
         workspace: process.cwd(),
       },
     ],
@@ -45,6 +60,7 @@ test("configuration is strict and only exposes implemented adapters and drivers"
           id: "main",
           driver: "codex",
           command: "codex",
+          agentUserHome: process.cwd(),
           workspace: process.cwd(),
           skills: ["*", "another-skill"],
         },
@@ -60,6 +76,7 @@ test("configuration is strict and only exposes implemented adapters and drivers"
           id: "main",
           driver: "other",
           command: "other",
+          agentUserHome: process.cwd(),
           workspace: process.cwd(),
         },
       ],

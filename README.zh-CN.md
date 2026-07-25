@@ -130,16 +130,16 @@ IMGent 明确**不提供**：
 
 以下示例使用 Unix 路径，请替换为适合当前系统的绝对路径：
 
-| 下文占位值                  | 含义                              |
-| --------------------------- | --------------------------------- |
-| `/srv/imgent/imgent.json`   | 选定的 IMGent 配置文件            |
-| `/srv/imgent/state`         | 根据该配置解析出的数据目录        |
-| `/srv/workspaces/main`      | 示例 Profile 唯一允许使用的工作区 |
-| `main`                      | AgentProfile ID                   |
-| `qq-main` / `wechat-main`   | BotInstance ID                    |
-| `principal_01`              | 已配对的 IMGent Principal ID      |
-| `conversation_qq_direct_01` | 已发现的 ConversationSpace ID     |
-| `schedule_01`               | IMGent 返回的计划 ID              |
+| 下文占位值                  | 含义                            |
+| --------------------------- | ------------------------------- |
+| `/srv/imgent/imgent.json`   | 选定的 IMGent 配置文件          |
+| `/srv/imgent/state`         | 根据该配置解析出的数据目录      |
+| `/srv/workspaces/main`      | 示例 Profile 的回退与允许工作区 |
+| `main`                      | AgentProfile ID                 |
+| `qq-main` / `wechat-main`   | BotInstance ID                  |
+| `principal_01`              | 已配对的 IMGent Principal ID    |
+| `conversation_qq_direct_01` | 已发现的 ConversationSpace ID   |
+| `schedule_01`               | IMGent 返回的计划 ID            |
 
 输出示例中的值（包括 ID、时间、计数和大小）是说明性数据，但字段名和外层响应结构与当前 CLI
 一致。示例不会展示 secret、token、本地控制 endpoint 或真实用户标识。
@@ -163,11 +163,11 @@ npx --package imgent@alpha imgent --help
 
 每个管理命令都会声明自己如何访问状态：
 
-| 模式      | 可运行条件                                         | 命令                                                                                          |
-| --------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `offline` | 同一数据目录的 `imgent start` 已停止               | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`                   |
-| `online`  | 常驻服务正在运行；始终走本地控制面                 | `pair`、`group authorize`、`conversation list`、所有 `schedule` 子命令                        |
-| `dual`    | 运行时访问服务，停服时取得短期离线 ownership lease | `doctor`、`status`、`identity list`、`group list`、`skills list`、`skills validate`、`backup` |
+| 模式      | 可运行条件                                         | 命令                                                                                             |
+| --------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `offline` | 同一数据目录的 `imgent start` 已停止               | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`                      |
+| `online`  | 常驻服务正在运行；始终走本地控制面                 | `pair`、`identity workspace set`、`group authorize`、`conversation list`、所有 `schedule` 子命令 |
+| `dual`    | 运行时访问服务，停服时取得短期离线 ownership lease | `doctor`、`status`、`identity list`、`group list`、`skills list`、`skills validate`、`backup`    |
 
 `imgent start` 本身是常驻进程。服务运行时执行 offline 命令会返回
 `RUNTIME_SERVICE_MUST_STOP`；服务停止时执行 online 命令会返回
@@ -185,6 +185,7 @@ imgent --config /srv/imgent/imgent.json init \
 
 imgent --config /srv/imgent/imgent.json profile add main \
   --driver codex \
+  --agent-user-home /home/codex-user \
   --workspace /srv/workspaces/main \
   --max-mode ask
 ```
@@ -254,11 +255,24 @@ imgent --config /srv/imgent/imgent.json start
 imgent --config /srv/imgent/imgent.json pair ABCD-EFGH
 ```
 
-配对码只使用一次，重复确认成功使用过的码是幂等的。完成配对后，用户才可以运行 Agent turn。
+不传 `--workspace` 时，工作目录默认使用配对路由所选 AgentProfile 的
+`agentUserHome`。该路径表示实际连接此 Profile 的 Codex 或 Claude Code 本地用户 Home，
+不会从 IMGent 服务用户或执行 `pair` 时的当前目录推断。也可以由本机部署者显式指定：
+
+```bash
+imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
+  --workspace /srv/workspaces/main
+```
+
+配对码只使用一次，重复确认成功使用过的码是幂等的。工作目录保存在 Principal 上；其私聊及由
+该 Principal 授权的 QQ 群使用同一工作目录。完成配对后，用户才可以运行 Agent turn。
+如果 IMGent 已发现尚未授权的群，`pair` 结果会在 `nextSteps` 中直接给出每个群的授权命令。
 
 #### 6. 授权 QQ 群
 
-先在群里发送一条触发消息，让 IMGent 发现该群，然后查看本地 ID，并使用已配对 Principal 授权：
+先在群里发送一条触发消息，让 IMGent 发现该群。未授权群中的机器人回复会明确引导部署者私聊
+获取配对码，并在配对成功结果中给出当前群的授权命令。也可以手动查看本地 ID，并使用已配对
+Principal 授权：
 
 ```bash
 imgent --config /srv/imgent/imgent.json identity list
@@ -280,9 +294,12 @@ imgent --config /srv/imgent/imgent.json group authorize conversation_qq_group_01
 Agent：工作树干净；当前分支是 main，并且与 origin/main 一致。
 ```
 
-回复由选定的本地 Agent 在已配置工作区中生成。如果 Agent 需要高风险 Host Tool 或补充信息，
+回复由选定的本地 Agent 在该 Principal 工作区中生成。如果 Agent 需要高风险 Host Tool 或补充信息，
 IMGent 会把 request ID 发回同一会话；按下文说明使用 `/imgent allow`、`/imgent deny` 或
 `/imgent answer` 回答。发送 `/imgent cancel` 或“取消”可以取消该会话运行中和排队中的工作。
+
+配对、群授权、排队、审批、询问、错误和命令回执等 IMGent 控制消息使用
+`[IMGent: 状态]` 首行；微信 iLink 的未配对提示不会出现群聊说明。Agent 的正式回答不加前缀。
 
 #### 8. 可选：创建定时任务
 
@@ -403,8 +420,8 @@ imgent --config /srv/imgent/imgent.json init \
 }
 ```
 
-生成的配置不包含 BotInstance 或 AgentProfile。相对 `dataDir` 和 workspace 条目都从配置文件
-所在目录解析。`--force` 无法绕过服务运行检查。
+生成的配置不包含 BotInstance 或 AgentProfile。相对 `dataDir`、`agentUserHome` 和
+workspace 条目都从配置文件所在目录解析。`--force` 无法绕过服务运行检查。
 
 #### `profile add`：添加 Codex 或 Claude Code Profile
 
@@ -414,6 +431,7 @@ imgent --config /srv/imgent/imgent.json init \
 ```bash
 imgent --config /srv/imgent/imgent.json profile add main \
   --driver codex \
+  --agent-user-home /home/codex-user \
   --workspace /srv/workspaces/main \
   --max-mode ask
 ```
@@ -425,6 +443,7 @@ imgent --config /srv/imgent/imgent.json profile add main \
     "id": "main",
     "driver": "codex",
     "command": "codex",
+    "agentUserHome": "../../home/codex-user",
     "workspace": "../workspaces/main",
     "skills": ["*"],
     "permissions": {
@@ -440,6 +459,8 @@ imgent --config /srv/imgent/imgent.json profile add main \
 可选参数：
 
 - `--command <path>` 覆盖默认的 `codex` 或 `claude` 可执行文件。
+- `--agent-user-home <path>` 记录连接此 Profile 的 Codex 或 Claude Code 本地用户 Home。
+  默认取执行 `profile add` 的用户 Home；Agent CLI 由其他用户运行时必须显式指定。
 - `--max-mode deny|ask|allow` 设置 Host Tool 权限上限，默认是 `ask`。
 - `--no-memory` 为该 Profile 禁用 IMGent 长期记忆，并隐藏内置记忆 skill。
 - 新 Profile 默认使用 `skills: ["*"]`。需要指定 skill 时，在服务停止状态编辑
@@ -735,9 +756,12 @@ imgent --config /srv/imgent/imgent.json start
 
 **模式：** online。
 **必需输入：** 返回给未配对私聊用户的当前一次性码。
+**可选输入：** `--workspace <path>`；省略时使用配对路由所选 AgentProfile 的
+`agentUserHome`。
 
 ```bash
-imgent --config /srv/imgent/imgent.json pair ABCD-EFGH
+imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
+  --workspace /srv/workspaces/main
 ```
 
 ```json
@@ -755,12 +779,23 @@ imgent --config /srv/imgent/imgent.json pair ABCD-EFGH
   "configDrift": false,
   "result": "paired",
   "platformIdentityId": "platform_identity_01",
-  "principalId": "principal_01"
+  "principalId": "principal_01",
+  "workspace": "/srv/workspaces/main",
+  "nextSteps": [
+    {
+      "action": "authorize-group",
+      "conversationSpaceId": "conversation_qq_group_01",
+      "botInstanceId": "qq-main",
+      "command": "imgent group authorize conversation_qq_group_01 --principal principal_01"
+    }
+  ]
 }
 ```
 
 `appVersion` 跟随已安装包版本。成功消费过的码再次提交时，只要配对仍有效，就会返回同一个
-Principal。
+Principal 及其已经保存的工作区。显式路径必须存在、服务用户可访问，并位于对应
+AgentProfile 的 `agentUserHome` 或 `allowedWorkspaceRoots` 中。`nextSteps` 只列出同一
+AgentProfile 下已发现但尚未授权的群；没有待授权群时返回空数组。
 
 #### `identity list`：列出平台身份与 Principal
 
@@ -787,13 +822,27 @@ imgent --config /srv/imgent/imgent.json identity list
       "platformUserId": "qq_user_01",
       "principalId": "principal_01",
       "displayName": "示例用户",
-      "paired": 1
+      "paired": 1,
+      "workspace": "/srv/workspaces/main"
     }
   ]
 }
 ```
 
 offline 输出省略 `service` 和 `configDrift`，但保留 `mode` 和已持久化身份。
+
+#### `identity workspace set`：修改 Principal 工作目录
+
+**模式：** online。
+**必需输入：** 已配对 Principal ID 和允许的现有目录。
+
+```bash
+imgent --config /srv/imgent/imgent.json identity workspace set \
+  principal_01 /srv/workspaces/another-project
+```
+
+如果该 Principal 的私聊或其授权 QQ 群仍有 active/waiting approval 任务，命令会拒绝修改。
+成功后清除相关 Agent session；后续 turn 在新工作目录创建或恢复会话。
 
 #### `group list`：列出已发现的 QQ 群
 
@@ -1254,7 +1303,7 @@ ready 时 `/readyz` 返回缓存的本地化 readiness 对象和 HTTP 200，degr
 - 配置和用户 skills 是启动快照。修改前停止服务，完成校验后重新启动。
 - `/healthz` 表示进程存活；`/readyz` 反映缓存 readiness，并支持
   `Accept-Language: zh-CN|en-US`；两者都不会执行深度探测。
-- 升级前先备份。当前 SQLite schema 只会在空数据目录创建；不兼容旧 schema 会被原样拒绝。
+- 升级前先备份。SQLite schema v6 只会在空数据目录创建；不兼容 schema 会被原样拒绝。
 - QQ 全量采集默认保留未触发的群原文七天。策展后的群共享记忆遵循记忆纠正和删除规则。
 
 ## 3. 开发与维护 IMGent

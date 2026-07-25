@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { conversationKey, IMGentError } from "@imgent/contracts";
@@ -177,7 +178,11 @@ test("pairing and explicit cross-platform binding merge principals without displ
     assert.notEqual(first.principalId, second.principalId);
     const identities = new IdentityService(fixture.store);
     identities.setLocale(second.principalId, "en-US");
-    identities.confirmPairing(identities.createPairingCode(first.platformIdentityId));
+    identities.confirmPairing(
+      identities.createPairingCode(first.platformIdentityId),
+      fixture.directory,
+    );
+    assert.equal(identities.workspace(first.principalId), fixture.directory);
     const code = identities.createBindingCode(first.platformIdentityId);
     const result = identities.consumeBindingCode(code, second.platformIdentityId);
     assert.equal(result.principalId, first.principalId);
@@ -201,6 +206,63 @@ test("pairing and explicit cross-platform binding merge principals without displ
       unbound.principalId,
     );
     assert.equal(identities.isPaired(second.platformIdentityId), true);
+    assert.equal(identities.workspace(unbound.principalId), fixture.directory);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("Principal workspace controls direct and authorized-group execution and resets sessions", async () => {
+  const fixture = await testStore();
+  try {
+    const directKey = "main:qq:qq-main:direct:owner";
+    const direct = fixture.store.ingest(
+      directMessage({
+        messageId: "workspace-direct",
+        dedupeKey: "workspace-direct",
+        conversation: { kind: "direct", platformConversationId: "owner" },
+        actor: { platformUserId: "owner" },
+      }),
+      "main",
+      directKey,
+    );
+    const groupKey = "main:qq:qq-main:group:workspace-group";
+    const group = fixture.store.ingest(
+      directMessage({
+        messageId: "workspace-group",
+        dedupeKey: "workspace-group",
+        conversation: { kind: "group", platformConversationId: "workspace-group" },
+        actor: { platformUserId: "member", role: "member" },
+      }),
+      "main",
+      groupKey,
+    );
+    const identities = new IdentityService(fixture.store);
+    const pairing = identities.confirmPairing(
+      identities.createPairingCode(direct.platformIdentityId),
+      fixture.directory,
+    );
+    assert.equal(pairing.workspace, fixture.directory);
+    identities.authorizeGroup(group.conversationSpaceId, direct.principalId);
+    assert.equal(
+      identities.workspace(direct.principalId, direct.conversationSpaceId),
+      fixture.directory,
+    );
+    assert.equal(
+      identities.workspace(group.principalId, group.conversationSpaceId),
+      fixture.directory,
+    );
+
+    fixture.store.saveSession(directKey, "codex", "direct-session", fixture.directory);
+    fixture.store.saveSession(groupKey, "codex", "group-session", fixture.directory);
+    const nextWorkspace = join(fixture.directory, "next-workspace");
+    await mkdir(nextWorkspace);
+    const changed = identities.setWorkspace(direct.principalId, nextWorkspace);
+    assert.equal(changed.workspace, nextWorkspace);
+    assert.equal(changed.clearedSessions, 2);
+    assert.equal(fixture.store.session(directKey), undefined);
+    assert.equal(fixture.store.session(groupKey), undefined);
+    assert.equal(identities.workspace(group.principalId, group.conversationSpaceId), nextWorkspace);
   } finally {
     await fixture.cleanup();
   }
@@ -868,6 +930,7 @@ function curatorProfile(): AgentProfile {
     id: "main",
     driver: "codex",
     command: "codex",
+    agentUserHome: process.cwd(),
     workspace: process.cwd(),
     skills: ["*"],
     permissions: { maxMode: "ask" },

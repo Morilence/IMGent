@@ -11,6 +11,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, relative, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
@@ -104,6 +105,7 @@ profile
       .makeOptionMandatory(),
   )
   .option("--command <path>", "CLI 命令；默认与驱动同名")
+  .option("--agent-user-home <path>", "该 Agent CLI 本地用户的 Home", homedir())
   .option("--workspace <path>", "固定工作区", process.cwd())
   .addOption(
     new Option("--max-mode <mode>", "权限上限").choices(["deny", "ask", "allow"]).default("ask"),
@@ -115,6 +117,7 @@ profile
       options: {
         driver: "codex" | "claude-code";
         command?: string;
+        agentUserHome: string;
         workspace: string;
         maxMode: "deny" | "ask" | "allow";
         memory: boolean;
@@ -126,6 +129,7 @@ profile
         id,
         driver: options.driver,
         command: options.command ?? (options.driver === "codex" ? "codex" : "claude"),
+        agentUserHome: relative(dirname(configPath), resolve(options.agentUserHome)) || ".",
         workspace: relative(dirname(configPath), resolve(options.workspace)) || ".",
         skills: ["*"],
         permissions: { maxMode: options.maxMode },
@@ -365,7 +369,8 @@ bot
 program
   .command("pair <code>")
   .description("确认私聊一次性配对码")
-  .action(async (code: string) => {
+  .option("--workspace <path>", "为该 Principal 指定 Agent 工作目录")
+  .action(async (code: string, options: { workspace?: string }) => {
     const discovery = await requireRunning("pair");
     print({
       mode: "online",
@@ -373,6 +378,7 @@ program
       configDrift: discovery.configDrift,
       ...(await discovery.client.post<Record<string, unknown>>(
         `/v3/pairings/${encodeURIComponent(code)}/confirm`,
+        options.workspace ? { workspace: resolve(options.workspace) } : {},
       )),
     });
   });
@@ -395,6 +401,23 @@ identity
     print({
       mode: "offline",
       identities: await withOfflineAdmin((offline) => offline.identities()),
+    });
+  });
+
+const identityWorkspace = identity.command("workspace").description("管理 Principal 工作目录");
+identityWorkspace
+  .command("set <principal-id> <path>")
+  .description("修改已配对 Principal 的 Agent 工作目录并重置关联会话")
+  .action(async (principalId: string, path: string) => {
+    const discovery = await requireRunning("identity workspace set");
+    print({
+      mode: "online",
+      service: discovery.meta,
+      configDrift: discovery.configDrift,
+      ...(await discovery.client.post<Record<string, unknown>>(
+        `/v3/identities/${encodeURIComponent(principalId)}/workspace`,
+        { workspace: resolve(path) },
+      )),
     });
   });
 
@@ -815,6 +838,7 @@ async function requireRunning(
   command: Extract<
     CommandName,
     | "pair"
+    | "identity workspace set"
     | "group authorize"
     | "conversation list"
     | "schedule add"

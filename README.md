@@ -144,16 +144,16 @@ see [CLI and resident service architecture](docs/cli-service-architecture.md).
 
 The examples below use Unix paths. Replace them with absolute paths appropriate for your system:
 
-| Placeholder used below      | Meaning                                             |
-| --------------------------- | --------------------------------------------------- |
-| `/srv/imgent/imgent.json`   | The selected IMGent configuration file              |
-| `/srv/imgent/state`         | The data directory resolved from that configuration |
-| `/srv/workspaces/main`      | The only workspace this example profile may use     |
-| `main`                      | AgentProfile ID                                     |
-| `qq-main` / `wechat-main`   | BotInstance IDs                                     |
-| `principal_01`              | A paired IMGent Principal ID                        |
-| `conversation_qq_direct_01` | A discovered ConversationSpace ID                   |
-| `schedule_01`               | A schedule ID returned by IMGent                    |
+| Placeholder used below      | Meaning                                              |
+| --------------------------- | ---------------------------------------------------- |
+| `/srv/imgent/imgent.json`   | The selected IMGent configuration file               |
+| `/srv/imgent/state`         | The data directory resolved from that configuration  |
+| `/srv/workspaces/main`      | The example profile's fallback and allowed workspace |
+| `main`                      | AgentProfile ID                                      |
+| `qq-main` / `wechat-main`   | BotInstance IDs                                      |
+| `principal_01`              | A paired IMGent Principal ID                         |
+| `conversation_qq_direct_01` | A discovered ConversationSpace ID                    |
+| `schedule_01`               | A schedule ID returned by IMGent                     |
 
 Values in output samples—including IDs, timestamps, counts, and sizes—are illustrative, but the
 field names and outer response shapes match the current CLI. Secrets, tokens, local control
@@ -178,11 +178,11 @@ npx --package imgent@alpha imgent --help
 
 Management commands declare how they may access state:
 
-| Mode      | When it works                                                                   | Commands                                                                                      |
-| --------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `offline` | Only while `imgent start` for the same data directory is stopped                | `init`, `profile add`, `bot add`, `bot authorize`, `skills init`, `restore`                   |
-| `online`  | Only while the resident service is running; always uses the local control plane | `pair`, `group authorize`, `conversation list`, every `schedule` subcommand                   |
-| `dual`    | Uses the service when running, otherwise takes a short offline ownership lease  | `doctor`, `status`, `identity list`, `group list`, `skills list`, `skills validate`, `backup` |
+| Mode      | When it works                                                                   | Commands                                                                                              |
+| --------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `offline` | Only while `imgent start` for the same data directory is stopped                | `init`, `profile add`, `bot add`, `bot authorize`, `skills init`, `restore`                           |
+| `online`  | Only while the resident service is running; always uses the local control plane | `pair`, `identity workspace set`, `group authorize`, `conversation list`, every `schedule` subcommand |
+| `dual`    | Uses the service when running, otherwise takes a short offline ownership lease  | `doctor`, `status`, `identity list`, `group list`, `skills list`, `skills validate`, `backup`         |
 
 `imgent start` is the resident process itself. An offline command returns
 `RUNTIME_SERVICE_MUST_STOP` if the service is active. An online command returns
@@ -200,6 +200,7 @@ imgent --config /srv/imgent/imgent.json init \
 
 imgent --config /srv/imgent/imgent.json profile add main \
   --driver codex \
+  --agent-user-home /home/codex-user \
   --workspace /srv/workspaces/main \
   --max-mode ask
 ```
@@ -270,12 +271,28 @@ the code from another terminal:
 imgent --config /srv/imgent/imgent.json pair ABCD-EFGH
 ```
 
-The code is single-use, and confirming it is idempotent. Once paired, the user can run Agent turns.
+Without `--workspace`, the working directory defaults to `agentUserHome` on the AgentProfile
+selected by the pairing route. That path is the home of the local account connected to Codex or
+Claude Code; it is not inferred from the IMGent service account or the shell directory that invokes
+`pair`. The local operator can also choose it explicitly:
+
+```bash
+imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
+  --workspace /srv/workspaces/main
+```
+
+The code is single-use, and confirming it is idempotent. The workspace belongs to the Principal;
+its direct conversations and QQ groups authorized by that Principal use the same workspace. Once
+paired, the user can run Agent turns.
+If IMGent has discovered unauthorized groups, the `pair` result includes the exact authorization
+command for each group in `nextSteps`.
 
 #### 6. Authorize a QQ group
 
-Send one triggering message in the group so IMGent can discover it, then inspect local IDs and
-authorize the group with a paired Principal:
+Send one triggering message in the group so IMGent can discover it. The reply in an unauthorized
+group directs the deployer to obtain a pairing code by direct message, and the successful `pair`
+result includes the authorization command for that group. You can also inspect local IDs and
+authorize the group manually with a paired Principal:
 
 ```bash
 imgent --config /srv/imgent/imgent.json identity list
@@ -297,10 +314,14 @@ User: Check the current repository status and summarize anything that needs atte
 Agent: The working tree is clean. The current branch is main and it matches origin/main.
 ```
 
-The response is produced by the selected local Agent in the configured workspace. If the Agent
+The response is produced by the selected local Agent in that Principal's workspace. If the Agent
 needs a risky Host Tool or more information, IMGent sends a request ID back to the same
 conversation; answer it with `/imgent allow`, `/imgent deny`, or `/imgent answer` as documented
 below. Send `/imgent cancel` or `取消` to cancel active and queued work for that conversation.
+
+IMGent control messages—pairing, group authorization, queueing, approvals, questions, errors, and
+command receipts—start with `[IMGent: Status]`. WeChat iLink pairing guidance never mentions
+groups. Normal Agent answers remain unprefixed.
 
 #### 8. Create an optional scheduled task
 
@@ -424,9 +445,9 @@ imgent --config /srv/imgent/imgent.json init \
 }
 ```
 
-The generated config contains no BotInstance or AgentProfile. Relative `dataDir` and workspace
-entries are resolved from the config file's directory. `--force` does not bypass the running
-service check.
+The generated config contains no BotInstance or AgentProfile. Relative `dataDir`, `agentUserHome`,
+and workspace entries are resolved from the config file's directory. `--force` does not bypass the
+running service check.
 
 #### `profile add` — add a Codex or Claude Code profile
 
@@ -436,6 +457,7 @@ service check.
 ```bash
 imgent --config /srv/imgent/imgent.json profile add main \
   --driver codex \
+  --agent-user-home /home/codex-user \
   --workspace /srv/workspaces/main \
   --max-mode ask
 ```
@@ -447,6 +469,7 @@ imgent --config /srv/imgent/imgent.json profile add main \
     "id": "main",
     "driver": "codex",
     "command": "codex",
+    "agentUserHome": "../../home/codex-user",
     "workspace": "../workspaces/main",
     "skills": ["*"],
     "permissions": {
@@ -462,6 +485,9 @@ imgent --config /srv/imgent/imgent.json profile add main \
 Options:
 
 - `--command <path>` overrides the default `codex` or `claude` executable.
+- `--agent-user-home <path>` records the home of the local user connected to this profile's Codex
+  or Claude Code CLI. It defaults to the user running `profile add`; specify it when the Agent CLI
+  runs as another user.
 - `--max-mode deny|ask|allow` sets the Host Tool permission ceiling; default is `ask`.
 - `--no-memory` disables IMGent long-term memory and hides the built-in memory skill for this
   profile.
@@ -762,9 +788,12 @@ leave the process in `degraded` so that `status` and `doctor` remain available. 
 
 **Mode:** online.
 **Required input:** the current one-time code returned to an unpaired direct-message user.
+**Optional input:** `--workspace <path>`; omission uses the routed AgentProfile's
+`agentUserHome`.
 
 ```bash
-imgent --config /srv/imgent/imgent.json pair ABCD-EFGH
+imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
+  --workspace /srv/workspaces/main
 ```
 
 ```json
@@ -782,12 +811,24 @@ imgent --config /srv/imgent/imgent.json pair ABCD-EFGH
   "configDrift": false,
   "result": "paired",
   "platformIdentityId": "platform_identity_01",
-  "principalId": "principal_01"
+  "principalId": "principal_01",
+  "workspace": "/srv/workspaces/main",
+  "nextSteps": [
+    {
+      "action": "authorize-group",
+      "conversationSpaceId": "conversation_qq_group_01",
+      "botInstanceId": "qq-main",
+      "command": "imgent group authorize conversation_qq_group_01 --principal principal_01"
+    }
+  ]
 }
 ```
 
 `appVersion` follows the installed package. Repeating a successfully consumed code returns the same
-Principal while the pairing remains valid.
+Principal and its persisted workspace while the pairing remains valid. An explicit path must exist,
+be accessible to the service account, and be inside the routed AgentProfile's `agentUserHome` or
+`allowedWorkspaceRoots`. `nextSteps` lists only discovered, unauthorized groups for the same
+AgentProfile and is empty when no group needs authorization.
 
 #### `identity list` — list platform identities and Principals
 
@@ -814,13 +855,28 @@ imgent --config /srv/imgent/imgent.json identity list
       "platformUserId": "qq_user_01",
       "principalId": "principal_01",
       "displayName": "Example user",
-      "paired": 1
+      "paired": 1,
+      "workspace": "/srv/workspaces/main"
     }
   ]
 }
 ```
 
 Offline output omits `service` and `configDrift` but retains `mode` and persisted identities.
+
+#### `identity workspace set` — change a Principal workspace
+
+**Mode:** online.
+**Required input:** a paired Principal ID and an allowed existing directory.
+
+```bash
+imgent --config /srv/imgent/imgent.json identity workspace set \
+  principal_01 /srv/workspaces/another-project
+```
+
+The command rejects a change while that Principal's direct conversations or authorized QQ groups
+have active/waiting-approval work. On success, their Agent sessions are cleared so later turns
+start or resume in the new workspace.
 
 #### `group list` — list discovered QQ groups
 
@@ -1294,8 +1350,8 @@ degraded.
   validate, then start it again.
 - `/healthz` means the process is alive. `/readyz` reflects cached readiness and supports
   `Accept-Language: zh-CN|en-US`; neither endpoint performs a deep probe.
-- Back up before upgrading. The current SQLite schema is created only in an empty data directory;
-  incompatible legacy schemas are rejected without mutation.
+- Back up before upgrading. SQLite schema v6 is created only in an empty data directory;
+  incompatible schemas are rejected without mutation.
 - QQ full ingestion retains untriggered raw group messages for seven days by default. Curated
   group-shared memory follows memory correction/deletion rules instead.
 

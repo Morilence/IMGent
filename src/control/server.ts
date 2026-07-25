@@ -138,14 +138,38 @@ export class ControlServer {
         data = await admin.createControlledBackup();
       } else {
         const pairing = url.pathname.match(/^\/v3\/pairings\/([^/]+)\/confirm$/u);
+        const identityWorkspace = url.pathname.match(/^\/v3\/identities\/([^/]+)\/workspace$/u);
         const group = url.pathname.match(/^\/v3\/groups\/([^/]+)\/authorize$/u);
         const scheduleHistory = url.pathname.match(/^\/v3\/schedules\/([^/]+)\/history$/u);
         const scheduleAction = url.pathname.match(
           /^\/v3\/schedules\/([^/]+)\/(update|pause|resume|remove|run|reset-context)$/u,
         );
         if (method === "POST" && pairing) {
-          assertEmptyObject(await readBody(request));
-          data = admin.confirmPairing(decodePathSegment(pairing[1]!));
+          const body = await readBody(request);
+          if (
+            Object.keys(body).some((key) => key !== "workspace") ||
+            (body.workspace !== undefined &&
+              (typeof body.workspace !== "string" || body.workspace.length === 0))
+          ) {
+            throw new IMGentError("CLI_USAGE_INVALID");
+          }
+          data = await admin.confirmPairing(
+            decodePathSegment(pairing[1]!),
+            typeof body.workspace === "string" ? body.workspace : undefined,
+          );
+        } else if (method === "POST" && identityWorkspace) {
+          const body = await readBody(request);
+          if (
+            Object.keys(body).length !== 1 ||
+            typeof body.workspace !== "string" ||
+            body.workspace.length === 0
+          ) {
+            throw new IMGentError("CLI_USAGE_INVALID");
+          }
+          data = await admin.setIdentityWorkspace(
+            decodePathSegment(identityWorkspace[1]!),
+            body.workspace,
+          );
         } else if (method === "POST" && group) {
           const body = await readBody(request);
           if (
@@ -302,6 +326,9 @@ function httpStatus(kind: ReturnType<typeof normalizeError>["descriptor"]["kind"
 
 function routeLabel(path: string): string {
   if (/^\/v3\/pairings\/[^/]+\/confirm$/u.test(path)) return "/v3/pairings/:code/confirm";
+  if (/^\/v3\/identities\/[^/]+\/workspace$/u.test(path)) {
+    return "/v3/identities/:id/workspace";
+  }
   if (/^\/v3\/groups\/[^/]+\/authorize$/u.test(path)) return "/v3/groups/:id/authorize";
   if (/^\/v3\/schedules\/[^/]+\/history$/u.test(path)) return "/v3/schedules/:id/history";
   if (/^\/v3\/schedules\/[^/]+\/[^/]+$/u.test(path)) return "/v3/schedules/:id/:action";

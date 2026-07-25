@@ -123,7 +123,6 @@ export class CodexDriver implements AgentDriver {
   readonly id = "codex" as const;
   private rpc: JsonRpcProcess | undefined;
   private command: string | undefined;
-  private workspace: string | undefined;
   private activeByThread = new Map<string, ActiveTurn>();
   private activeByLocalTurn = new Map<string, ActiveTurn>();
   private pending = new Map<string, PendingRequest>();
@@ -387,12 +386,11 @@ export class CodexDriver implements AgentDriver {
   }
 
   private async ensureReady(profile: AgentProfile): Promise<void> {
-    if (this.rpc && (this.command !== profile.command || this.workspace !== profile.workspace)) {
+    if (this.rpc && this.command !== profile.command) {
       throw new IMGentError("AGENT_SESSION_MISMATCH");
     }
     if (this.rpc) return;
     this.command = profile.command;
-    this.workspace = profile.workspace;
     this.rpc = new JsonRpcProcess(
       profile.command,
       profile.workspace,

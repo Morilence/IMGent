@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,6 +15,7 @@ const profile = (
   id: `${driver}-test`,
   driver,
   command,
+  agentUserHome: workspace,
   workspace,
   skills: ["*"],
   permissions: { maxMode: "ask" },
@@ -34,6 +35,8 @@ test("Codex driver speaks app-server JSON-RPC and serves dynamic host tools", as
   const directory = await mkdtemp(join(tmpdir(), "imgent-codex-"));
   const executable = join(directory, "fake-codex.mjs");
   const imagePath = join(directory, "input.png");
+  const alternateWorkspace = join(directory, "alternate-workspace");
+  await mkdir(alternateWorkspace);
   await writeFile(imagePath, Buffer.from([137, 80, 78, 71]));
   await writeFile(
     executable,
@@ -132,7 +135,7 @@ lines.on("line", (line) => {
     assert.ok(events.some((event) => event.type === "completed" && event.result === "success"));
     const resumed: AgentEvent[] = [];
     for await (const event of driver.runTurn({
-      ...turn(profile("codex", executable, directory)),
+      ...turn(profile("codex", executable, alternateWorkspace)),
       turnId: "turn-2",
       sessionId: "thread-1",
       developerInstructions: "RESUMED CATALOG",

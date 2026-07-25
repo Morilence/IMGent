@@ -7,6 +7,7 @@ const profile = {
   id: "codex-real-smoke",
   driver: "codex",
   command,
+  agentUserHome: workspace,
   workspace,
   skills: ["*"],
   permissions: { maxMode: "deny" },

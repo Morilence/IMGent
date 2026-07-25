@@ -18,6 +18,26 @@ function shortCode(): string {
 export class IdentityService {
   constructor(private readonly store: IMGentStore) {}
 
+  workspace(principalId: string, conversationSpaceId?: string): string | undefined {
+    if (conversationSpaceId) {
+      const groupWorkspace = this.store.get<{ workspace: string | null }>(
+        `SELECT p.workspace
+         FROM conversation_spaces cs
+         JOIN group_authorizations ga ON ga.conversation_space_id = cs.id
+         JOIN principals p ON p.id = ga.authorized_by_principal_id
+         WHERE cs.id = ? AND cs.kind = 'group'`,
+        conversationSpaceId,
+      );
+      if (groupWorkspace) return groupWorkspace.workspace ?? undefined;
+    }
+    return (
+      this.store.get<{ workspace: string | null }>(
+        "SELECT workspace FROM principals WHERE id = ?",
+        principalId,
+      )?.workspace ?? undefined
+    );
+  }
+
   locale(principalId: string): SupportedLocale | undefined {
     return (
       this.store.get<{ locale: SupportedLocale | null }>(
@@ -43,6 +63,27 @@ export class IdentityService {
     );
   }
 
+  pairingAgentProfileId(code: string): string {
+    const record = this.store.get<{ agent_profile_id: string }>(
+      `SELECT pi.agent_profile_id
+       FROM pairing_codes pc
+       JOIN platform_identities pi ON pi.id = pc.platform_identity_id
+       WHERE pc.code_hash = ?`,
+      hashCode(code.toUpperCase()),
+    );
+    if (!record) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+    return record.agent_profile_id;
+  }
+
+  agentProfileId(principalId: string): string {
+    const principal = this.store.get<{ agent_profile_id: string }>(
+      "SELECT agent_profile_id FROM principals WHERE id = ?",
+      principalId,
+    );
+    if (!principal) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+    return principal.agent_profile_id;
+  }
+
   createPairingCode(platformIdentityId: string, ttlMs = 10 * 60_000): string {
     const identity = this.store.get<{ id: string }>(
       "SELECT id FROM platform_identities WHERE id = ?",
@@ -60,9 +101,14 @@ export class IdentityService {
     return code;
   }
 
-  confirmPairing(code: string): {
+  confirmPairing(
+    code: string,
+    workspace?: string,
+    rejectWorkspaceMismatch = false,
+  ): {
     platformIdentityId: string;
     principalId: string;
+    workspace?: string;
   } {
     return this.store.transaction(() => {
       const record = this.store.get<{
@@ -78,16 +124,29 @@ export class IdentityService {
         principal_id: string;
         agent_profile_id: string;
         paired: number;
+        workspace: string | null;
       }>(
-        "SELECT principal_id, agent_profile_id, paired FROM platform_identities WHERE id = ?",
+        `SELECT pi.principal_id, pi.agent_profile_id, pi.paired, p.workspace
+         FROM platform_identities pi
+         JOIN principals p ON p.id = pi.principal_id
+         WHERE pi.id = ?`,
         record.platform_identity_id,
       );
       if (!identity) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
       if (record.used_at) {
         if (identity.paired !== 1) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+        if (
+          rejectWorkspaceMismatch &&
+          workspace &&
+          identity.workspace &&
+          workspace !== identity.workspace
+        ) {
+          throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+        }
         return {
           platformIdentityId: record.platform_identity_id,
           principalId: identity.principal_id,
+          ...(identity.workspace ? { workspace: identity.workspace } : {}),
         };
       }
       if (record.expires_at <= now()) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
@@ -103,12 +162,80 @@ export class IdentityService {
         timestamp,
         record.platform_identity_id,
       );
+      if (workspace) {
+        this.store.run(
+          "UPDATE principals SET workspace = ? WHERE id = ?",
+          workspace,
+          identity.principal_id,
+        );
+      }
       this.audit("identity.paired", identity.agent_profile_id, identity.principal_id, undefined, {
         platformIdentityId: record.platform_identity_id,
+        ...(workspace ? { workspace } : {}),
       });
       return {
         platformIdentityId: record.platform_identity_id,
         principalId: identity.principal_id,
+        ...(workspace ? { workspace } : {}),
+      };
+    });
+  }
+
+  setWorkspace(
+    principalId: string,
+    workspace: string,
+  ): { previousWorkspace?: string; workspace: string; clearedSessions: number } {
+    return this.store.transaction(() => {
+      const principal = this.store.get<{
+        agent_profile_id: string;
+        workspace: string | null;
+        paired: number;
+      }>(
+        `SELECT p.agent_profile_id, p.workspace,
+                CASE WHEN EXISTS (
+                  SELECT 1 FROM platform_identities pi
+                  WHERE pi.principal_id = p.id AND pi.paired = 1
+                ) THEN 1 ELSE 0 END AS paired
+         FROM principals p WHERE p.id = ?`,
+        principalId,
+      );
+      if (!principal || principal.paired !== 1) {
+        throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+      }
+      if (principal.workspace === workspace) {
+        return {
+          ...(principal.workspace ? { previousWorkspace: principal.workspace } : {}),
+          workspace,
+          clearedSessions: 0,
+        };
+      }
+      const active =
+        this.store.get<{ count: number }>(
+          `SELECT count(*) AS count
+           FROM tasks t
+           JOIN conversation_spaces cs ON cs.id = t.conversation_space_id
+           LEFT JOIN group_authorizations ga ON ga.conversation_space_id = cs.id
+           WHERE t.status IN ('active', 'waiting_approval')
+             AND (
+               (cs.kind = 'direct' AND t.principal_id = ?)
+               OR (cs.kind = 'group' AND ga.authorized_by_principal_id = ?)
+             )`,
+          principalId,
+          principalId,
+        )?.count ?? 0;
+      if (active > 0) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+
+      this.store.run("UPDATE principals SET workspace = ? WHERE id = ?", workspace, principalId);
+      const clearedSessions = this.clearSessionsForPrincipal(principalId);
+      this.audit("identity.workspace-changed", principal.agent_profile_id, principalId, undefined, {
+        previousWorkspace: principal.workspace,
+        workspace,
+        clearedSessions,
+      });
+      return {
+        ...(principal.workspace ? { previousWorkspace: principal.workspace } : {}),
+        workspace,
+        clearedSessions,
       };
     });
   }
@@ -239,12 +366,15 @@ export class IdentityService {
 
       const principalId = `principal_${randomUUID()}`;
       const locale = this.locale(identity.principal_id);
+      const workspace = this.workspace(identity.principal_id);
       const timestamp = now();
       this.store.run(
-        "INSERT INTO principals(id, agent_profile_id, locale, created_at) VALUES (?, ?, ?, ?)",
+        `INSERT INTO principals(id, agent_profile_id, locale, workspace, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
         principalId,
         identity.agent_profile_id,
         locale ?? null,
+        workspace ?? null,
         timestamp,
       );
       this.store.run(
@@ -293,6 +423,7 @@ export class IdentityService {
         toPrincipalId,
       );
     }
+    this.clearSessionsForPrincipal(fromPrincipalId);
     const activeFacts = this.store.all<{
       id: string;
       agent_profile_id: string;
@@ -396,6 +527,27 @@ export class IdentityService {
     this.store.run("DELETE FROM principals WHERE id = ?", fromPrincipalId);
   }
 
+  private clearSessionsForPrincipal(principalId: string): number {
+    return Number(
+      this.store.database
+        .prepare(
+          `DELETE FROM agent_sessions
+           WHERE conversation_key IN (
+             SELECT DISTINCT t.session_key
+             FROM tasks t
+             JOIN conversation_spaces cs ON cs.id = t.conversation_space_id
+             LEFT JOIN group_authorizations ga ON ga.conversation_space_id = cs.id
+             WHERE t.session_key IS NOT NULL
+               AND (
+                 (cs.kind = 'direct' AND t.principal_id = ?)
+                 OR (cs.kind = 'group' AND ga.authorized_by_principal_id = ?)
+               )
+           )`,
+        )
+        .run(principalId, principalId).changes,
+    );
+  }
+
   setPlatformFullCapability(conversationSpaceId: string, available: boolean): void {
     this.store.run(
       "UPDATE group_policies SET platform_full_capability = ? WHERE conversation_space_id = ?",
@@ -421,6 +573,22 @@ export class IdentityService {
       );
       if (!identity?.count) {
         throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+      }
+      const existing = this.store.get<{ authorized_by_principal_id: string }>(
+        `SELECT authorized_by_principal_id
+         FROM group_authorizations WHERE conversation_space_id = ?`,
+        conversationSpaceId,
+      );
+      if (existing && existing.authorized_by_principal_id !== authorizedByPrincipalId) {
+        this.store.database
+          .prepare(
+            `DELETE FROM agent_sessions
+             WHERE conversation_key IN (
+               SELECT DISTINCT session_key FROM tasks
+               WHERE conversation_space_id = ? AND session_key IS NOT NULL
+             )`,
+          )
+          .run(conversationSpaceId);
       }
       this.store.run(
         `INSERT INTO group_authorizations(

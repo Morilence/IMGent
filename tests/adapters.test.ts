@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +13,29 @@ import {
   WechatCompatibilityError,
 } from "@imgent/adapter-wechat-ilink";
 import { IMGentError } from "@imgent/contracts";
+import type WebSocket from "ws";
+
+class FakeQqSocket extends EventEmitter {
+  readyState = 1;
+  readonly sent: Array<Record<string, unknown>> = [];
+
+  send(data: string): void {
+    this.sent.push(JSON.parse(data) as Record<string, unknown>);
+  }
+
+  receive(payload: Record<string, unknown>): void {
+    this.emit("message", Buffer.from(JSON.stringify(payload)));
+  }
+
+  close(code = 1000): void {
+    this.readyState = 3;
+    this.emit("close", code, Buffer.alloc(0));
+  }
+
+  terminate(): void {
+    this.close(1006);
+  }
+}
 
 test("QQ normalizer preserves actor, mentions, references, attachments and reply limits", () => {
   const sentAt = "2026-07-24T00:00:00.000Z";
@@ -129,6 +153,43 @@ test("QQ full-group readiness is optional until a full-mode group requires it", 
   assert.equal((await required.checkReady()).ready, false);
 });
 
+test("QQ authenticates before heartbeat and reports the live Gateway state", async () => {
+  let socket: FakeQqSocket | undefined;
+  const adapter = new QqAdapter({
+    botInstanceId: "qq-main",
+    appId: "app",
+    credential: { appSecret: "secret" },
+    gatewayUrl: "wss://gateway.example.test",
+    fetch: async () => Response.json({ access_token: "access", expires_in: 3600 }),
+    websocketFactory: () => {
+      socket = new FakeQqSocket();
+      return socket as unknown as WebSocket;
+    },
+  });
+  const started = adapter.start(async () => undefined);
+  while (!socket) await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal((await adapter.checkReady("runtime")).ready, false);
+  socket.receive({ op: 10, d: { heartbeat_interval: 1_000 } });
+  assert.deepEqual(
+    socket.sent.map((payload) => payload.op),
+    [2],
+  );
+  socket.receive({
+    op: 0,
+    s: 1,
+    t: "READY",
+    d: { session_id: "session-1" },
+  });
+  await started;
+  assert.equal((await adapter.checkReady("runtime")).ready, true);
+
+  socket.close(1006);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal((await adapter.checkReady("runtime")).ready, false);
+  await adapter.stop();
+});
+
 test("WeChat normalizer preserves context token and media while rejecting groups", () => {
   const message = normalizeWechatMessage(
     {
@@ -228,11 +289,13 @@ test("WeChat inbound media is downloaded, decrypted, verified and materialized l
 });
 
 test("QQ adapter enforces the direct-message four-reply limit", async () => {
-  const fetcher: typeof fetch = async (input) => {
+  const sentBodies: Array<Record<string, unknown>> = [];
+  const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
     if (url.includes("getAppAccessToken")) {
       return Response.json({ access_token: "access", expires_in: 3600 });
     }
+    sentBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
     return Response.json({ id: `sent-${Date.now()}` });
   };
   const adapter = new QqAdapter({
@@ -251,6 +314,7 @@ test("QQ adapter enforces the direct-message four-reply limit", async () => {
     replyContext: {
       opaque: {
         messageId: "inbound",
+        eventId: "message-event",
         initialMsgSeq: 0,
         maxReplies: 4,
       },
@@ -268,6 +332,8 @@ test("QQ adapter enforces the direct-message four-reply limit", async () => {
       "reply",
     );
   }
+  assert.equal(sentBodies[0]?.msg_id, "inbound");
+  assert.equal("event_id" in (sentBodies[0] ?? {}), false);
   await assert.rejects(
     adapter.send({ ...base, idempotencyKey: "reply-5" }),
     (error: unknown) => error instanceof IMGentError && error.code === "OUTBOUND_CONTEXT_EXPIRED",

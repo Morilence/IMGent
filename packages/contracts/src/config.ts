@@ -7,6 +7,7 @@ export interface AgentProfile {
   id: string;
   driver: "codex" | "claude-code";
   command: string;
+  agentUserHome: string;
   workspace: string;
   prompt?: string;
   skills: string[];

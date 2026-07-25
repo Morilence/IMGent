@@ -200,6 +200,7 @@ test("external adapter authentication failures degrade the service instead of ab
           id: "main",
           driver: "codex",
           command: "missing-codex-for-readiness-test",
+          agentUserHome: directory,
           workspace: directory,
           skills: ["*"],
           permissions: { maxMode: "ask" },
@@ -355,15 +356,40 @@ test("service safely removes a stale user-owned Unix socket before binding", asy
 
 test("CLI routes online commands to the service and blocks offline mutations", async () => {
   const directory = await mkdtemp(join(tmpdir(), "imgent-process-"));
+  const codexUserHome = join(directory, "codex-user-home");
+  const claudeUserHome = join(directory, "claude-user-home");
   const configPath = join(directory, "imgent.json");
   const wrapper = join(directory, "node24-cli-wrapper.mjs");
   const executable = join(process.cwd(), "dist", "src", "cli", "main.js");
   let serviceProcess: ChildProcess | undefined;
   try {
+    await Promise.all([mkdir(codexUserHome), mkdir(claudeUserHome)]);
     await writeConfig(configPath, {
       ...defaultConfig(directory),
       dataDir: "./state",
       server: { host: "127.0.0.1", port: await availablePort() },
+      agentProfiles: [
+        {
+          id: "main",
+          driver: "codex",
+          command: "missing-codex-for-readiness-test",
+          agentUserHome: codexUserHome,
+          workspace: directory,
+          skills: ["*"],
+          permissions: { maxMode: "ask" },
+          memory: { enabled: false },
+        },
+        {
+          id: "claude",
+          driver: "claude-code",
+          command: "missing-claude-for-readiness-test",
+          agentUserHome: claudeUserHome,
+          workspace: directory,
+          skills: ["*"],
+          permissions: { maxMode: "ask" },
+          memory: { enabled: false },
+        },
+      ],
     });
     await writeFile(
       wrapper,
@@ -383,6 +409,30 @@ test("CLI routes online commands to the service and blocks offline mutations", a
       undefined,
       false,
     );
+    const directWithDefaultWorkspace = seed.ingest(
+      directMessage({
+        messageId: "seed-direct-default",
+        dedupeKey: "seed-direct-default",
+        conversation: { kind: "direct", platformConversationId: "user-2" },
+        actor: { platformUserId: "user-2", displayName: "User 2" },
+      }),
+      "main",
+      "main:qq:qq-main:direct:user-2",
+      undefined,
+      false,
+    );
+    const claudeDirect = seed.ingest(
+      directMessage({
+        messageId: "seed-direct-claude",
+        dedupeKey: "seed-direct-claude",
+        conversation: { kind: "direct", platformConversationId: "user-3" },
+        actor: { platformUserId: "user-3", displayName: "User 3" },
+      }),
+      "claude",
+      "claude:qq:qq-main:direct:user-3",
+      undefined,
+      false,
+    );
     const group = seed.ingest(
       directMessage({
         messageId: "seed-group",
@@ -396,6 +446,12 @@ test("CLI routes online commands to the service and blocks offline mutations", a
       false,
     );
     const pairingCode = new IdentityService(seed).createPairingCode(direct.platformIdentityId);
+    const defaultWorkspacePairingCode = new IdentityService(seed).createPairingCode(
+      directWithDefaultWorkspace.platformIdentityId,
+    );
+    const claudePairingCode = new IdentityService(seed).createPairingCode(
+      claudeDirect.platformIdentityId,
+    );
     seed.close();
     serviceProcess = spawn(
       process.execPath,
@@ -434,7 +490,7 @@ test("CLI routes online commands to the service and blocks offline mutations", a
     const instanceId = statusEnvelope.result.service.instanceId;
 
     const doctor = await runCli(wrapper, executable, ["--json", "--config", configPath, "doctor"]);
-    assert.equal(doctor.code, 2);
+    assert.equal(doctor.code, 4);
     const doctorEnvelope = JSON.parse(doctor.stdout) as {
       result: {
         mode: string;
@@ -454,13 +510,58 @@ test("CLI routes online commands to the service and blocks offline mutations", a
       configPath,
       "pair",
       pairingCode,
+      "--workspace",
+      directory,
     ]);
     assert.equal(paired.code, 0);
     const pairedEnvelope = JSON.parse(paired.stdout) as {
-      result: { principalId: string; service: { instanceId: string } };
+      result: {
+        principalId: string;
+        workspace: string;
+        service: { instanceId: string };
+        nextSteps: Array<{
+          action: string;
+          conversationSpaceId: string;
+          command: string;
+        }>;
+      };
     };
     assert.equal(pairedEnvelope.result.principalId, direct.principalId);
+    assert.equal(pairedEnvelope.result.workspace, directory);
     assert.equal(pairedEnvelope.result.service.instanceId, instanceId);
+    assert.deepEqual(pairedEnvelope.result.nextSteps, [
+      {
+        action: "authorize-group",
+        conversationSpaceId: group.conversationSpaceId,
+        botInstanceId: "qq-main",
+        command: `imgent group authorize ${group.conversationSpaceId} --principal ${direct.principalId}`,
+      },
+    ]);
+    const defaultWorkspacePairing = await runCli(wrapper, executable, [
+      "--json",
+      "--config",
+      configPath,
+      "pair",
+      defaultWorkspacePairingCode,
+    ]);
+    assert.equal(defaultWorkspacePairing.code, 0);
+    assert.equal(
+      (JSON.parse(defaultWorkspacePairing.stdout) as { result: { workspace: string } }).result
+        .workspace,
+      codexUserHome,
+    );
+    const claudePairing = await runCli(wrapper, executable, [
+      "--json",
+      "--config",
+      configPath,
+      "pair",
+      claudePairingCode,
+    ]);
+    assert.equal(claudePairing.code, 0);
+    assert.equal(
+      (JSON.parse(claudePairing.stdout) as { result: { workspace: string } }).result.workspace,
+      claudeUserHome,
+    );
     const pairedAgain = await runCli(wrapper, executable, [
       "--json",
       "--config",
@@ -472,6 +573,44 @@ test("CLI routes online commands to the service and blocks offline mutations", a
     assert.equal(
       (JSON.parse(pairedAgain.stdout) as { result: { principalId: string } }).result.principalId,
       direct.principalId,
+    );
+    const alternateWorkspace = join(directory, "alternate-workspace");
+    await mkdir(alternateWorkspace);
+    const workspaceChanged = await runCli(wrapper, executable, [
+      "--json",
+      "--config",
+      configPath,
+      "identity",
+      "workspace",
+      "set",
+      direct.principalId,
+      alternateWorkspace,
+    ]);
+    assert.equal(workspaceChanged.code, 0);
+    assert.equal(
+      (
+        JSON.parse(workspaceChanged.stdout) as {
+          result: { result: string; workspace: string; principalId: string };
+        }
+      ).result.workspace,
+      alternateWorkspace,
+    );
+    const listedIdentities = await runCli(wrapper, executable, [
+      "--json",
+      "--config",
+      configPath,
+      "identity",
+      "list",
+    ]);
+    assert.equal(listedIdentities.code, 0);
+    assert.equal(
+      (
+        JSON.parse(listedIdentities.stdout) as {
+          result: { identities: Array<{ principalId: string; workspace: string }> };
+        }
+      ).result.identities.find((identity) => identity.principalId === direct.principalId)
+        ?.workspace,
+      alternateWorkspace,
     );
     const authorized = await runCli(wrapper, executable, [
       "--json",

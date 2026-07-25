@@ -42,6 +42,16 @@ explicitly exiting Changesets prerelease mode and will move `latest` to that sta
   runs the restricted environment checks without constructing adapters.
 - Runtime readiness is refreshed during startup and maintenance with single-flight coordination.
   Diagnostic checks have a separate depth and timeout.
+- Pairing keeps one-time codes in direct messages. Unauthorized-group replies explain the complete
+  bootstrap flow, and successful `pair` results return executable `nextSteps` for discovered,
+  unauthorized groups in the same AgentProfile.
+- Pairing accepts `--workspace`; omission resolves through the pairing route to the selected
+  AgentProfile's required `agentUserHome`, so Codex and Claude Code profiles may use different
+  local-user homes. Principal workspaces drive direct turns, while QQ groups use the authorizing
+  Principal's workspace. Workspace changes are local-control-only and reset affected Agent
+  sessions.
+- Host/control messages use `[IMGent: <localized status>]`. Direct-only adapters omit all group
+  guidance, while Agent final output remains unprefixed.
 - The health server uses Node's `node:http`; no web framework is present.
 - Online admin reads share the same query functions as the restricted offline admin service.
 - `src/cli/main.ts` is only the executable entry; command construction lives in
@@ -53,19 +63,17 @@ Shutdown remains idempotent, and endpoint cleanup happens on partial startup fai
 
 ## Persistence and compatibility
 
-The current SQLite schema version is 5.
+The current SQLite schema version is 6.
 
-- Only an empty data directory can create schema v5.
-- Any existing non-v5 database fails with `STORAGE_SCHEMA_UNSUPPORTED` and remains unchanged.
-- There is no v1-v4 migration chain or pre-migration backup path.
+- An empty data directory creates schema v6.
+- Any existing non-v6 database fails with `STORAGE_SCHEMA_UNSUPPORTED` and remains unchanged.
 - Redundant `agent_profile_id` columns were removed where the profile follows from a referenced
   principal, task, or conversation space.
 - Duplicate unique indexes were removed. Due-work indexes match task, outbound, and memory outbox
   claim predicates.
 - Database open/schema validation and media cleanup are separate storage modules; the store keeps
   transaction-oriented domain operations.
-- Schema v5 adds persistent schedule definitions and runs, and separates a task's IM conversation,
-  execution-serialization key, and optional Agent session key.
+- Schema v6 includes persistent schedule definitions/runs and Principal workspaces.
 
 ## Scheduled Agent tasks
 
@@ -87,8 +95,8 @@ Backup format is `imgent-backup/v2`. Restore validates its manifest and checksum
 rejected. Archives contain IMGent configuration, local encrypted platform credentials, the SQLite
 snapshot, and user skills, but never external Codex or Claude authentication directories.
 
-These are intentional breaking changes. There is no compatibility alias or automatic conversion
-for old databases, backup archives, or control DTOs.
+There is no compatibility alias or automatic conversion for old databases, backup archives, or
+control DTOs.
 
 ## Errors and localization
 
@@ -105,11 +113,13 @@ parity and rejects template braces.
 The automated suite covers:
 
 - strict configuration and capability routing;
-- schema v5 creation, legacy-schema rejection without mutation, foreign keys, FTS5, and query plans;
+- schema v6 creation, legacy-schema rejection without mutation, foreign keys, FTS5, and query
+  plans;
 - schedule timing, proactive capability rejection, fresh/series session isolation, run history,
   and proactive outbound envelopes;
 - atomic inbound/task/outbound flows, FIFO, retry safety, cancellation, and dead letters;
-- pairing, identity binding, group authorization, approval ownership, and idempotency;
+- pairing defaults and explicit workspaces, identity binding, group-workspace authorization,
+  pairing-to-group `nextSteps`, approval ownership, system-message prefixes, and idempotency;
 - skill validation, profile filtering, immutable startup snapshots, and read-only materialization;
 - memory scope isolation, Chinese/mixed FTS5, curation retry, and retention;
 - QQ/WeChat payload and runtime-readiness behavior;

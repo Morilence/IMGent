@@ -134,6 +134,7 @@ test("scheduled turns use proactive delivery and isolate fresh sessions", async 
       id: "main",
       driver: "codex",
       command: "fake",
+      agentUserHome: fixture.directory,
       workspace: fixture.directory,
       skills: ["*"],
       permissions: { maxMode: "ask" },

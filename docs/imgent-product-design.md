@@ -239,11 +239,11 @@ imgent restore <file>
 
 每个命令必须声明运行能力：
 
-| 能力    | 行为                                        | 代表命令                                                             |
-| ------- | ------------------------------------------- | -------------------------------------------------------------------- |
-| offline | 直接原子操作停服状态；服务运行时拒绝        | `init`、`profile add`、`bot add/authorize`、`skills init`、`restore` |
-| online  | 只通过本地控制面；服务未运行时拒绝          | `pair`、`group authorize`、`conversation list`、`schedule *`         |
-| dual    | 在线走控制面，停服走受限离线路径并标记 mode | `doctor`、`status`、列表/校验命令、`backup`                          |
+| 能力    | 行为                                        | 代表命令                                                                               |
+| ------- | ------------------------------------------- | -------------------------------------------------------------------------------------- |
+| offline | 直接原子操作停服状态；服务运行时拒绝        | `init`、`profile add`、`bot add/authorize`、`skills init`、`restore`                   |
+| online  | 只通过本地控制面；服务未运行时拒绝          | `pair`、`identity workspace set`、`group authorize`、`conversation list`、`schedule *` |
+| dual    | 在线走控制面，停服走受限离线路径并标记 mode | `doctor`、`status`、列表/校验命令、`backup`                                            |
 
 CLI 已发现控制 endpoint 但握手失败时，不得静默回退为直接打开 SQLite。
 offline/dual 命令进入离线路径后，必须在同一 endpoint 上持有短生命周期 ownership
@@ -282,6 +282,7 @@ lease，直到本地数据操作完成，避免与并发 `imgent start` 形成 T
       "id": "main",
       "driver": "codex",
       "command": "codex",
+      "agentUserHome": "C:/Users/codex-user",
       "workspace": "D:/Developments/agent-workspace",
       "skills": ["*"],
       "permissions": {
@@ -295,6 +296,7 @@ lease，直到本地数据操作完成，避免与并发 `imgent start` 形成 T
       "id": "claude",
       "driver": "claude-code",
       "command": "claude",
+      "agentUserHome": "C:/Users/claude-user",
       "workspace": "D:/Developments/agent-workspace",
       "skills": ["project-conventions"],
       "permissions": {
@@ -764,7 +766,9 @@ interface ErrorDescriptor {
 
 #### `AgentProfile`
 
-定义 AgentDriver、工作区、人格提示、IMGent skills、权限上限和记忆命名空间。
+定义 AgentDriver、该 Agent CLI 本地用户 Home、系统任务回退工作区、人格提示、
+IMGent skills、权限上限和记忆命名空间。Codex 与 Claude Code Profile 可以分别连接
+不同的本地操作系统用户。
 
 #### `Principal`
 
@@ -1095,8 +1099,19 @@ decidedAt
 
 ### 13.3 工作区
 
-- 每个 AgentProfile 固定一个绝对工作区。
-- 启动时解析真实路径并拒绝不存在或超出允许根的路径。
+- AgentProfile 保留一个绝对工作区，作为没有 Principal 上下文的系统任务回退值。
+- 新配对 Principal 通过 `imgent pair <code> [--workspace <path>]` 固定工作区；
+  未传选项时使用配对路由所选 AgentProfile 的 `agentUserHome`。该字段表示实际连接
+  该 Profile 的 Codex 或 Claude Code 本地用户 Home，而不是 IMGent 服务用户 Home
+  或 `pair` 命令的当前目录。
+- QQ 群使用授权该群的 Principal 工作区，不使用当前发言者的工作区，因此同一群会话
+  不会被不同成员切换目录。
+- 当前 AgentProfile 的 `agentUserHome` 是隐式允许根；显式路径还可以位于
+  `allowedWorkspaceRoots` 中。服务解析真实绝对路径，并拒绝不存在、非目录、服务用户
+  不可访问或超出允许根的路径。
+- `imgent identity workspace set <principal-id> <path>` 只允许本机部署者执行。
+  修改前拒绝仍有 active/waiting approval 的相关任务，修改成功后清除该 Principal
+  私聊及其授权群的 Agent session。
 - Agent 恢复 session 时工作目录必须一致。
 - Docker 只挂载必要工作区，默认不挂载整个宿主用户目录。
 
@@ -1173,13 +1188,11 @@ Principal、conversation 和过期时间，再由 Driver 接受答复，最后�
 
 ### 14.3 迁移
 
-- 当前数据库 schema version 为 5，只支持在空数据目录中创建。
-- 启动时发现任何非 v5 数据库都返回 `STORAGE_SCHEMA_UNSUPPORTED`，不会原地修改、
+- 当前数据库 schema version 为 6。空数据目录直接创建 v6。
+- 启动时发现任何非 v6 数据库都返回 `STORAGE_SCHEMA_UNSUPPORTED`，不会原地修改、
   自动备份或猜测兼容性。
-- v5 在 v4 的精简边界上增加 schedule/schedule run、计划到期索引，以及 task
-  来源和 conversation/execution/session key 分离。
-- 这一破坏性边界是有意为之：预发布数据需导出所需业务数据后重新初始化，旧
-  schema 与备份格式不属于兼容承诺。
+- 这是 alpha 阶段的有意边界：不保留未承诺版本的兼容代码。备份格式也不参与
+  数据库原位迁移。
 
 ### 14.4 备份
 
@@ -1287,6 +1300,15 @@ CLI 错误退出码固定为：0 成功、2 输入/配置、3 需要部署者操
 ### 16.1 配对
 
 未配对用户收到一次性配对说明。配对码短期有效、单次使用，并绑定当前 BotInstance 下的 PlatformIdentity。
+配对码只在私聊中返回，群聊不得展示配对码。未授权群的触发消息必须说明完整初始化路径：
+私聊机器人获取配对码、本机执行 `imgent pair <code>`、再按 `pair` 结果中的 `nextSteps`
+授权已发现群。`nextSteps` 只列出同一 AgentProfile 下尚未授权的群，并包含可直接执行的
+`imgent group authorize` 命令。
+
+配对文案按 Adapter 能力生成：微信 iLink 是 direct-only，不得出现“群聊”或“待授权群”；
+QQ 私聊仅在 Adapter 支持群聊时显示后续群授权说明。所有 IMGent 控制消息使用独立首行
+`[IMGent: <本地化状态>]`，中英文使用相同 ASCII 括号、冒号和空格。状态包括配对、
+群授权、排队、审批、询问、错误和系统；Agent 正式输出不加该前缀。
 
 ### 16.2 忙碌
 
@@ -1415,7 +1437,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
   在用户表面、持久化错误或默认日志。
 - health server 默认只绑定 loopback；control server 只绑定当前部署用户可访问的
   Unix socket/Named Pipe。
-- schema v5 只接受空目录初始化；旧 schema 和 backup v1 均被明确拒绝。
+- schema v6 只接受空目录初始化；其他 schema 和 backup v1 均被明确拒绝。
 - FTS5 不可用时启动失败，不静默退化。
 - 备份可恢复到新的空数据目录并通过完整性检查。
 

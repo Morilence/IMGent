@@ -10,7 +10,7 @@ import { SecretBox } from "../src/security/secret-box.js";
 import { SCHEMA_VERSION } from "../src/storage/migrations.js";
 import { IMGentStore } from "../src/storage/store.js";
 
-test("fresh storage creates only schema 5 with due-work indexes", async () => {
+test("fresh storage creates schema 6 with Principal workspaces and due-work indexes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "imgent-schema-"));
   const path = join(directory, "state.sqlite");
   try {
@@ -75,6 +75,12 @@ test("fresh storage creates only schema 5 with due-work indexes", async () => {
           .some((column) => column.name === "agent_profile_id"),
         false,
       );
+      assert.equal(
+        store
+          .all<{ name: string }>("PRAGMA table_info(principals)")
+          .some((column) => column.name === "workspace"),
+        true,
+      );
     } finally {
       store.close();
     }
@@ -90,7 +96,7 @@ test("legacy schemas are rejected without mutation", async () => {
     const legacy = new DatabaseSync(path);
     legacy.exec(`
       CREATE TABLE schema_meta(version INTEGER NOT NULL) STRICT;
-      INSERT INTO schema_meta(version) VALUES (3);
+      INSERT INTO schema_meta(version) VALUES (5);
     `);
     legacy.close();
     const bytesBefore = await readFile(path);
@@ -105,7 +111,7 @@ test("legacy schemas are rejected without mutation", async () => {
     const unchanged = new DatabaseSync(path);
     assert.equal(
       (unchanged.prepare("SELECT version FROM schema_meta").get() as { version: number }).version,
-      3,
+      5,
     );
     unchanged.close();
     assert.deepEqual(await readFile(path), bytesBefore);

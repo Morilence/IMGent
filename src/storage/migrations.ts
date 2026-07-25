@@ -1,15 +1,16 @@
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const SCHEMA = `
 CREATE TABLE schema_meta (
   version INTEGER NOT NULL
 ) STRICT;
-INSERT INTO schema_meta(version) VALUES (5);
+INSERT INTO schema_meta(version) VALUES (6);
 
 CREATE TABLE principals (
   id TEXT PRIMARY KEY,
   agent_profile_id TEXT NOT NULL,
   locale TEXT CHECK(locale IN ('zh-CN', 'en-US')),
+  workspace TEXT,
   created_at TEXT NOT NULL
 ) STRICT;
 

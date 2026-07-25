@@ -1,5 +1,6 @@
 import { IMGentError, normalizeError, textOf } from "@imgent/contracts";
 import { renderErrorText } from "../i18n/index.js";
+import { formatSystemMessage } from "../im/system-message.js";
 import {
   MEMORY_HOST_TOOL_IDS,
   SKILL_HOST_TOOL_IDS,
@@ -32,6 +33,7 @@ export interface SchedulerOptions {
   skills: SkillRegistry;
   outbound: OutboundDispatcher;
   localeFor?: (principalId: string, botInstanceId: string) => SupportedLocale;
+  workspaceFor?: (principalId: string, conversationSpaceId: string) => string | undefined;
   maxConcurrency?: number;
   logger?: Logger;
 }
@@ -106,6 +108,9 @@ export class ConversationScheduler {
       );
       return;
     }
+    const workspace =
+      this.options.workspaceFor?.(task.principalId, task.conversationSpaceId) ?? profile.workspace;
+    const taskProfile = workspace === profile.workspace ? profile : { ...profile, workspace };
     this.taskDrivers.set(task.id, driver);
     const memoryContext = this.memoryContext(task);
     const allowedHostTools = [
@@ -133,7 +138,8 @@ export class ConversationScheduler {
       : undefined;
     if (
       existingSession &&
-      (existingSession.driver !== profile.driver || existingSession.workspace !== profile.workspace)
+      (existingSession.driver !== taskProfile.driver ||
+        existingSession.workspace !== taskProfile.workspace)
     ) {
       await this.finishWithError(
         task,
@@ -151,7 +157,7 @@ export class ConversationScheduler {
         turnId: task.id,
         conversationKey: task.sessionKey ?? `${task.executionKey}:${task.id}`,
         ...(existingSession ? { sessionId: existingSession.sessionId } : {}),
-        profile,
+        profile: taskProfile,
         prompt: textOf(task.message.parts),
         parts: task.message.parts,
         memoryContext: memories,
@@ -167,9 +173,9 @@ export class ConversationScheduler {
             if (task.sessionKey) {
               this.options.store.saveSession(
                 task.sessionKey,
-                profile.driver,
+                taskProfile.driver,
                 event.sessionId,
-                profile.workspace,
+                taskProfile.workspace,
               );
             }
             break;
@@ -180,13 +186,17 @@ export class ConversationScheduler {
             finalText = event.text;
             break;
           case "approval-request": {
-            const approvalText = [
-              `需要审批：${event.request.toolName}`,
-              `风险：${event.request.risk}`,
-              `请求：${JSON.stringify(event.request.sanitizedInput)}`,
-              `允许：/imgent allow ${event.request.requestId}`,
-              `拒绝：/imgent deny ${event.request.requestId}`,
-            ].join("\n");
+            const approvalText = formatSystemMessage(
+              "approval",
+              [
+                `需要审批：${event.request.toolName}`,
+                `风险：${event.request.risk}`,
+                `请求：${JSON.stringify(event.request.sanitizedInput)}`,
+                `允许：/imgent allow ${event.request.requestId}`,
+                `拒绝：/imgent deny ${event.request.requestId}`,
+              ].join("\n"),
+              this.locale(task),
+            );
             this.options.approvals.create(
               task.id,
               task.conversationKey,
@@ -198,11 +208,15 @@ export class ConversationScheduler {
             break;
           }
           case "question": {
-            const questionText = [
-              event.request.prompt,
-              ...(event.request.choices?.map((choice) => `- ${choice}`) ?? []),
-              `回答：/imgent answer ${event.request.requestId} <内容>`,
-            ].join("\n");
+            const questionText = formatSystemMessage(
+              "question",
+              [
+                event.request.prompt,
+                ...(event.request.choices?.map((choice) => `- ${choice}`) ?? []),
+                `回答：/imgent answer ${event.request.requestId} <内容>`,
+              ].join("\n"),
+              this.locale(task),
+            );
             this.options.approvals.create(
               task.id,
               task.conversationKey,
@@ -475,7 +489,11 @@ export class ConversationScheduler {
     );
     await this.reply(
       task,
-      renderErrorText(descriptor, this.locale(task)),
+      formatSystemMessage(
+        "error",
+        renderErrorText(descriptor, this.locale(task)),
+        this.locale(task),
+      ),
       `error:${descriptor.code}`,
     );
   }

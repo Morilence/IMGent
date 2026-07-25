@@ -32,12 +32,15 @@ async function availablePort(): Promise<number> {
   return port;
 }
 
-function capturingAdapter(sent: OutboundMessage[]): ImAdapter {
+function capturingAdapter(
+  sent: OutboundMessage[],
+  conversationKinds: ImAdapter["capabilities"]["conversationKinds"] = ["direct", "group"],
+): ImAdapter {
   return {
-    id: "qq",
+    id: conversationKinds.includes("group") ? "qq" : "wechat-ilink",
     capabilities: {
-      conversationKinds: ["direct", "group"],
-      groupIngestion: "triggered",
+      conversationKinds,
+      groupIngestion: conversationKinds.includes("group") ? "triggered" : "none",
       threads: false,
       inboundTransport: "websocket",
       requiresReplyContext: false,
@@ -121,6 +124,7 @@ test("unpaired users can set a Principal language and receive localized command 
           id: "main",
           driver: "codex",
           command: "codex",
+          agentUserHome: directory,
           workspace: directory,
           skills: ["*"],
           permissions: { maxMode: "ask" },
@@ -146,6 +150,50 @@ test("unpaired users can set a Principal language and receive localized command 
     application = await IMGentApplication.create(configPath);
     const sent: OutboundMessage[] = [];
     application.adapters.set("qq-main", capturingAdapter(sent));
+
+    await application.handleInbound(
+      directMessage({
+        messageId: "unauthorized-group",
+        dedupeKey: "unauthorized-group",
+        eventId: "unauthorized-group-event",
+        conversation: { kind: "group", platformConversationId: "group-1" },
+        actor: { platformUserId: "user-1", displayName: "User", role: "member" },
+      }),
+    );
+    const groupGuidance = JSON.stringify(sent.at(-1));
+    assert.match(groupGuidance, /\[IMGent: 群授权\]/);
+    assert.match(groupGuidance, /私聊机器人/);
+    assert.match(groupGuidance, /imgent pair <配对码>/);
+    assert.match(groupGuidance, /nextSteps/);
+    assert.match(groupGuidance, /请勿在群聊中发送配对码/);
+
+    await application.handleInbound(
+      directMessage({
+        messageId: "unpaired-direct",
+        dedupeKey: "unpaired-direct",
+        eventId: "unpaired-direct-event",
+      }),
+    );
+    const directGuidance = JSON.stringify(sent.at(-1));
+    assert.match(directGuidance, /\[IMGent: 配对\]/);
+    assert.match(directGuidance, /imgent pair [A-F0-9]{10}/);
+    assert.match(directGuidance, /CLI 会列出待授权群及下一条命令/);
+
+    application.adapters.set("qq-main", capturingAdapter(sent, ["direct"]));
+    await application.handleInbound(
+      directMessage({
+        platform: "wechat-ilink",
+        messageId: "unpaired-wechat",
+        dedupeKey: "unpaired-wechat",
+        eventId: "unpaired-wechat-event",
+        conversation: { kind: "direct", platformConversationId: "wechat-user" },
+        actor: { platformUserId: "wechat-user", displayName: "WeChat User" },
+      }),
+    );
+    const wechatGuidance = JSON.stringify(sent.at(-1));
+    assert.match(wechatGuidance, /\[IMGent: 配对\]/);
+    assert.match(wechatGuidance, /请勿转发配对码/);
+    assert.doesNotMatch(wechatGuidance, /群聊|待授权群/);
 
     await application.handleInbound(
       directMessage({
@@ -175,7 +223,7 @@ test("unpaired users can set a Principal language and receive localized command 
            ORDER BY created_at DESC LIMIT 1`,
         ),
       ),
-      /Errors and diagnostics will use English/,
+      /\[IMGent: System\].*Errors and diagnostics will use English/,
     );
 
     await application.handleInbound(
@@ -191,7 +239,7 @@ test("unpaired users can set a Principal language and receive localized command 
        WHERE idempotency_key LIKE 'command:%'
        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     );
-    assert.match(latest?.payload_json ?? "", /language is not supported/i);
+    assert.match(latest?.payload_json ?? "", /\[IMGent: Error\].*language is not supported/i);
     assert.doesNotMatch(latest?.payload_json ?? "", /fr-FR|raw|diagnostic/);
   } finally {
     await application?.stop();

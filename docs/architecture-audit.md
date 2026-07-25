@@ -14,7 +14,8 @@ workspace boundaries that correspond to real alternate implementations.
 Ranked findings use Ponytail's deletion-first labels:
 
 1. `delete:` Health and status requests synchronously triggered platform, account, and model probes; they now return a cached runtime-readiness snapshot, while `doctor` alone invokes `/v3/diagnostics`.
-2. `delete:` Legacy migration code preserved pre-release layouts and error translation; current schema v5 initializes only an empty data directory and rejects any other version unchanged.
+2. `delete:` Legacy migration code preserved pre-release layouts and error translation; current
+   schema v6 initializes only an empty data directory and rejects any other version unchanged.
 3. `native:` Fastify served two loopback GET endpoints; `node:http` now provides the complete health surface without a framework dependency.
 4. `delete:` ICU formatting and message/action parameter types had no current dynamic messages; catalogs are static, brace-free, and no longer depend on `intl-messageformat`.
 5. `shrink:` Online and offline administration duplicated identities, groups, status, and database-count SQL; both now call the same read-only query functions.
@@ -49,7 +50,7 @@ DTOs remain separate: the loopback health surface cannot accidentally inherit ma
 
 ## Data model and state
 
-Schema v5 treats configuration as the authority for profiles, bots, routes, and static policy.
+Schema v6 treats configuration as the authority for profiles, bots, routes, and static policy.
 SQLite stores runtime facts and references stable configuration IDs only where the relation cannot
 be derived. Principal, conversation-space, and task relations now determine the profile for group
 authorizations, sessions, and approvals.
@@ -71,7 +72,7 @@ when there is actual supported user data to preserve.
 | Direct runtime dependencies   |                 9 |            7 |                   -2 |
 | Installed dependency packages | baseline lockfile | baseline -47 |                  -47 |
 | CLI executable entry          |         807 lines |      5 lines |                 -802 |
-| Schema compatibility paths    |     v1-v4 layouts |      v5 only | legacy paths removed |
+| Schema compatibility paths    |     v1-v5 layouts |      v6 only | legacy paths removed |
 
 The line count excludes generated `dist` declarations. Moving command registration into
 `program.ts` is not counted as a line reduction by itself. The dependency-package result is the

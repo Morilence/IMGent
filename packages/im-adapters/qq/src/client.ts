@@ -133,6 +133,13 @@ export class QqAdapter implements ImAdapter {
   private sequence: number | undefined;
   private heartbeat: NodeJS.Timeout | undefined;
   private heartbeatAcknowledged = true;
+  private gatewayReady = false;
+  private startupReady:
+    | {
+        resolve: () => void;
+        reject: (error: unknown) => void;
+      }
+    | undefined;
   private sentKeys = new Map<string, SendResult>();
   private msgSequences = new Map<string, number>();
   private runPromise: Promise<void> | undefined;
@@ -158,6 +165,13 @@ export class QqAdapter implements ImAdapter {
       issues.push(new IMGentError("ADAPTER_AUTH_REQUIRED").descriptor);
     }
     if (this.blockedIssue) issues.push(this.blockedIssue);
+    if (depth === "runtime" && this.runPromise && !this.gatewayReady && !this.blockedIssue) {
+      issues.push(
+        new IMGentError("ADAPTER_CONNECTION_FAILED", {
+          diagnostic: { platform: "qq", reason: "gateway not ready" },
+        }).descriptor,
+      );
+    }
     if (depth === "diagnostic") {
       try {
         const token = await this.token();
@@ -204,9 +218,18 @@ export class QqAdapter implements ImAdapter {
   ): Promise<void> {
     if (this.runPromise) throw new Error("QQ adapter 已启动");
     this.stopped = false;
+    this.blockedIssue = undefined;
+    this.gatewayReady = false;
     this.abort = new AbortController();
+    const startupReady = new Promise<void>((resolve, reject) => {
+      this.startupReady = { resolve, reject };
+    });
     this.runPromise = this.run(onMessage, this.abort.signal);
-    await Promise.resolve();
+    try {
+      await Promise.race([startupReady, delay(10_000, this.abort.signal)]);
+    } finally {
+      this.startupReady = undefined;
+    }
   }
 
   private async run(
@@ -226,6 +249,7 @@ export class QqAdapter implements ImAdapter {
         const normalized = normalizeError(error, "ADAPTER_CONNECTION_FAILED");
         if (normalized.descriptor.retry.strategy !== "backoff") {
           this.blockedIssue = normalized.descriptor;
+          this.startupReady?.reject(normalized);
           break;
         }
         attempt += 1;
@@ -254,36 +278,46 @@ export class QqAdapter implements ImAdapter {
     const gateway = await this.gateway(token);
     const socket = this.websocketFactory(this.options.gatewayUrl ?? gateway.url);
     this.socket = socket;
+    this.gatewayReady = false;
+    this.heartbeatAcknowledged = true;
     await new Promise<void>((resolve, reject) => {
       const onAbort = () => socket.close(1000, "shutdown");
+      const fail = (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        this.gatewayReady = false;
+        this.clearHeartbeat();
+        if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+        reject(error);
+      };
       signal.addEventListener("abort", onAbort, { once: true });
-      socket.once("error", reject);
+      socket.once("error", fail);
       socket.on("message", (data) => {
         void this.handlePayload(
           JSON.parse(data.toString()) as QqGatewayPayload,
           token,
           onMessage,
-        ).catch(reject);
+        ).catch(fail);
       });
       socket.once("close", (code) => {
         signal.removeEventListener("abort", onAbort);
+        this.gatewayReady = false;
         this.clearHeartbeat();
         if (signal.aborted || code === 1000) {
           resolve();
         } else if (code === 4004) {
-          reject(
+          fail(
             new IMGentError("ADAPTER_AUTH_REQUIRED", {
               diagnostic: { platform: "qq", closeCode: code },
             }),
           );
         } else if (code === 4013 || code === 4014) {
-          reject(
+          fail(
             new IMGentError("ADAPTER_PERMISSION_DENIED", {
               diagnostic: { platform: "qq", closeCode: code },
             }),
           );
         } else {
-          reject(
+          fail(
             new IMGentError("ADAPTER_CONNECTION_FAILED", {
               diagnostic: { platform: "qq", closeCode: code },
             }),
@@ -309,7 +343,7 @@ export class QqAdapter implements ImAdapter {
             diagnostic: { platform: "qq", event: "hello", reason: "heartbeat interval" },
           });
         }
-        this.startHeartbeat(interval);
+        this.heartbeatAcknowledged = true;
         if (this.sessionId && this.sequence !== undefined) {
           this.sendGateway({
             op: QqOpcode.RESUME,
@@ -322,6 +356,7 @@ export class QqAdapter implements ImAdapter {
         } else {
           this.identify(token);
         }
+        this.startHeartbeat(interval);
         break;
       }
       case QqOpcode.HEARTBEAT_ACK:
@@ -344,6 +379,10 @@ export class QqAdapter implements ImAdapter {
             });
           }
           this.sessionId = ready.session_id;
+        }
+        if (payload.t === "READY" || payload.t === "RESUMED") {
+          this.gatewayReady = true;
+          this.startupReady?.resolve();
         }
         const checkpoint =
           payload.s === undefined || !this.sessionId
@@ -405,7 +444,6 @@ export class QqAdapter implements ImAdapter {
       this.heartbeatAcknowledged = false;
       this.sendGateway({ op: QqOpcode.HEARTBEAT, d: this.sequence ?? null });
     };
-    beat();
     this.heartbeat = setInterval(beat, interval);
     this.heartbeat.unref();
   }
@@ -426,6 +464,7 @@ export class QqAdapter implements ImAdapter {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.gatewayReady = false;
     this.abort?.abort(new Error("shutdown"));
     this.clearHeartbeat();
     this.socket?.close(1000, "shutdown");
@@ -441,13 +480,18 @@ export class QqAdapter implements ImAdapter {
     const expiresAt = message.replyContext?.expiresAt;
     const replyValid = !expiresAt || expiresAt > new Date().toISOString();
     const replyMessageId = typeof context?.messageId === "string" ? context.messageId : undefined;
-    const key = `${message.conversation.kind}:${message.conversation.platformConversationId}:${replyMessageId ?? "proactive"}`;
+    const replyEventId =
+      replyValid && !replyMessageId && typeof context?.eventId === "string"
+        ? context.eventId
+        : undefined;
+    const key = `${message.conversation.kind}:${message.conversation.platformConversationId}:${replyMessageId ?? replyEventId ?? "proactive"}`;
     const msgSeq = (this.msgSequences.get(key) ?? Number(context?.initialMsgSeq ?? 0)) + 1;
     const path =
       message.conversation.kind === "direct"
         ? `/v2/users/${encodeURIComponent(message.conversation.platformConversationId)}/messages`
         : `/v2/groups/${encodeURIComponent(message.conversation.platformConversationId)}/messages`;
-    const mode: SendResult["mode"] = replyValid && replyMessageId ? "reply" : "proactive";
+    const mode: SendResult["mode"] =
+      replyValid && (replyMessageId || replyEventId) ? "reply" : "proactive";
     const maxReplies = Number(
       context?.maxReplies ?? (message.conversation.kind === "direct" ? 4 : 5),
     );
@@ -459,7 +503,7 @@ export class QqAdapter implements ImAdapter {
       msg_type: 0,
       msg_seq: msgSeq,
       ...(mode === "reply" && replyMessageId ? { msg_id: replyMessageId } : {}),
-      ...(typeof context?.eventId === "string" ? { event_id: context.eventId } : {}),
+      ...(replyEventId ? { event_id: replyEventId } : {}),
     };
     const response = await this.fetch(`${this.apiBaseUrl()}${path}`, {
       method: "POST",

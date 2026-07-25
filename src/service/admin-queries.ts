@@ -68,8 +68,9 @@ export function identities(store: IMGentStore): unknown[] {
     `SELECT pi.id AS platformIdentityId, pi.agent_profile_id AS agentProfileId,
             pi.platform, pi.bot_instance_id AS botInstanceId,
             pi.platform_user_id AS platformUserId, pi.principal_id AS principalId,
-            pi.display_name AS displayName, pi.paired
+            pi.display_name AS displayName, pi.paired, p.workspace
      FROM platform_identities pi
+     JOIN principals p ON p.id = pi.principal_id
      ORDER BY pi.created_at`,
   );
 }

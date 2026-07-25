@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { IMGentError } from "@imgent/contracts";
@@ -67,7 +68,10 @@ function fakeAdapter(): ImAdapter {
   };
 }
 
-async function schedulerFixture(driver: AgentDriver): Promise<{
+async function schedulerFixture(
+  driver: AgentDriver,
+  workspaceFor?: (principalId: string, conversationSpaceId: string) => string | undefined,
+): Promise<{
   fixture: Awaited<ReturnType<typeof testStore>>;
   scheduler: ConversationScheduler;
 }> {
@@ -82,6 +86,7 @@ async function schedulerFixture(driver: AgentDriver): Promise<{
     id: "main",
     driver: "codex",
     command: "fake",
+    agentUserHome: fixture.directory,
     workspace: fixture.directory,
     skills: ["*"],
     permissions: { maxMode: "ask" },
@@ -98,9 +103,45 @@ async function schedulerFixture(driver: AgentDriver): Promise<{
     hostTools,
     skills,
     outbound,
+    ...(workspaceFor ? { workspaceFor } : {}),
   });
   return { fixture, scheduler };
 }
+
+test("scheduler uses the resolved Principal workspace and leaves Agent replies unprefixed", async () => {
+  let observed: AgentTurnInput | undefined;
+  const driver = fakeDriver(async (input) => {
+    observed = input;
+    return [
+      { type: "session", sessionId: "workspace-session" },
+      { type: "output-final", text: "Agent answer" },
+      { type: "completed", result: "success" },
+    ];
+  });
+  let resolvedWorkspace = "";
+  const { fixture, scheduler } = await schedulerFixture(driver, () => resolvedWorkspace);
+  try {
+    resolvedWorkspace = join(fixture.directory, "principal-workspace");
+    await mkdir(resolvedWorkspace);
+    const ingested = fixture.store.ingest(
+      directMessage({ messageId: "workspace-task", dedupeKey: "workspace-task" }),
+      "main",
+      "workspace-conversation",
+    );
+    assert.equal(await scheduler.processOnce(), true);
+    assert.equal(observed?.profile.workspace, resolvedWorkspace);
+    assert.equal(fixture.store.session("workspace-conversation")?.workspace, resolvedWorkspace);
+    const payload = fixture.store.get<{ payload_json: string }>(
+      "SELECT payload_json FROM outbound_messages WHERE task_id = ?",
+      ingested.taskId!,
+    )?.payload_json;
+    assert.match(payload ?? "", /Agent answer/);
+    assert.doesNotMatch(payload ?? "", /\[IMGent:/);
+  } finally {
+    await scheduler.stop();
+    await fixture.cleanup();
+  }
+});
 
 function makeTaskDue(store: Awaited<ReturnType<typeof testStore>>["store"], taskId: string): void {
   store.run(
@@ -148,6 +189,13 @@ test("scheduler retries safe work twice, preserves FIFO, then stops at three att
     assert.equal(exhausted.status, "failed");
     assert.equal(exhausted.attempt, 3);
     assert.equal(exhausted.error?.code, "TASK_RETRY_EXHAUSTED");
+    assert.match(
+      fixture.store.get<{ payload_json: string }>(
+        "SELECT payload_json FROM outbound_messages WHERE task_id = ?",
+        first.taskId!,
+      )?.payload_json ?? "",
+      /\[IMGent: 错误\]/,
+    );
 
     assert.equal(await scheduler.processOnce(), true);
     assert.equal(fixture.store.task(second.taskId!)?.status, "retry_wait");

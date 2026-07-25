@@ -38,7 +38,8 @@ API。systemd、launchd、Windows Service 或 Docker 负责拉起、重启、日
   Health Server 在 loopback TCP 上只提供 `/healthz` 与 `/readyz`。
 - `status`、在线 `doctor`、identity/group/skill 查询和在线备份通过 Control
   Client 查询同一 `instanceId`，不再创建第二个 Application。
-- `pair` 与 `group authorize` 在服务内执行；online route 不直接打开 SQLite。
+- `pair`、`identity workspace set` 与 `group authorize` 在服务内执行；online
+  route 不直接打开 SQLite。
 - offline/online/dual capability 是显式命令矩阵。配置、凭据、skill 与恢复命令
   在活动实例存在时拒绝，dual 命令只有确认 endpoint 不存在才进入离线路径。
 - Control endpoint 负责单实例互斥；CLI 可以区分 stopped、协议不兼容、实例不
@@ -176,11 +177,11 @@ BotInstance → AgentProfile 路由可以服务。`degraded` 不是崩溃态。
 
 ### 6.1 三类命令
 
-| 类型     | 数据路径                               | 服务运行时行为         | 命令                                                                                |
-| -------- | -------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------- |
-| 离线配置 | 直接读取/原子写入配置、凭据或 skills   | 明确拒绝，提示停止服务 | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`         |
-| 在线管理 | 只通过本地控制面                       | 服务未运行时明确失败   | `pair`、`group authorize`、`conversation list`、`schedule *`                        |
-| 双模式   | 运行时走控制面；停服时使用受限离线路径 | 不做不透明降级         | `doctor`、`status`、`identity list`、`group list`、`skills list/validate`、`backup` |
+| 类型     | 数据路径                               | 服务运行时行为         | 命令                                                                                   |
+| -------- | -------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------- |
+| 离线配置 | 直接读取/原子写入配置、凭据或 skills   | 明确拒绝，提示停止服务 | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`            |
+| 在线管理 | 只通过本地控制面                       | 服务未运行时明确失败   | `pair`、`identity workspace set`、`group authorize`、`conversation list`、`schedule *` |
+| 双模式   | 运行时走控制面；停服时使用受限离线路径 | 不做不透明降级         | `doctor`、`status`、`identity list`、`group list`、`skills list/validate`、`backup`    |
 
 双模式命令必须在输出中声明 `mode: "online" | "offline"`：
 
@@ -443,9 +444,8 @@ SQLite 保存运行事实：
 复制并原子落到目标路径。
 
 `restore` 始终要求目标实例停止，并验证目标目录、控制 endpoint、manifest、
-schema version、权限和 SQLite integrity。当前 schema v5 只允许空数据目录初始化，
-任何旧 schema 都保持不变并返回 `STORAGE_SCHEMA_UNSUPPORTED`。`--force` 不能绕过
-活动实例检查。
+schema version、权限和 SQLite integrity。当前 schema v6 只允许空数据目录初始化；
+其他版本保持不变并返回 `STORAGE_SCHEMA_UNSUPPORTED`。`--force` 不能绕过活动实例检查。
 
 ## 9. 安全边界
 
@@ -628,7 +628,8 @@ degraded、stopping、stopped 和协议不兼容。
 
 ### 阶段 C（已完成）：在线 mutation 与数据所有权
 
-- 将 `pair`、`group authorize` 迁移到 control application service。
+- 将 `pair`、`identity workspace set`、`group authorize` 迁移到 control
+  application service。
 - online mutation 写审计并具备幂等终态。
 - offline 配置命令在活动实例存在时明确拒绝。
 - 移除 online command 对 `openAdminContext()` 的依赖。

@@ -22,6 +22,7 @@ export const agentProfileSchema = z
     id,
     driver: z.enum(["codex", "claude-code"]),
     command: z.string().min(1),
+    agentUserHome: z.string().min(1),
     workspace: z.string().min(1),
     prompt: z.string().max(20_000).optional(),
     skills: z.array(skillName).default(["*"]),

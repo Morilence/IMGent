@@ -8,6 +8,7 @@ export const COMMAND_CAPABILITIES = {
   "skills init": "offline",
   restore: "offline",
   pair: "online",
+  "identity workspace set": "online",
   "group authorize": "online",
   "conversation list": "online",
   "schedule add": "online",

@@ -1,12 +1,18 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, realpath, stat } from "node:fs/promises";
+import { isAbsolute, join, relative } from "node:path";
+import { IMGentError } from "@imgent/contracts";
 import { createBackup } from "../backup/service.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { conversations, groups, identities, persistentStatus } from "./admin-queries.js";
 import type { IMGentApplication, ReadinessReport } from "./application.js";
 import type { CreateScheduleInput, UpdateScheduleInput } from "../schedule/service.js";
+
+function isInside(path: string, root: string): boolean {
+  const result = relative(root, path);
+  return result === "" || (!result.startsWith("..") && !isAbsolute(result));
+}
 
 export class AdminService {
   constructor(readonly application: IMGentApplication) {}
@@ -23,10 +29,54 @@ export class AdminService {
     return identities(this.application.store);
   }
 
-  confirmPairing(code: string): Record<string, unknown> {
+  async confirmPairing(
+    code: string,
+    requestedWorkspace?: string,
+  ): Promise<Record<string, unknown>> {
+    const agentProfileId = this.application.identity.pairingAgentProfileId(code);
+    const workspace = await this.resolveWorkspace(agentProfileId, requestedWorkspace);
+    const pairing = this.application.identity.confirmPairing(
+      code,
+      workspace,
+      requestedWorkspace !== undefined,
+    );
+    const pendingGroups = this.application.store.all<{
+      conversationSpaceId: string;
+      botInstanceId: string;
+    }>(
+      `SELECT cs.id AS conversationSpaceId, cs.bot_instance_id AS botInstanceId
+       FROM conversation_spaces cs
+       JOIN platform_identities pi
+         ON pi.agent_profile_id = cs.agent_profile_id
+       LEFT JOIN group_authorizations ga
+         ON ga.conversation_space_id = cs.id
+       WHERE pi.id = ? AND cs.kind = 'group'
+         AND ga.conversation_space_id IS NULL
+       ORDER BY cs.created_at`,
+      pairing.platformIdentityId,
+    );
     return {
       result: "paired",
-      ...this.application.identity.confirmPairing(code),
+      ...pairing,
+      nextSteps: pendingGroups.map((group) => ({
+        action: "authorize-group",
+        conversationSpaceId: group.conversationSpaceId,
+        botInstanceId: group.botInstanceId,
+        command: `imgent group authorize ${group.conversationSpaceId} --principal ${pairing.principalId}`,
+      })),
+    };
+  }
+
+  async setIdentityWorkspace(
+    principalId: string,
+    requestedWorkspace: string,
+  ): Promise<Record<string, unknown>> {
+    const agentProfileId = this.application.identity.agentProfileId(principalId);
+    const workspace = await this.resolveWorkspace(agentProfileId, requestedWorkspace);
+    return {
+      result: "workspace-updated",
+      principalId,
+      ...this.application.identity.setWorkspace(principalId, workspace),
     };
   }
 
@@ -114,6 +164,42 @@ export class AdminService {
       profiles,
       restartRequiredAfterChanges: true,
     };
+  }
+
+  private async resolveWorkspace(
+    agentProfileId: string,
+    requestedWorkspace?: string,
+  ): Promise<string> {
+    const profile = this.application.profiles.get(agentProfileId);
+    if (!profile) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+    const candidate = requestedWorkspace ?? profile.agentUserHome;
+    if (!isAbsolute(candidate)) {
+      throw new IMGentError("CONFIG_WORKSPACE_INVALID", {
+        diagnostic: { candidate, reason: "workspace must be absolute" },
+      });
+    }
+    let workspace: string;
+    try {
+      workspace = await realpath(candidate);
+      if (!(await stat(workspace)).isDirectory()) {
+        throw new Error("workspace is not a directory");
+      }
+    } catch (error) {
+      throw new IMGentError("CONFIG_WORKSPACE_INVALID", {
+        cause: error,
+        diagnostic: { candidate },
+      });
+    }
+    const allowedRoots = [
+      profile.agentUserHome,
+      ...(this.application.config.allowedWorkspaceRoots ?? []),
+    ];
+    if (!allowedRoots.some((root) => isInside(workspace, root))) {
+      throw new IMGentError("CONFIG_WORKSPACE_INVALID", {
+        diagnostic: { workspace, reason: "outside roots" },
+      });
+    }
+    return workspace;
   }
 
   async createControlledBackup(): Promise<{ artifact: string; files: number; bytes: number }> {

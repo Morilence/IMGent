@@ -9,6 +9,7 @@ import { ApprovalService } from "../approvals/service.js";
 import { loadConfig } from "../config/index.js";
 import { renderError, renderErrorText } from "../i18n/index.js";
 import { IdentityService } from "../identity/service.js";
+import { formatSystemMessage, type SystemMessageStatus } from "../im/system-message.js";
 import { MemoryCurator } from "../memory/curator.js";
 import { MemoryHostTools } from "../memory/host-tools.js";
 import { MemoryService } from "../memory/service.js";
@@ -111,6 +112,8 @@ export class IMGentApplication {
       drivers: this.drivers,
       hostTools: this.hostTools,
       skills: this.skills,
+      workspaceFor: (principalId, conversationSpaceId) =>
+        this.identity.workspace(principalId, conversationSpaceId),
     });
     this.scheduler = new ConversationScheduler({
       store,
@@ -123,6 +126,8 @@ export class IMGentApplication {
       skills: this.skills,
       outbound: this.outbound,
       localeFor: (principalId, botInstanceId) => this.localeFor(principalId, botInstanceId),
+      workspaceFor: (principalId, conversationSpaceId) =>
+        this.identity.workspace(principalId, conversationSpaceId),
     });
   }
 
@@ -488,14 +493,33 @@ export class IMGentApplication {
         command?.name !== "language"
       ) {
         const code = this.identity.createPairingCode(ingested.platformIdentityId);
+        const locale = this.localeFor(ingested.principalId, message.botInstanceId);
+        const supportsGroups =
+          this.adapters
+            .get(message.botInstanceId)
+            ?.capabilities.conversationKinds.includes("group") === true;
         await this.immediateReply(
           message,
-          [
-            "此身份尚未配对，当前不会运行 Agent。",
-            `请部署者在本机执行：imgent pair ${code}`,
-            "配对码 10 分钟内有效且只能使用一次。",
-          ].join("\n"),
+          locale === "zh-CN"
+            ? [
+                "此身份尚未配对，当前不会运行 Agent。",
+                `请部署者在本机执行：imgent pair ${code}`,
+                "配对码 10 分钟内有效且只能使用一次。",
+                supportsGroups
+                  ? "请勿把配对码发送到群聊；配对成功后，CLI 会列出待授权群及下一条命令。"
+                  : "请勿转发配对码；配对成功后即可与 Agent 对话。",
+              ].join("\n")
+            : [
+                "This identity is not paired, so the Agent will not run yet.",
+                `Ask the deployer to run locally: imgent pair ${code}`,
+                "The pairing code expires in 10 minutes and can be used only once.",
+                supportsGroups
+                  ? "Do not send the pairing code to a group chat. After pairing, the CLI lists groups awaiting authorization and the next command."
+                  : "Do not forward the pairing code. You can talk to the Agent after pairing.",
+              ].join("\n"),
           `pairing:${ingested.eventId}`,
+          "pairing",
+          locale,
         );
         return;
       }
@@ -503,8 +527,18 @@ export class IMGentApplication {
       if (message.triggered !== false) {
         await this.immediateReply(
           message,
-          `本群尚未授权。部署者可使用群空间 ID ${ingested.conversationSpaceId} 完成授权。`,
+          [
+            "本群尚未授权，当前不会运行 Agent。",
+            "请由部署者按以下步骤完成初始化：",
+            "1. 私聊机器人发送任意消息，获取 10 分钟有效的一次性配对码。",
+            "2. 在本机执行：imgent pair <配对码>",
+            "3. 按配对结果的 nextSteps 授权本群。",
+            `当前群空间 ID：${ingested.conversationSpaceId}`,
+            "请勿在群聊中发送配对码。",
+          ].join("\n"),
           `group-unauthorized:${ingested.eventId}`,
+          "group-authorization",
+          this.localeFor(ingested.principalId, message.botInstanceId),
         );
       }
       return;
@@ -537,6 +571,8 @@ export class IMGentApplication {
         message,
         `已排队，前面还有 ${waiting} 个任务。发送“取消”可停止当前任务。`,
         `queued:${taskId}`,
+        "queued",
+        this.localeFor(ingested.principalId, message.botInstanceId),
       );
     }
   }
@@ -551,6 +587,7 @@ export class IMGentApplication {
     eventId: string,
   ): Promise<void> {
     let response: string;
+    let responseStatus: SystemMessageStatus = "system";
     let responseLocale = this.localeFor(principalId, message.botInstanceId);
     try {
       switch (command.name) {
@@ -647,23 +684,32 @@ export class IMGentApplication {
           break;
       }
     } catch (error) {
+      responseStatus = "error";
       response = renderErrorText(
         normalizeError(error, "IDENTITY_OPERATION_REJECTED").descriptor,
         responseLocale,
       );
     }
-    await this.immediateReply(message, response, `command:${eventId}`);
+    await this.immediateReply(
+      message,
+      response,
+      `command:${eventId}`,
+      responseStatus,
+      responseLocale,
+    );
   }
 
   private async immediateReply(
     inbound: InboundMessage,
     text: string,
     idempotencyKey: string,
+    status: SystemMessageStatus,
+    locale: SupportedLocale,
   ): Promise<void> {
     const outbound: OutboundMessage = {
       botInstanceId: inbound.botInstanceId,
       conversation: inbound.conversation,
-      parts: [{ type: "text", text }],
+      parts: [{ type: "text", text: formatSystemMessage(status, text, locale) }],
       replyTo: { messageId: inbound.messageId },
       ...(inbound.replyContext ? { replyContext: inbound.replyContext } : {}),
       idempotencyKey,

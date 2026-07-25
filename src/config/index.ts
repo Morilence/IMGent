@@ -1,4 +1,4 @@
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { IMGentError } from "@imgent/contracts";
 import { configSchema } from "./schema.js";
@@ -49,12 +49,24 @@ export async function loadConfig(path: string): Promise<IMGentConfig> {
   const profiles = await Promise.all(
     parsed.data.agentProfiles.map(async (profile) => {
       const candidate = resolve(base, profile.workspace);
+      const agentUserHomeCandidate = resolve(base, profile.agentUserHome);
       let workspace: string;
+      let agentUserHome: string;
       try {
-        workspace = await realpath(candidate);
+        [workspace, agentUserHome] = await Promise.all([
+          realpath(candidate),
+          realpath(agentUserHomeCandidate),
+        ]);
+        if (!(await stat(agentUserHome)).isDirectory()) {
+          throw new Error("agentUserHome is not a directory");
+        }
       } catch {
         throw new IMGentError("CONFIG_WORKSPACE_INVALID", {
-          diagnostic: { candidate, agentProfileId: profile.id },
+          diagnostic: {
+            workspaceCandidate: candidate,
+            agentUserHomeCandidate,
+            agentProfileId: profile.id,
+          },
         });
       }
       if (!allowedRoots.some((root) => isInside(workspace, root))) {
@@ -66,6 +78,7 @@ export async function loadConfig(path: string): Promise<IMGentConfig> {
         id: profile.id,
         driver: profile.driver,
         command: profile.command,
+        agentUserHome,
         workspace,
         ...(profile.prompt ? { prompt: profile.prompt } : {}),
         skills: profile.skills,

@@ -19,6 +19,7 @@ export interface MemoryCuratorOptions {
   drivers: ReadonlyMap<string, AgentDriver>;
   hostTools: IMGentHostTools;
   skills: SkillRegistry;
+  workspaceFor?: (principalId: string, conversationSpaceId: string) => string | undefined;
 }
 
 export class MemoryCurator {
@@ -117,6 +118,9 @@ export class MemoryCurator {
     const profile = this.options.profiles.get(task.agentProfileId);
     if (!profile) throw new Error("策展任务缺少 AgentProfile");
     if (!profile.memory.enabled) return;
+    const workspace =
+      this.options.workspaceFor?.(task.principalId, task.conversationSpaceId) ?? profile.workspace;
+    const taskProfile = workspace === profile.workspace ? profile : { ...profile, workspace };
     const driver = this.options.drivers.get(task.agentProfileId);
     if (!driver) throw new Error("策展任务缺少 AgentDriver");
     const context: MemoryContext = {
@@ -150,7 +154,7 @@ export class MemoryCurator {
         turnId,
         conversationKey: `memory-curation:${task.id}`,
         profile: {
-          ...profile,
+          ...taskProfile,
           permissions: { maxMode: "deny" },
         },
         prompt,
