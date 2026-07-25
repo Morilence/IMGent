@@ -92,12 +92,12 @@ export const ERROR_DEFINITIONS = {
     actionKey: "error.storage_unavailable.action",
     retry: { strategy: "after_user_action", replay: "unknown" },
   },
-  STORAGE_MIGRATION_FAILED: {
+  STORAGE_SCHEMA_UNSUPPORTED: {
     domain: "storage",
-    kind: "internal",
-    messageKey: "error.storage_migration_failed.message",
-    actionKey: "error.storage_migration_failed.action",
-    retry: { strategy: "after_user_action", replay: "unknown" },
+    kind: "compatibility",
+    messageKey: "error.storage_schema_unsupported.message",
+    actionKey: "error.storage_schema_unsupported.action",
+    retry: { strategy: "after_user_action", replay: "safe" },
   },
   ADAPTER_AUTH_REQUIRED: {
     domain: "adapter",
@@ -322,13 +322,6 @@ export const ERROR_DEFINITIONS = {
     messageKey: "error.memory_curation_failed.message",
     actionKey: "error.memory_curation_failed.action",
     retry: { strategy: "backoff", replay: "safe" },
-  },
-  LEGACY_RECORDED_ERROR: {
-    domain: "internal",
-    kind: "internal",
-    messageKey: "error.legacy_recorded_error.message",
-    actionKey: "error.legacy_recorded_error.action",
-    retry: { strategy: "none", replay: "unknown" },
   },
   INTERNAL_UNEXPECTED_ERROR: {
     domain: "internal",

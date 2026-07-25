@@ -26,7 +26,6 @@ export type ErrorKind =
 
 export type RetryStrategy = "none" | "backoff" | "after_user_action";
 export type ReplaySafety = "safe" | "unsafe" | "unknown";
-export type ErrorMessageParam = string | number | boolean;
 export type ErrorMessageKey = `error.${string}.${"message" | "action"}`;
 
 export interface ErrorRetryPolicy {
@@ -39,9 +38,7 @@ export interface ErrorDefinition {
   domain: ErrorDomain;
   kind: ErrorKind;
   messageKey: ErrorMessageKey;
-  messageParamKeys?: readonly string[];
   actionKey?: ErrorMessageKey;
-  actionParamKeys?: readonly string[];
   retry: {
     strategy: RetryStrategy;
     replay: ReplaySafety;

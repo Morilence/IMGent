@@ -1,17 +1,16 @@
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
-export const MIGRATION_1 = `
+export const SCHEMA = `
 CREATE TABLE schema_meta (
   version INTEGER NOT NULL
 ) STRICT;
-INSERT INTO schema_meta(version) VALUES (3);
+INSERT INTO schema_meta(version) VALUES (4);
 
 CREATE TABLE principals (
   id TEXT PRIMARY KEY,
   agent_profile_id TEXT NOT NULL,
   locale TEXT CHECK(locale IN ('zh-CN', 'en-US')),
-  created_at TEXT NOT NULL,
-  UNIQUE(id, agent_profile_id)
+  created_at TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE platform_identities (
@@ -59,7 +58,6 @@ CREATE TABLE group_policies (
 
 CREATE TABLE group_authorizations (
   conversation_space_id TEXT PRIMARY KEY REFERENCES conversation_spaces(id),
-  agent_profile_id TEXT NOT NULL,
   authorized_by_principal_id TEXT NOT NULL REFERENCES principals(id),
   created_at TEXT NOT NULL
 ) STRICT;
@@ -94,7 +92,6 @@ CREATE TABLE transport_checkpoints (
 
 CREATE TABLE agent_sessions (
   conversation_key TEXT PRIMARY KEY,
-  agent_profile_id TEXT NOT NULL,
   driver TEXT NOT NULL CHECK(driver IN ('codex', 'claude-code')),
   session_id TEXT NOT NULL,
   workspace TEXT NOT NULL,
@@ -124,12 +121,12 @@ CREATE TABLE tasks (
 ) STRICT;
 
 CREATE INDEX tasks_fifo_idx ON tasks(conversation_key, status, created_at);
-CREATE INDEX tasks_status_idx ON tasks(status, created_at);
+CREATE INDEX tasks_claim_idx ON tasks(created_at, next_attempt_at)
+  WHERE status IN ('queued', 'retry_wait');
 
 CREATE TABLE approvals (
   request_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(id),
-  agent_profile_id TEXT NOT NULL,
   conversation_key TEXT NOT NULL,
   principal_id TEXT NOT NULL REFERENCES principals(id),
   tool_name TEXT NOT NULL,
@@ -222,6 +219,10 @@ CREATE TABLE memory_outbox (
   updated_at TEXT NOT NULL
 ) STRICT;
 
+CREATE INDEX memory_outbox_claim_idx
+  ON memory_outbox(created_at, next_attempt_at)
+  WHERE status IN ('pending', 'retry_wait') AND attempt < 3;
+
 CREATE TABLE outbound_messages (
   id TEXT PRIMARY KEY,
   task_id TEXT REFERENCES tasks(id),
@@ -241,7 +242,9 @@ CREATE TABLE outbound_messages (
   updated_at TEXT NOT NULL
 ) STRICT;
 
-CREATE INDEX outbound_status_idx ON outbound_messages(status, created_at);
+CREATE INDEX outbound_claim_idx
+  ON outbound_messages(created_at, next_attempt_at)
+  WHERE status IN ('pending', 'retry_wait') AND attempt < 3;
 
 CREATE TABLE dead_letters (
   id TEXT PRIMARY KEY,
@@ -279,228 +282,4 @@ CREATE TABLE audit_events (
 ) STRICT;
 
 CREATE INDEX audit_created_idx ON audit_events(created_at);
-`;
-
-export const MIGRATION_2 = `
-ALTER TABLE memory_records
-  ADD COLUMN source_task_id TEXT REFERENCES tasks(id);
-ALTER TABLE memory_records
-  ADD COLUMN origin TEXT NOT NULL DEFAULT 'explicit'
-    CHECK(origin IN ('explicit', 'curated'));
-
-UPDATE memory_records AS current
-SET status = 'superseded'
-WHERE current.status = 'active'
-  AND EXISTS (
-    SELECT 1
-    FROM memory_records AS newer
-    WHERE newer.status = 'active'
-      AND newer.agent_profile_id = current.agent_profile_id
-      AND newer.scope_type = current.scope_type
-      AND COALESCE(newer.principal_id, '') = COALESCE(current.principal_id, '')
-      AND COALESCE(newer.conversation_space_id, '') =
-          COALESCE(current.conversation_space_id, '')
-      AND (
-        current.scope_type <> 'private_episode'
-        OR newer.source_conversation_key = current.source_conversation_key
-      )
-      AND newer.value = current.value
-      AND (
-        newer.updated_at > current.updated_at
-        OR (newer.updated_at = current.updated_at AND newer.id > current.id)
-      )
-  );
-
-DROP INDEX memory_active_fact_idx;
-CREATE UNIQUE INDEX memory_active_fact_idx
-  ON memory_records(
-    agent_profile_id,
-    scope_type,
-    COALESCE(principal_id, ''),
-    COALESCE(conversation_space_id, ''),
-    CASE WHEN scope_type = 'private_episode' THEN source_conversation_key ELSE '' END,
-    fact_key
-  )
-  WHERE status = 'active' AND fact_key IS NOT NULL;
-
-CREATE UNIQUE INDEX memory_active_value_idx
-  ON memory_records(
-    agent_profile_id,
-    scope_type,
-    COALESCE(principal_id, ''),
-    COALESCE(conversation_space_id, ''),
-    CASE WHEN scope_type = 'private_episode' THEN source_conversation_key ELSE '' END,
-    value
-  )
-  WHERE status = 'active';
-
-CREATE UNIQUE INDEX memory_source_task_fact_idx
-  ON memory_records(
-    source_task_id,
-    scope_type,
-    COALESCE(principal_id, ''),
-    COALESCE(conversation_space_id, ''),
-    CASE WHEN scope_type = 'private_episode' THEN source_conversation_key ELSE '' END,
-    fact_key
-  )
-  WHERE source_task_id IS NOT NULL AND fact_key IS NOT NULL;
-
-DROP TABLE memory_fts;
-CREATE VIRTUAL TABLE memory_fts USING fts5(
-  memory_id UNINDEXED,
-  search_text,
-  tokenize = 'unicode61 remove_diacritics 2'
-);
-
-UPDATE schema_meta SET version = 2;
-`;
-
-export const MIGRATION_3 = `
-ALTER TABLE principals
-  ADD COLUMN locale TEXT CHECK(locale IN ('zh-CN', 'en-US'));
-
-CREATE TABLE tasks_v3 (
-  id TEXT PRIMARY KEY,
-  inbound_event_id TEXT NOT NULL REFERENCES inbound_events(id),
-  agent_profile_id TEXT NOT NULL,
-  principal_id TEXT NOT NULL REFERENCES principals(id),
-  conversation_space_id TEXT NOT NULL REFERENCES conversation_spaces(id),
-  conversation_key TEXT NOT NULL,
-  idempotency_key TEXT NOT NULL UNIQUE,
-  status TEXT NOT NULL CHECK(status IN (
-    'queued', 'active', 'retry_wait', 'waiting_approval',
-    'succeeded', 'cancelled', 'failed', 'dead_letter'
-  )),
-  attempt INTEGER NOT NULL DEFAULT 0,
-  dangerous_side_effect_started INTEGER NOT NULL DEFAULT 0
-    CHECK(dangerous_side_effect_started IN (0, 1)),
-  final_text TEXT,
-  error_json TEXT,
-  incident_id TEXT,
-  next_attempt_at TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-) STRICT;
-
-INSERT INTO tasks_v3(
-  id, inbound_event_id, agent_profile_id, principal_id, conversation_space_id,
-  conversation_key, idempotency_key, status, attempt,
-  dangerous_side_effect_started, final_text, error_json, incident_id,
-  next_attempt_at, created_at, updated_at
-)
-SELECT
-  id, inbound_event_id, agent_profile_id, principal_id, conversation_space_id,
-  conversation_key, idempotency_key, status, attempt,
-  dangerous_side_effect_started, final_text,
-  CASE WHEN error_code IS NULL AND error_message IS NULL THEN NULL ELSE
-    '{"code":"LEGACY_RECORDED_ERROR","domain":"internal","kind":"internal","messageKey":"error.legacy_recorded_error.message","actionKey":"error.legacy_recorded_error.action","retry":{"strategy":"none","replay":"unknown"}}'
-  END,
-  NULL,
-  NULL,
-  created_at, updated_at
-FROM tasks;
-
-DROP TABLE tasks;
-ALTER TABLE tasks_v3 RENAME TO tasks;
-CREATE INDEX tasks_fifo_idx ON tasks(conversation_key, status, created_at);
-CREATE INDEX tasks_status_idx ON tasks(status, next_attempt_at, created_at);
-
-CREATE TABLE memory_outbox_v3 (
-  id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
-  status TEXT NOT NULL CHECK(status IN (
-    'pending', 'processing', 'retry_wait', 'succeeded', 'dead_letter'
-  )),
-  attempt INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at TEXT NOT NULL,
-  last_error_json TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-) STRICT;
-
-INSERT INTO memory_outbox_v3(
-  id, task_id, status, attempt, next_attempt_at, last_error_json,
-  created_at, updated_at
-)
-SELECT
-  id, task_id,
-  CASE
-    WHEN status = 'failed' AND attempt >= 3 THEN 'dead_letter'
-    WHEN status = 'failed' THEN 'retry_wait'
-    ELSE status
-  END,
-  attempt, next_attempt_at,
-  CASE WHEN error_message IS NULL THEN NULL ELSE
-    '{"code":"LEGACY_RECORDED_ERROR","domain":"internal","kind":"internal","messageKey":"error.legacy_recorded_error.message","actionKey":"error.legacy_recorded_error.action","retry":{"strategy":"none","replay":"unknown"}}'
-  END,
-  created_at, updated_at
-FROM memory_outbox;
-
-DROP TABLE memory_outbox;
-ALTER TABLE memory_outbox_v3 RENAME TO memory_outbox;
-
-CREATE TABLE outbound_messages_v3 (
-  id TEXT PRIMARY KEY,
-  task_id TEXT REFERENCES tasks(id),
-  bot_instance_id TEXT NOT NULL,
-  idempotency_key TEXT NOT NULL UNIQUE,
-  status TEXT NOT NULL CHECK(status IN (
-    'pending', 'sending', 'retry_wait', 'sent', 'dead_letter'
-  )),
-  payload_json TEXT NOT NULL,
-  reply_context_cipher BLOB,
-  platform_message_id TEXT,
-  send_mode TEXT CHECK(send_mode IN ('reply', 'proactive')),
-  attempt INTEGER NOT NULL DEFAULT 0,
-  last_error_json TEXT,
-  next_attempt_at TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-) STRICT;
-
-INSERT INTO outbound_messages_v3(
-  id, task_id, bot_instance_id, idempotency_key, status, payload_json,
-  reply_context_cipher, platform_message_id, send_mode, attempt,
-  last_error_json, next_attempt_at, created_at, updated_at
-)
-SELECT
-  id, task_id, bot_instance_id, idempotency_key,
-  CASE WHEN status = 'failed' THEN 'retry_wait' ELSE status END,
-  payload_json, reply_context_cipher, platform_message_id, send_mode, attempt,
-  CASE WHEN error_code IS NULL THEN NULL ELSE
-    '{"code":"LEGACY_RECORDED_ERROR","domain":"internal","kind":"internal","messageKey":"error.legacy_recorded_error.message","actionKey":"error.legacy_recorded_error.action","retry":{"strategy":"none","replay":"unknown"}}'
-  END,
-  updated_at, created_at, updated_at
-FROM outbound_messages;
-
-DROP TABLE outbound_messages;
-ALTER TABLE outbound_messages_v3 RENAME TO outbound_messages;
-CREATE INDEX outbound_status_idx
-  ON outbound_messages(status, next_attempt_at, created_at);
-
-CREATE TABLE dead_letters_v3 (
-  id TEXT PRIMARY KEY,
-  category TEXT NOT NULL,
-  bot_instance_id TEXT,
-  reference_id TEXT,
-  error_json TEXT NOT NULL,
-  diagnostic_json TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  resolved_at TEXT
-) STRICT;
-
-INSERT INTO dead_letters_v3(
-  id, category, bot_instance_id, reference_id, error_json,
-  diagnostic_json, created_at, resolved_at
-)
-SELECT
-  id, category, bot_instance_id, reference_id,
-  '{"code":"LEGACY_RECORDED_ERROR","domain":"internal","kind":"internal","messageKey":"error.legacy_recorded_error.message","actionKey":"error.legacy_recorded_error.action","retry":{"strategy":"none","replay":"unknown"}}',
-  '{"legacy":true}', created_at, resolved_at
-FROM dead_letters;
-
-DROP TABLE dead_letters;
-ALTER TABLE dead_letters_v3 RENAME TO dead_letters;
-
-UPDATE schema_meta SET version = 3;
 `;

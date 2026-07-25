@@ -6,14 +6,20 @@ import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { openAdminContext } from "../src/cli/context.js";
 import { ControlClient } from "../src/cli/control-client.js";
 import { loadConfig, defaultConfig } from "../src/config/index.js";
 import { writeConfig } from "../src/config/write.js";
-import { CONTROL_APP_VERSION, type ControlMeta } from "../src/control/protocol.js";
+import {
+  CONTROL_APP_VERSION,
+  CONTROL_PROTOCOL_VERSION,
+  type ControlMeta,
+} from "../src/control/protocol.js";
+import { IdentityService } from "../src/identity/service.js";
+import { CredentialStore } from "../src/security/credential-store.js";
 import { resolveInstanceEndpoint } from "../src/service/instance.js";
 import { IMGentService } from "../src/service/lifecycle.js";
 import { OfflineLease } from "../src/service/offline-lease.js";
+import { IMGentStore } from "../src/storage/store.js";
 import { directMessage } from "./helpers.js";
 
 async function availablePort(): Promise<number> {
@@ -28,6 +34,12 @@ async function availablePort(): Promise<number> {
     server.close((error) => (error ? reject(error) : resolve()));
   });
   return port;
+}
+
+async function openTestStore(configPath: string): Promise<IMGentStore> {
+  const config = await loadConfig(configPath);
+  const credentials = new CredentialStore(config.dataDir);
+  return IMGentStore.open(join(config.dataDir, "imgent.sqlite"), await credentials.secretBox());
 }
 
 test("control metadata version matches the package manifest", async () => {
@@ -75,7 +87,7 @@ test("control client rejects incompatible, mismatched, and unreachable endpoints
     await withFakeControl(
       endpoint.endpoint,
       {
-        protocolVersion: 1,
+        protocolVersion: CONTROL_PROTOCOL_VERSION,
         appVersion: "0.1.0",
         instanceId: "other",
         instanceKey: "wrong-instance-key",
@@ -120,7 +132,7 @@ test("control plane owns one dataDir instance and reports configuration drift", 
     const status = await discovery.client.get<{
       service: { instanceId: string; state: string };
       readiness: { ready: boolean };
-    }>("/v1/status");
+    }>("/v2/status");
     assert.equal(status.service.instanceId, discovery.meta.instanceId);
     assert.equal(status.service.state, "degraded");
     assert.equal(status.readiness.ready, false);
@@ -164,7 +176,7 @@ test("control plane owns one dataDir instance and reports configuration drift", 
     if (drifted.state === "running") {
       assert.equal(drifted.configDrift, true);
       assert.equal(
-        (await drifted.client.get<{ instanceId: string }>("/v1/meta")).instanceId,
+        (await drifted.client.get<{ instanceId: string }>("/v2/meta")).instanceId,
         service.instanceId,
       );
     }
@@ -363,15 +375,15 @@ test("CLI routes online commands to the service and blocks offline mutations", a
         "",
       ].join("\n"),
     );
-    const seed = await openAdminContext(configPath);
-    const direct = seed.store.ingest(
+    const seed = await openTestStore(configPath);
+    const direct = seed.ingest(
       directMessage({ messageId: "seed-direct", dedupeKey: "seed-direct" }),
       "main",
       "main:qq:qq-main:direct:user-1",
       undefined,
       false,
     );
-    const group = seed.store.ingest(
+    const group = seed.ingest(
       directMessage({
         messageId: "seed-group",
         dedupeKey: "seed-group",
@@ -383,8 +395,8 @@ test("CLI routes online commands to the service and blocks offline mutations", a
       undefined,
       false,
     );
-    const pairingCode = seed.identity.createPairingCode(direct.platformIdentityId);
-    seed.store.close();
+    const pairingCode = new IdentityService(seed).createPairingCode(direct.platformIdentityId);
+    seed.close();
     serviceProcess = spawn(
       process.execPath,
       [wrapper, executable, "--config", configPath, "start"],

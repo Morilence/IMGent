@@ -85,7 +85,7 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
     this.cursor = options.cursor ?? "";
   }
 
-  async checkReady(): Promise<AdapterReadiness> {
+  async checkReady(depth: "runtime" | "diagnostic" = "diagnostic"): Promise<AdapterReadiness> {
     const issues: ErrorDescriptor[] = [];
     if (
       !this.options.platformBotId ||
@@ -95,16 +95,18 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
       issues.push(new IMGentError("ADAPTER_AUTH_REQUIRED").descriptor);
     }
     if (this.blockedIssue) issues.push(this.blockedIssue);
-    try {
-      await this.post(
-        "ilink/bot/getconfig",
-        {
-          ilink_user_id: this.options.authorizingPlatformUserId,
-        },
-        10_000,
-      );
-    } catch (error) {
-      issues.push(normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor);
+    if (depth === "diagnostic") {
+      try {
+        await this.post(
+          "ilink/bot/getconfig",
+          {
+            ilink_user_id: this.options.authorizingPlatformUserId,
+          },
+          10_000,
+        );
+      } catch (error) {
+        issues.push(normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor);
+      }
     }
     return { ready: issues.length === 0, issues };
   }

@@ -233,7 +233,9 @@ lease，直到本地数据操作完成，避免与并发 `imgent start` 形成 T
 - Linux/macOS：由规范化 dataDir 生成稳定 instance key，在受保护的用户 runtime
   目录创建 Unix socket，并校验平台路径长度。
 - Windows：由 instance key 和当前用户派生的用户范围 Named Pipe。
-- 协议：HTTP/1.1 + JSON，路由统一使用 `/v1` 版本前缀。
+- 协议：HTTP/1.1 + JSON，路由统一使用 `/v2` 版本前缀。
+- `status`、`readiness` 与 `/readyz` 读取最近一次 runtime 快照；只有
+  `doctor` 的 `/v2/diagnostics` 显式执行平台、账号和模型深度探测。
 - TCP 上的 `/healthz` 和 `/readyz` 与控制面分离，不承载管理 mutation。
 
 服务运行时是 SQLite 和凭据存储的唯一在线所有者。`status`、配对、身份与群管理
@@ -337,7 +339,7 @@ lease，直到本地数据操作完成，避免与并发 `imgent start` 形成 T
 | 语言           | TypeScript                            | 约束平台事件、身份、记忆和驱动事件                |
 | 包管理         | pnpm workspaces                       | 统一锁文件，并清晰管理 IM 适配器与 Agent 驱动子包 |
 | 本地控制面     | HTTP/JSON over Unix socket/Named Pipe | 复用成熟协议，同时保持本机权限边界                |
-| 健康服务       | Fastify 5 + loopback TCP              | 只提供 health/readiness，不开放管理 mutation      |
+| 健康服务       | Node.js `node:http` + loopback TCP    | 两个只读端点无需框架，不开放管理 mutation         |
 | 数据库         | `node:sqlite`                         | 单机、无额外原生依赖、事务和 FTS5                 |
 | 全文检索       | SQLite FTS5                           | 本地、可备份、无需外部服务                        |
 | QQ Transport   | 官方 Gateway WebSocket                | 本地和容器均无需公网回调                          |
@@ -831,8 +833,8 @@ Principal 在某个群内的成员关系，保存平台成员 ID、群昵称、�
   人工绑定身份后共享。
 - v1 只国际化错误、恢复动作、doctor/status 诊断和 language 命令；普通对话、
   排队提示和业务成功文案不在本次范围。
-- `intl-messageformat` 渲染 ICU 目录；`zh-CN`、`en-US` 必须等量完整。测试/CI
-  校验缺失键、多余键、ICU 语法、占位符集合和声明参数。
+- 本地化目录只保存经过审计的静态文案；`zh-CN`、`en-US` 必须等量完整。测试/CI
+  校验缺失键、多余键和禁止动态模板占位符。
 
 ## 11. 原生记忆系统
 
@@ -1145,17 +1147,13 @@ Principal、conversation 和过期时间，再由 Driver 接受答复，最后�
 
 ### 14.3 迁移
 
-- 数据库使用单调递增 schema version。
-- 启动时先备份元数据并在事务中执行迁移。
-- 迁移失败时拒绝 readiness，不带着半迁移 schema 运行。
-- schema v2 为记忆增加 `source_task_id`、`origin`、同 scope active exact value
-  唯一约束，并把 FTS5 重建为生成后的 `search_text`；v1 升级前创建独立备份。
-- schema v3 事务内重建 task/outbound/memory outbox/dead letter 表，新增
-  retry_wait、`error_json`、incident、next attempt 和 Principal locale，并删除
-  分散的 `error_code` / `error_message`。
-- v2 历史错误只映射为 `LEGACY_RECORDED_ERROR`，历史诊断不复制进新错误字段；
-  业务数据保留。升级前创建独立 0600 备份，迁移后执行 foreign-key check，
-  任一步失败都回滚并拒绝启动。
+- 当前数据库 schema version 为 4，只支持在空数据目录中创建。
+- 启动时发现任何非 v4 数据库都返回 `STORAGE_SCHEMA_UNSUPPORTED`，不会原地修改、
+  自动备份或猜测兼容性。
+- v4 删除可由关系推导的 `agent_profile_id` 冗余列和重复唯一索引，并为 task、
+  outbound 与 memory outbox 的到期工作查询建立与实际谓词一致的索引。
+- 这一破坏性边界是有意为之：预发布数据需导出所需业务数据后重新初始化，旧
+  schema 与备份格式不属于兼容承诺。
 
 ### 14.4 备份
 
@@ -1165,7 +1163,8 @@ Principal、conversation 和过期时间，再由 Driver 接受答复，最后�
 2. 使用 SQLite backup 能力创建快照。
 3. 在同一配置/skill 快照下复制配置、平台凭据和必要附件。
 4. 默认不导出外部 CLI 的认证目录。
-5. 输出 manifest、schema version 和校验和。
+5. 输出 `imgent-backup/v2` manifest、schema version 和校验和；v1 archive
+   明确拒绝恢复。
 
 恢复时要求目标实例停止，先验证 manifest、校验和、控制 endpoint、目标目录为空或
 明确允许覆盖。`--force` 不得绕过活动实例检查。
@@ -1203,15 +1202,16 @@ incidentId
 ### 15.2 健康检查
 
 - `GET /healthz`：仅返回进程、本地核心和生命周期状态。
-- `GET /readyz`：数据库可写、迁移完成、至少一个启用 BotInstance 和对应
-  AgentProfile ready；按 `Accept-Language` 返回 code、locale 和本地化
-  message/action，不返回内部诊断。
+- `GET /readyz`：投影最近一次 runtime readiness 快照；按 `Accept-Language`
+  返回 code、locale 和本地化 message/action，不返回内部诊断，也不在请求路径
+  执行外部网络、账号或模型探测。
 
 外部平台、凭据或 Agent readiness 失败使服务进入 `degraded`，`/healthz` 仍成功而
 `/readyz` 返回 503。配置无效、数据目录不安全、单实例冲突、凭据主密钥不可读、
 SQLite/迁移/FTS5 失败属于致命错误。
 
-`imgent status` 通过本地控制面额外显示：
+`imgent status` 通过本地控制面显示运行事实与缓存 readiness；`imgent doctor`
+通过显式 diagnostics 请求刷新深度诊断。状态输出包括：
 
 - 各 BotInstance 的 Transport 状态、最后事件时间和 checkpoint。
 - QQ 全量事件权限与群采集模式数量。
@@ -1252,8 +1252,8 @@ CLI 错误退出码固定为：0 成功、2 输入/配置、3 需要部署者操
 4. `OUTBOUND_*` dead letter：先确认 task 是否已 succeeded，再决定重新投递；不得
    重新执行已成功 Agent task。
 5. `TASK_UNSAFE_REPLAY`：人工确认外部副作用的真实结果后，再决定是否新建任务。
-6. `STORAGE_MIGRATION_FAILED`：保留 `.pre-migrate-*.backup`，确认磁盘和 schema；
-   不在原库上手工跳过版本。
+6. `STORAGE_SCHEMA_UNSUPPORTED`：停止服务并使用空数据目录重新初始化；不要手工
+   改写 schema version。
 7. 向部署者传递 incident ID；用户可见表面不应复制原始平台错误或本机路径。
 
 ## 16. 产品交互
@@ -1380,7 +1380,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
 ### 17.6 故障和安全
 
 - 重复事件、进程重启和平台重连不造成重复危险操作。
-- 错误码定义唯一，双语目录等量，ICU 与占位符合约通过自动校验。
+- 错误码定义唯一，双语静态目录等量且不包含动态模板占位符。
 - safe task 的三次上限、retry_wait FIFO、unknown/unsafe 不重放和 Driver 缺失
   终态均通过状态机测试。
 - Outbound 的 429/5xx/4xx/context、重启恢复、最终死信及 task 成功独立性通过
@@ -1389,7 +1389,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
   在用户表面、持久化错误或默认日志。
 - health server 默认只绑定 loopback；control server 只绑定当前部署用户可访问的
   Unix socket/Named Pipe。
-- schema v2→v3 保留业务数据、创建独立备份；失败时事务回滚且 readiness 失败。
+- schema v4 只接受空目录初始化；旧 schema 和 backup v1 均被明确拒绝。
 - FTS5 不可用时启动失败，不静默退化。
 - 备份可恢复到新的空数据目录并通过完整性检查。
 
@@ -1405,7 +1405,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
 - offline 配置和 restore 命令在活动实例存在时明确拒绝。
 - endpoint 握手失败或协议不兼容时不静默回退到离线访问；config hash 不一致显式
   报告 configuration drift。
-- 外部平台或 Agent 失败进入 degraded 并可诊断；本地配置、权限、SQLite、迁移、
+- 外部平台或 Agent 失败进入 degraded 并可诊断；本地配置、权限、SQLite/schema、
   FTS5 或单实例错误属于 fatal。
 - 两进程测试覆盖 status、doctor、身份/群管理、备份、SIGTERM 和 endpoint 清理。
 
@@ -1461,7 +1461,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
 
 - Docker 单容器。
 - 单一 `imgent` npm 包、全局 CLI 安装与 tarball 空目录 smoke。
-- 数据迁移、备份恢复和死信诊断。
+- fresh schema 初始化、backup v2 恢复和死信诊断。
 - 官方 payload fixture 与端到端验收。
 - 安装、升级、权限和故障指南。
 
@@ -1515,7 +1515,7 @@ v1 只有在 QQ、微信、Codex、Claude Code 四条主链路全部达到本指
 ### Runtime
 
 - [Node.js `node:sqlite`](https://nodejs.org/download/release/latest-v24.x/docs/api/sqlite.html)
-- [Fastify v5](https://fastify.dev/docs/latest/)
+- [Node.js HTTP](https://nodejs.org/download/release/latest-v24.x/docs/api/http.html)
 - [SQLite FTS5](https://www.sqlite.org/fts5.html)
 - [Caddy command line 与 Admin API](https://caddyserver.com/docs/command-line)
 - [Docker Engine client-server 架构](https://docs.docker.com/engine/)

@@ -100,10 +100,13 @@ test("QQ full group messages are context-only and unknown events fail closed", (
 });
 
 test("QQ full-group readiness is optional until a full-mode group requires it", async () => {
-  const fetcher: typeof fetch = async (input) =>
-    String(input).includes("getAppAccessToken")
+  let requests = 0;
+  const fetcher: typeof fetch = async (input) => {
+    requests += 1;
+    return String(input).includes("getAppAccessToken")
       ? Response.json({ access_token: "access", expires_in: 3600 })
       : Response.json({ url: "wss://gateway.example.test" });
+  };
   const optional = new QqAdapter({
     botInstanceId: "qq-main",
     appId: "app",
@@ -111,7 +114,10 @@ test("QQ full-group readiness is optional until a full-mode group requires it", 
     fetch: fetcher,
     fullGroupEventPermission: false,
   });
-  assert.equal((await optional.checkReady()).ready, true);
+  assert.equal((await optional.checkReady("runtime")).ready, true);
+  assert.equal(requests, 0);
+  assert.equal((await optional.checkReady("diagnostic")).ready, true);
+  assert.equal(requests, 2);
   const required = new QqAdapter({
     botInstanceId: "qq-main",
     appId: "app",

@@ -81,12 +81,22 @@ export class IMGentService implements ControlProjection, HealthProjection {
     if (!application) {
       return {
         ready: false,
+        checkedAt: new Date(0).toISOString(),
+        depth: "runtime",
         issues: [],
         bots: {},
         profiles: {},
       };
     }
-    const readiness = await application.checkReady();
+    const readiness = application.readiness();
+    await this.transition(readiness.ready ? "ready" : "degraded");
+    return readiness;
+  }
+
+  async diagnostics(): Promise<ReadinessReport> {
+    const application = this.applicationValue;
+    if (!application) return this.readiness();
+    const readiness = await application.refreshReadiness("diagnostic");
     await this.transition(readiness.ready ? "ready" : "degraded");
     return readiness;
   }
@@ -150,7 +160,7 @@ export class IMGentService implements ControlProjection, HealthProjection {
       this.adminValue = new AdminService(application);
       await application.start();
       await this.healthServer.start();
-      const readiness = await application.checkReady();
+      const readiness = await application.refreshReadiness("runtime");
       await this.transition(readiness.ready ? "ready" : "degraded");
       this.logger.info("service.started", {
         instanceId: this.instanceId,

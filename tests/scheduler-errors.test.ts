@@ -214,7 +214,6 @@ test("approval state becomes terminal only after the live driver accepts the ans
     assert.equal(task?.id, ingested.taskId);
     new ApprovalService(fixture.store).create(
       task!.id,
-      "main",
       "approval-conversation",
       ingested.principalId,
       {

@@ -35,14 +35,12 @@ test("error registry, normalization and serialization keep a stable safe contrac
     domain: "outbound",
     kind: "transient",
     messageKey: "error.attacker.message",
-    messageParams: { path: "/srv/private", token: "token=super-secret-value" },
     retry: { strategy: "backoff", replay: "unsafe" },
   } as unknown as ErrorDescriptor).descriptor;
   assert.equal(malicious.domain, "config");
   assert.equal(malicious.kind, "validation");
   assert.equal(malicious.messageKey, ERROR_DEFINITIONS.CONFIG_FILE_INVALID.messageKey);
   assert.equal(malicious.retry.strategy, "after_user_action");
-  assert.equal(malicious.messageParams, undefined);
 
   const raw = "vendor response token=super-secret-value at /srv/private/state.sqlite";
   const unknown = normalizeError(new Error(raw));
@@ -85,7 +83,7 @@ test("error diagnostics redact secrets, paths, SQL, prompts and vendor payloads"
   assert.match(serialized, /ADAPTER_AUTH_REQUIRED/);
 });
 
-test("bilingual ICU catalogs are complete and locale negotiation is deterministic", () => {
+test("bilingual catalogs are complete and locale negotiation is deterministic", () => {
   assert.deepEqual(validateMessageCatalogs(), []);
   assert.equal(normalizeLocale("en_US.UTF-8"), "en-US");
   assert.equal(normalizeLocale("fr-FR, en-US;q=0.9, zh-CN;q=0.8"), "en-US");

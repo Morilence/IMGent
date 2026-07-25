@@ -7,7 +7,8 @@ Claude Code。
 `imgent` 是统一的 CLI 入口：配置、诊断和维护命令是短生命周期进程，
 `imgent start` 则前台启动常驻服务。进程边界、在线/离线命令和本地控制面见
 [CLI 与常驻服务架构](docs/cli-service-architecture.md)，已交付范围见
-[实现状态](docs/implementation-status.md)。
+[实现状态](docs/implementation-status.md)，完整审计结论见
+[架构审计](docs/architecture-audit.md)。
 
 ## 要求
 
@@ -30,8 +31,10 @@ skills/
   imgent-conversation/
   imgent-memory/
 src/
-  cli/ service/ control/ health/ config/ runtime/
-  queue/ storage/
+  cli/              # 五行入口与命令程序
+  service/          # composition、lifecycle、readiness、admin queries
+  control/ health/  # 本地管理协议与 node:http 健康面
+  config/ runtime/ queue/ storage/
   identity/ approvals/ memory/ skills/ security/ backup/
 ```
 
@@ -118,14 +121,16 @@ imgent group authorize <conversation-space-id> \
 - 配置默认是当前目录的 `imgent.json`，可用全局
   `--config <path>` 指定。
 - 健康服务只允许配置 loopback 地址，默认监听 `127.0.0.1:8787`，提供
-  `/healthz` 和 `/readyz`，不承载管理操作。
-- 本机管理使用 HTTP/JSON over Unix socket 或 Windows Named Pipe；endpoint
+  `/healthz` 和 `/readyz`，不承载管理操作，也不在请求路径执行平台或模型探测。
+- 本机管理使用 HTTP/JSON `/v2` over Unix socket 或 Windows Named Pipe；endpoint
   由规范化 `dataDir` 和操作系统用户生成，不开放管理 TCP 端口。
 - `init`、Profile/Bot/skill 修改、微信授权和 `restore` 是 offline 命令，检测到
   活动实例时会拒绝；执行期间会短暂持有 ownership lease，阻止服务并发启动。
   `pair` 和 `group authorize` 是 online 命令。
 - `status`、`doctor`、列表/校验和 `backup` 是 dual 命令，输出明确包含
   `mode: "online" | "offline"`；endpoint 异常时不会回退为直接访问 SQLite。
+- `status` 和健康端点读取缓存的 runtime readiness；`doctor` 是显式深度诊断，
+  会探测平台、账号和模型能力。
 - 配置、数据库、备份、凭据与密钥按本地敏感数据处理。
 - 内置 skills 位于仓库 `skills/`；本机自定义与同名覆盖位于
   `dataDir/skills/`，修改后重启生效。
@@ -133,7 +138,9 @@ imgent group authorize <conversation-space-id> \
   Code；IMGent 不依赖厂商原生技能。
 - 备份包含本地平台凭据、加密密钥与用户 skills，但不包含 Codex/Claude 的
   外部登录目录。运行中备份由服务使用现有 SQLite owner 创建，停服时走离线路径；
-  `restore --force` 也不能绕过停服检查。
+  格式为 `imgent-backup/v2`，`restore --force` 也不能绕过停服检查。
+- SQLite schema v4 只支持空数据目录初始化；旧 schema 和 backup v1 明确拒绝，
+  不执行隐式升级或兼容转换。
 - 微信只支持 direct；任何带 `group_id` 的事件都会进入兼容性死信。
 - QQ 群默认 `triggered`；`full` 只能由已配对且平台可验证的群主/管理员开启。
 

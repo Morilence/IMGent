@@ -22,8 +22,6 @@ export function normalizeError(
   if (error instanceof IMGentError) return error;
   if (isErrorDescriptor(error)) {
     return new IMGentError(error.code, {
-      ...(error.messageParams ? { messageParams: error.messageParams } : {}),
-      ...(error.actionParams ? { actionParams: error.actionParams } : {}),
       ...(error.retry.retryAfterMs === undefined ? {} : { retryAfterMs: error.retry.retryAfterMs }),
       ...(error.incidentId ? { incidentId: error.incidentId } : {}),
       ...(options.diagnostic ? { diagnostic: options.diagnostic } : {}),

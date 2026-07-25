@@ -1,10 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { backup, DatabaseSync } from "node:sqlite";
 import { IMGentError, normalizeError, redactSensitive } from "@imgent/contracts";
-import { memorySearchText } from "../memory/search-text.js";
-import { MIGRATION_1, MIGRATION_2, MIGRATION_3, SCHEMA_VERSION } from "./migrations.js";
+import { openDatabase } from "./database.js";
 import type { SecretBox } from "../security/secret-box.js";
 import type {
   ErrorDescriptor,
@@ -12,6 +8,7 @@ import type {
   OutboundMessage,
   ReplyContext,
 } from "@imgent/contracts";
+import type { DatabaseSync } from "node:sqlite";
 
 type SqlValue = null | number | bigint | string | Uint8Array;
 
@@ -57,10 +54,6 @@ export type TaskStatus =
   | "failed"
   | "dead_letter";
 
-interface CountRow {
-  count: number;
-}
-
 function now(): string {
   return new Date().toISOString();
 }
@@ -81,14 +74,6 @@ function withoutReplyContext(message: OutboundMessage): OutboundMessage {
   return copy;
 }
 
-function localMediaPaths(message: InboundMessage | { expired: true }): string[] {
-  if ("expired" in message) return [];
-  return message.parts.flatMap((part) => {
-    if (!("attachment" in part) || !part.attachment.localPath) return [];
-    return [part.attachment.localPath];
-  });
-}
-
 export class IMGentStore {
   private constructor(
     readonly database: DatabaseSync,
@@ -97,127 +82,7 @@ export class IMGentStore {
   ) {}
 
   static async open(path: string, secretBox: SecretBox): Promise<IMGentStore> {
-    let database: DatabaseSync | undefined;
-    try {
-      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-      database = new DatabaseSync(path, {
-        enableForeignKeyConstraints: true,
-        defensive: true,
-        timeout: 5_000,
-      });
-      await chmod(path, 0o600);
-      database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;");
-    } catch (error) {
-      database?.close();
-      throw new IMGentError("STORAGE_UNAVAILABLE", {
-        cause: error,
-        diagnostic: { path },
-      });
-    }
-    if (!database) {
-      throw new IMGentError("STORAGE_UNAVAILABLE");
-    }
-
-    const tables = database
-      .prepare(
-        "SELECT count(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
-      )
-      .get() as unknown as CountRow;
-    let rebuildMemoryIndex = false;
-    if (tables.count === 0) {
-      database.exec("BEGIN IMMEDIATE");
-      try {
-        database.exec(MIGRATION_1);
-        database.exec("COMMIT");
-        rebuildMemoryIndex = true;
-      } catch (error) {
-        database.exec("ROLLBACK");
-        database.close();
-        throw new IMGentError("STORAGE_UNAVAILABLE", {
-          cause: error,
-          diagnostic: { operation: "initialize schema" },
-        });
-      }
-    } else {
-      let version = database.prepare("SELECT version FROM schema_meta").get() as
-        { version: number } | undefined;
-      if (!version || ![1, 2, SCHEMA_VERSION].includes(version.version)) {
-        const backupPath = `${path}.pre-migrate-${Date.now()}.backup`;
-        await backup(database, backupPath);
-        await chmod(backupPath, 0o600);
-        database.close();
-        throw new IMGentError("STORAGE_MIGRATION_FAILED", {
-          diagnostic: {
-            databaseVersion: version?.version ?? "unknown",
-            supportedVersion: SCHEMA_VERSION,
-            backupPath,
-          },
-        });
-      }
-      const backupPath =
-        version.version < SCHEMA_VERSION ? `${path}.pre-migrate-${Date.now()}.backup` : undefined;
-      if (backupPath) {
-        await backup(database, backupPath);
-        await chmod(backupPath, 0o600);
-      }
-      if (version.version === 1) {
-        database.exec("BEGIN IMMEDIATE");
-        try {
-          database.exec(MIGRATION_2);
-          database.exec("COMMIT");
-          rebuildMemoryIndex = true;
-        } catch (error) {
-          database.exec("ROLLBACK");
-          database.close();
-          throw new IMGentError("STORAGE_MIGRATION_FAILED", {
-            cause: error,
-            diagnostic: { fromVersion: 1, toVersion: 2, backupPath },
-          });
-        }
-        version = { version: 2 };
-      }
-      if (version.version === 2) {
-        database.exec("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE");
-        try {
-          database.exec(MIGRATION_3);
-          const violations = database.prepare("PRAGMA foreign_key_check").all();
-          if (violations.length > 0) {
-            throw new Error("foreign key validation failed after schema migration");
-          }
-          database.exec("COMMIT; PRAGMA foreign_keys = ON");
-        } catch (error) {
-          database.exec("ROLLBACK; PRAGMA foreign_keys = ON");
-          database.close();
-          throw new IMGentError("STORAGE_MIGRATION_FAILED", {
-            cause: error,
-            diagnostic: { fromVersion: 2, toVersion: 3, backupPath },
-          });
-        }
-      }
-    }
-
-    const fts = database
-      .prepare("SELECT sqlite_compileoption_used('ENABLE_FTS5') AS enabled")
-      .get() as unknown as { enabled: number };
-    if (fts.enabled !== 1) {
-      database.close();
-      throw new IMGentError("STORAGE_UNAVAILABLE", {
-        diagnostic: { reason: "FTS5 unavailable" },
-      });
-    }
-    database.prepare("INSERT INTO memory_fts(search_text) VALUES (?)").run("tokenizer-check");
-    database.prepare("DELETE FROM memory_fts WHERE search_text = ?").run("tokenizer-check");
-    if (rebuildMemoryIndex) {
-      const records = database
-        .prepare("SELECT id, value FROM memory_records WHERE status = 'active'")
-        .all() as unknown as Array<{ id: string; value: string }>;
-      const insert = database.prepare(
-        "INSERT INTO memory_fts(memory_id, search_text) VALUES (?, ?)",
-      );
-      for (const record of records) insert.run(record.id, memorySearchText(record.value));
-    }
-
-    return new IMGentStore(database, secretBox, path);
+    return new IMGentStore(await openDatabase(path), secretBox, path);
   }
 
   close(): void {
@@ -595,7 +460,8 @@ export class IMGentStore {
         created_at: string;
       }>(
         `SELECT t.*, e.message_json, e.reply_context_cipher
-         FROM tasks t JOIN inbound_events e ON e.id = t.inbound_event_id
+         FROM tasks t INDEXED BY tasks_claim_idx
+         JOIN inbound_events e ON e.id = t.inbound_event_id
          WHERE t.status IN ('queued', 'retry_wait')
            AND (t.status = 'queued' OR t.next_attempt_at <= ?)
            AND NOT EXISTS (
@@ -612,7 +478,7 @@ export class IMGentStore {
                  OR (earlier.created_at = t.created_at AND earlier.rowid < t.rowid)
                )
            )
-         ORDER BY t.created_at, t.rowid
+         ORDER BY t.created_at
          LIMIT 1`,
         now(),
       );
@@ -868,20 +734,18 @@ export class IMGentStore {
 
   saveSession(
     conversationKey: string,
-    agentProfileId: string,
     driver: "codex" | "claude-code",
     sessionId: string,
     workspace: string,
   ): void {
     this.run(
       `INSERT INTO agent_sessions(
-        conversation_key, agent_profile_id, driver, session_id, workspace, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        conversation_key, driver, session_id, workspace, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(conversation_key) DO UPDATE SET
         driver = excluded.driver, session_id = excluded.session_id,
         workspace = excluded.workspace, updated_at = excluded.updated_at`,
       conversationKey,
-      agentProfileId,
       driver,
       sessionId,
       workspace,
@@ -918,86 +782,5 @@ export class IMGentStore {
       timestamp,
       timestamp,
     );
-  }
-
-  cleanupExpiredRawEvents(): number {
-    return Number(
-      this.database
-        .prepare(
-          `UPDATE inbound_events
-         SET message_json = '{"expired":true}', reply_context_cipher = NULL
-         WHERE raw_expires_at IS NOT NULL AND raw_expires_at <= ?`,
-        )
-        .run(now()).changes,
-    );
-  }
-
-  releasableMediaEvents(): Array<{ eventId: string; paths: string[] }> {
-    return this.all<{ id: string; message_json: string }>(
-      `SELECT e.id, e.message_json
-       FROM inbound_events e
-       WHERE e.message_json LIKE '%"localPath"%'
-         AND NOT EXISTS (
-           SELECT 1 FROM tasks t
-           WHERE t.inbound_event_id = e.id
-             AND t.status IN ('queued', 'active', 'retry_wait', 'waiting_approval')
-         )`,
-    ).flatMap((row) => {
-      const paths = localMediaPaths(
-        JSON.parse(row.message_json) as InboundMessage | { expired: true },
-      );
-      return paths.length ? [{ eventId: row.id, paths }] : [];
-    });
-  }
-
-  referencedMediaPaths(): string[] {
-    return this.all<{ message_json: string }>(
-      `SELECT message_json FROM inbound_events
-       WHERE message_json LIKE '%"localPath"%'`,
-    ).flatMap((row) =>
-      localMediaPaths(JSON.parse(row.message_json) as InboundMessage | { expired: true }),
-    );
-  }
-
-  clearLocalMediaPaths(eventId: string): void {
-    const row = this.get<{ message_json: string }>(
-      "SELECT message_json FROM inbound_events WHERE id = ?",
-      eventId,
-    );
-    if (!row) return;
-    const message = JSON.parse(row.message_json) as InboundMessage | { expired: true };
-    if ("expired" in message) return;
-    for (const part of message.parts) {
-      if ("attachment" in part) delete part.attachment.localPath;
-    }
-    this.run(
-      "UPDATE inbound_events SET message_json = ? WHERE id = ?",
-      JSON.stringify(message),
-      eventId,
-    );
-  }
-
-  status(): Record<string, number> {
-    const taskRows = this.all<{ status: string; count: number }>(
-      "SELECT status, count(*) AS count FROM tasks GROUP BY status",
-    );
-    const approval =
-      this.get<CountRow>("SELECT count(*) AS count FROM approvals WHERE status = 'pending'")
-        ?.count ?? 0;
-    const outbox =
-      this.get<CountRow>(
-        `SELECT count(*) AS count FROM memory_outbox
-       WHERE status IN ('pending', 'processing')
-          OR (status = 'retry_wait' AND attempt < 3)`,
-      )?.count ?? 0;
-    const deadLetters =
-      this.get<CountRow>("SELECT count(*) AS count FROM dead_letters WHERE resolved_at IS NULL")
-        ?.count ?? 0;
-    return {
-      ...Object.fromEntries(taskRows.map((row) => [`tasks_${row.status}`, row.count])),
-      pending_approvals: approval,
-      memory_outbox: outbox,
-      dead_letters: deadLetters,
-    };
   }
 }

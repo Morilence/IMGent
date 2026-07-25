@@ -1,13 +1,10 @@
 import {
   ERROR_DEFINITIONS,
   SUPPORTED_LOCALES,
-  type ErrorDefinition,
   type ErrorDescriptor,
   type ErrorMessageKey,
-  type ErrorMessageParam,
   type SupportedLocale,
 } from "@imgent/contracts";
-import { IntlMessageFormat } from "intl-messageformat";
 
 export interface RenderedError {
   code: ErrorDescriptor["code"];
@@ -45,8 +42,8 @@ const zhCN = {
   "error.runtime_instance_mismatch.action": "请检查配置路径、dataDir 和本机运行中的实例。",
   "error.storage_unavailable.message": "IMGent 本地存储当前不可用。",
   "error.storage_unavailable.action": "请检查数据目录、磁盘空间和 SQLite 文件权限。",
-  "error.storage_migration_failed.message": "数据库升级失败，IMGent 已停止启动以保护现有数据。",
-  "error.storage_migration_failed.action": "请保留迁移前备份并查看本机日志。",
+  "error.storage_schema_unsupported.message": "当前数据目录使用了不兼容的旧版数据库。",
+  "error.storage_schema_unsupported.action": "请改用全新数据目录；IMGent 不会自动迁移旧数据。",
   "error.adapter_auth_required.message": "消息平台认证已失效，机器人当前不可用。",
   "error.adapter_auth_required.action": "请由部署者更新平台凭据后运行 imgent doctor。",
   "error.adapter_permission_denied.message": "消息平台拒绝了当前权限。",
@@ -112,8 +109,6 @@ const zhCN = {
   "error.memory_operation_rejected.action": "请确认记忆存在且属于当前允许的作用域。",
   "error.memory_curation_failed.message": "后台记忆整理暂时未完成，不影响本次回复。",
   "error.memory_curation_failed.action": "IMGent 将自动重试，无需重复发送消息。",
-  "error.legacy_recorded_error.message": "这是一条升级前记录的历史错误。",
-  "error.legacy_recorded_error.action": "请结合对应任务或死信记录进行检查。",
   "error.internal_unexpected_error.message": "IMGent 遇到未预期的内部错误。",
   "error.internal_unexpected_error.action": "请将错误编号提供给部署者并查看本机日志。",
 } as const satisfies Record<ErrorMessageKey, string>;
@@ -160,10 +155,10 @@ const enUS = {
   "error.storage_unavailable.message": "IMGent local storage is unavailable.",
   "error.storage_unavailable.action":
     "Check the data directory, disk space, and SQLite file permissions.",
-  "error.storage_migration_failed.message":
-    "The database upgrade failed, so IMGent stopped to protect existing data.",
-  "error.storage_migration_failed.action":
-    "Keep the pre-migration backup and inspect the local logs.",
+  "error.storage_schema_unsupported.message":
+    "This data directory uses an incompatible legacy database.",
+  "error.storage_schema_unsupported.action":
+    "Use a fresh data directory; IMGent does not migrate legacy data.",
   "error.adapter_auth_required.message":
     "Messaging platform authentication has expired, so the bot is unavailable.",
   "error.adapter_auth_required.action": "Update the platform credentials and run imgent doctor.",
@@ -264,9 +259,6 @@ const enUS = {
     "Background memory curation is incomplete, but the current reply is unaffected.",
   "error.memory_curation_failed.action":
     "IMGent will retry automatically; do not resend the message.",
-  "error.legacy_recorded_error.message":
-    "This error was recorded before the current error system was introduced.",
-  "error.legacy_recorded_error.action": "Inspect the associated task or dead letter for context.",
   "error.internal_unexpected_error.message": "IMGent encountered an unexpected internal error.",
   "error.internal_unexpected_error.action":
     "Give the error reference to the operator and inspect local logs.",
@@ -321,22 +313,15 @@ export function resolveLocale(
   return fallback;
 }
 
-function format(
-  key: ErrorMessageKey,
-  params: Record<string, ErrorMessageParam> | undefined,
-  locale: SupportedLocale,
-): string {
-  const template = MESSAGE_CATALOGS[locale][key] ?? MESSAGE_CATALOGS["zh-CN"][key] ?? key;
-  return new IntlMessageFormat(template, locale).format(params) as string;
+function format(key: ErrorMessageKey, locale: SupportedLocale): string {
+  return MESSAGE_CATALOGS[locale][key] ?? MESSAGE_CATALOGS["zh-CN"][key] ?? key;
 }
 
 export function renderError(descriptor: ErrorDescriptor, locale: SupportedLocale): RenderedError {
   return {
     code: descriptor.code,
-    message: format(descriptor.messageKey, descriptor.messageParams, locale),
-    ...(descriptor.actionKey
-      ? { action: format(descriptor.actionKey, descriptor.actionParams, locale) }
-      : {}),
+    message: format(descriptor.messageKey, locale),
+    ...(descriptor.actionKey ? { action: format(descriptor.actionKey, locale) } : {}),
     retry: descriptor.retry,
     ...(descriptor.incidentId ? { incidentId: descriptor.incidentId } : {}),
   };
@@ -355,10 +340,6 @@ export function renderErrorText(descriptor: ErrorDescriptor, locale: SupportedLo
     .join("\n");
 }
 
-function placeholders(template: string): string[] {
-  return [...template.matchAll(/\{\s*([A-Za-z][A-Za-z0-9_]*)/g)].map((match) => match[1]!).sort();
-}
-
 export function validateMessageCatalogs(): string[] {
   const expected = new Set<string>();
   for (const definition of Object.values(ERROR_DEFINITIONS)) {
@@ -375,38 +356,7 @@ export function validateMessageCatalogs(): string[] {
       if (!expected.has(key)) errors.push(`${locale} has extra ${key}`);
     }
     for (const [key, template] of Object.entries(MESSAGE_CATALOGS[locale])) {
-      try {
-        new IntlMessageFormat(template, locale);
-      } catch {
-        errors.push(`${locale} has invalid ICU syntax for ${key}`);
-      }
-    }
-  }
-  for (const key of expected) {
-    const zh = MESSAGE_CATALOGS["zh-CN"][key];
-    const en = MESSAGE_CATALOGS["en-US"][key];
-    if (zh && en && placeholders(zh).join(",") !== placeholders(en).join(",")) {
-      errors.push(`placeholder mismatch for ${key}`);
-    }
-  }
-  for (const definition of Object.values(ERROR_DEFINITIONS) as ErrorDefinition[]) {
-    const messagePlaceholders = placeholders(
-      MESSAGE_CATALOGS["zh-CN"][definition.messageKey] ?? "",
-    );
-    if (
-      messagePlaceholders.join(",") !== [...(definition.messageParamKeys ?? [])].sort().join(",")
-    ) {
-      errors.push(`message parameter contract mismatch for ${definition.messageKey}`);
-    }
-    if (definition.actionKey) {
-      const actionPlaceholders = placeholders(
-        MESSAGE_CATALOGS["zh-CN"][definition.actionKey] ?? "",
-      );
-      if (
-        actionPlaceholders.join(",") !== [...(definition.actionParamKeys ?? [])].sort().join(",")
-      ) {
-        errors.push(`action parameter contract mismatch for ${definition.actionKey}`);
-      }
+      if (template.includes("{")) errors.push(`${locale} has unsupported placeholder in ${key}`);
     }
   }
   return errors;

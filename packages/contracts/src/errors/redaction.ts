@@ -1,5 +1,3 @@
-import type { ErrorMessageParam } from "./types.js";
-
 const SENSITIVE_KEYS =
   /token|secret|password|authorization|replyContext|context_token|memoryValue|messageBody|prompt|cause|stack|vendor|raw|response|path|sql|query|statement|body/i;
 const SENSITIVE_TEXT =
@@ -17,23 +15,4 @@ export function redactSensitive(value: unknown, seen = new WeakSet<object>()): u
       SENSITIVE_KEYS.test(key) ? "[redacted]" : redactSensitive(entry, seen),
     ]),
   );
-}
-
-export function safeErrorParams(
-  params: Record<string, ErrorMessageParam> | undefined,
-  allowed: readonly string[] | undefined,
-): Record<string, ErrorMessageParam> | undefined {
-  if (!params || !allowed?.length) return undefined;
-  const filtered = Object.fromEntries(
-    allowed.flatMap((key) => {
-      const value = params[key];
-      if (value === undefined || SENSITIVE_KEYS.test(key)) return [];
-      if (typeof value === "string") {
-        const redacted = redactSensitive(value);
-        if (redacted !== value || value.length > 200) return [];
-      }
-      return [[key, value]];
-    }),
-  );
-  return Object.keys(filtered).length > 0 ? filtered : undefined;
 }

@@ -32,5 +32,5 @@ export interface ImAdapter {
   ): Promise<void>;
   stop(): Promise<void>;
   send(message: OutboundMessage): Promise<SendResult>;
-  checkReady(): Promise<AdapterReadiness>;
+  checkReady(depth?: "runtime" | "diagnostic"): Promise<AdapterReadiness>;
 }

@@ -23,6 +23,7 @@ export interface ControlProjection {
   meta(): ControlMeta;
   admin(): AdminService | undefined;
   readiness(): Promise<ReadinessReport>;
+  diagnostics(): Promise<ReadinessReport>;
 }
 
 export class ControlServer {
@@ -91,7 +92,7 @@ export class ControlServer {
       const url = new URL(request.url ?? "/", "http://localhost");
       route = url.pathname;
       const method = request.method ?? "GET";
-      const metaRequest = method === "GET" && url.pathname === "/v1/meta";
+      const metaRequest = method === "GET" && url.pathname === "/v2/meta";
       if (!metaRequest) {
         if (!this.acceptingAdminRequests) {
           throw new IMGentError("RUNTIME_CONTROL_UNREACHABLE");
@@ -105,29 +106,32 @@ export class ControlServer {
         data = this.projection.meta();
       } else if (!admin) {
         throw new IMGentError("RUNTIME_CONTROL_UNREACHABLE");
-      } else if (method === "GET" && url.pathname === "/v1/status") {
+      } else if (method === "GET" && url.pathname === "/v2/status") {
         const readiness = await this.projection.readiness();
         data = {
           service: this.projection.meta(),
           ...(await admin.status(readiness)),
         };
-      } else if (method === "GET" && url.pathname === "/v1/readiness") {
+      } else if (method === "GET" && url.pathname === "/v2/readiness") {
         data = await this.projection.readiness();
-      } else if (method === "GET" && url.pathname === "/v1/identities") {
+      } else if (method === "POST" && url.pathname === "/v2/diagnostics") {
+        assertEmptyObject(await readBody(request));
+        data = await this.projection.diagnostics();
+      } else if (method === "GET" && url.pathname === "/v2/identities") {
         data = admin.identities();
-      } else if (method === "GET" && url.pathname === "/v1/groups") {
+      } else if (method === "GET" && url.pathname === "/v2/groups") {
         data = admin.groups();
-      } else if (method === "GET" && url.pathname === "/v1/skills") {
+      } else if (method === "GET" && url.pathname === "/v2/skills") {
         data = admin.skills();
-      } else if (method === "POST" && url.pathname === "/v1/skills/validate") {
+      } else if (method === "POST" && url.pathname === "/v2/skills/validate") {
         assertEmptyObject(await readBody(request));
         data = await admin.validateSkills();
-      } else if (method === "POST" && url.pathname === "/v1/backups") {
+      } else if (method === "POST" && url.pathname === "/v2/backups") {
         assertEmptyObject(await readBody(request));
         data = await admin.createControlledBackup();
       } else {
-        const pairing = url.pathname.match(/^\/v1\/pairings\/([^/]+)\/confirm$/u);
-        const group = url.pathname.match(/^\/v1\/groups\/([^/]+)\/authorize$/u);
+        const pairing = url.pathname.match(/^\/v2\/pairings\/([^/]+)\/confirm$/u);
+        const group = url.pathname.match(/^\/v2\/groups\/([^/]+)\/authorize$/u);
         if (method === "POST" && pairing) {
           assertEmptyObject(await readBody(request));
           data = admin.confirmPairing(decodePathSegment(pairing[1]!));
@@ -270,7 +274,7 @@ function httpStatus(kind: ReturnType<typeof normalizeError>["descriptor"]["kind"
 }
 
 function routeLabel(path: string): string {
-  if (/^\/v1\/pairings\/[^/]+\/confirm$/u.test(path)) return "/v1/pairings/:code/confirm";
-  if (/^\/v1\/groups\/[^/]+\/authorize$/u.test(path)) return "/v1/groups/:id/authorize";
+  if (/^\/v2\/pairings\/[^/]+\/confirm$/u.test(path)) return "/v2/pairings/:code/confirm";
+  if (/^\/v2\/groups\/[^/]+\/authorize$/u.test(path)) return "/v2/groups/:id/authorize";
   return path.slice(0, 128);
 }

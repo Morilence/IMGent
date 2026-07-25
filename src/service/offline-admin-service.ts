@@ -8,6 +8,7 @@ import { CredentialStore } from "../security/credential-store.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { IMGentStore } from "../storage/store.js";
+import { groups, identities, persistentStatus } from "./admin-queries.js";
 import type { ReadinessReport } from "./application.js";
 
 interface OfflineContext {
@@ -36,67 +37,20 @@ export class OfflineAdminService {
     this.context.store.close();
   }
 
+  setCredential(ref: string, value: Record<string, unknown>): Promise<void> {
+    return this.context.credentials.set(ref, value);
+  }
+
   persistentStatus(): Record<string, unknown> {
-    const { store } = this.context;
-    return {
-      database: store.status(),
-      transports: store.all(
-        `SELECT bot_instance_id AS botInstanceId,
-                checkpoint_key AS checkpointKey, value, updated_at AS updatedAt
-         FROM transport_checkpoints
-         ORDER BY bot_instance_id, checkpoint_key`,
-      ),
-      lastInboundByBot: store.all(
-        `SELECT bot_instance_id AS botInstanceId,
-                max(received_at) AS lastReceivedAt
-         FROM inbound_events GROUP BY bot_instance_id
-         ORDER BY bot_instance_id`,
-      ),
-      groups: store.all(
-        `SELECT cs.bot_instance_id AS botInstanceId, gp.mode,
-                gp.platform_full_capability AS platformFullCapability,
-                count(*) AS count
-         FROM group_policies gp
-         JOIN conversation_spaces cs
-           ON cs.id = gp.conversation_space_id
-         GROUP BY cs.bot_instance_id, gp.mode, gp.platform_full_capability
-         ORDER BY cs.bot_instance_id, gp.mode`,
-      ),
-      oldestWaitingTask:
-        store.get(
-          `SELECT id, conversation_key AS conversationKey, status,
-                  created_at AS createdAt
-           FROM tasks
-           WHERE status IN ('queued', 'active', 'retry_wait', 'waiting_approval')
-           ORDER BY created_at LIMIT 1`,
-        ) ?? null,
-    };
+    return persistentStatus(this.context.store);
   }
 
   identities(): unknown[] {
-    return this.context.store.all(
-      `SELECT pi.id AS platformIdentityId, pi.agent_profile_id AS agentProfileId,
-              pi.platform, pi.bot_instance_id AS botInstanceId,
-              pi.platform_user_id AS platformUserId, pi.principal_id AS principalId,
-              pi.display_name AS displayName, pi.paired
-       FROM platform_identities pi
-       ORDER BY pi.created_at`,
-    );
+    return identities(this.context.store);
   }
 
   groups(): unknown[] {
-    return this.context.store.all(
-      `SELECT cs.id AS conversationSpaceId, cs.agent_profile_id AS agentProfileId,
-              cs.bot_instance_id AS botInstanceId,
-              cs.platform_conversation_id AS platformConversationId,
-              gp.mode, gp.platform_full_capability AS platformFullCapability,
-              CASE WHEN ga.conversation_space_id IS NULL THEN 0 ELSE 1 END AS authorized
-       FROM conversation_spaces cs
-       JOIN group_policies gp ON gp.conversation_space_id = cs.id
-       LEFT JOIN group_authorizations ga ON ga.conversation_space_id = cs.id
-       WHERE cs.kind = 'group'
-       ORDER BY cs.created_at`,
-    );
+    return groups(this.context.store);
   }
 
   async skills(): Promise<unknown[]> {
@@ -132,7 +86,7 @@ export class OfflineAdminService {
       this.context.config.agentProfiles.map(async (profile) => {
         const driver = profile.driver === "codex" ? new CodexDriver() : new ClaudeCodeDriver();
         try {
-          profiles[profile.id] = await driver.checkReady(profile);
+          profiles[profile.id] = await driver.checkReady(profile, "diagnostic");
         } catch (error) {
           profiles[profile.id] = {
             ready: false,
@@ -169,7 +123,14 @@ export class OfflineAdminService {
         bots[route.botInstanceId]?.ready === true && profiles[route.agentProfileId]?.ready === true,
     );
     if (!readyRoute) issues.push(new IMGentError("PROFILE_OR_DRIVER_MISSING").descriptor);
-    return { ready: issues.length === 0, issues, bots, profiles };
+    return {
+      ready: issues.length === 0,
+      checkedAt: new Date().toISOString(),
+      depth: "diagnostic",
+      issues,
+      bots,
+      profiles,
+    };
   }
 
   createBackup(outputPath: string) {

@@ -9,6 +9,7 @@ import {
 import { configHash } from "../config/hash.js";
 import {
   CONTROL_BODY_LIMIT,
+  CONTROL_DIAGNOSTIC_TIMEOUT_MS,
   CONTROL_PROTOCOL_VERSION,
   CONTROL_REQUEST_TIMEOUT_MS,
   type ControlMeta,
@@ -46,7 +47,7 @@ export class ControlClient {
     const expectedHash = configHash(config);
     let meta: ControlMeta;
     try {
-      meta = await rawRequest<ControlMeta>(endpoint, "GET", "/v1/meta");
+      meta = await rawRequest<ControlMeta>(endpoint, "GET", "/v2/meta");
     } catch (error) {
       const code =
         error && typeof error === "object" && "code" in error
@@ -80,8 +81,16 @@ export class ControlClient {
     return rawRequest<T>(this.endpoint, "GET", path);
   }
 
-  async post<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
-    return rawRequest<T>(this.endpoint, "POST", path, body);
+  async post<T>(
+    path: string,
+    body: Record<string, unknown> = {},
+    timeoutMs = CONTROL_REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
+    return rawRequest<T>(this.endpoint, "POST", path, body, timeoutMs);
+  }
+
+  diagnostics<T>(): Promise<T> {
+    return this.post<T>("/v2/diagnostics", {}, CONTROL_DIAGNOSTIC_TIMEOUT_MS);
   }
 }
 
@@ -90,6 +99,7 @@ async function rawRequest<T>(
   method: "GET" | "POST",
   path: string,
   body?: Record<string, unknown>,
+  timeoutMs = CONTROL_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
   const serialized = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
   if (serialized && serialized.byteLength > CONTROL_BODY_LIMIT) {
@@ -139,7 +149,7 @@ async function rawRequest<T>(
         });
       },
     );
-    request.setTimeout(CONTROL_REQUEST_TIMEOUT_MS, () => {
+    request.setTimeout(timeoutMs, () => {
       request.destroy(new IMGentError("RUNTIME_CONTROL_UNREACHABLE"));
     });
     request.on("error", reject);

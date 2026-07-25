@@ -51,7 +51,8 @@ export class MemoryCurator {
           task_id: string;
           attempt: number;
         }>(
-          `SELECT id, task_id, attempt FROM memory_outbox
+          `SELECT id, task_id, attempt
+           FROM memory_outbox INDEXED BY memory_outbox_claim_idx
            WHERE status IN ('pending', 'retry_wait') AND attempt < 3
              AND next_attempt_at <= ?
            ORDER BY created_at LIMIT 1`,

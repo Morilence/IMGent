@@ -28,7 +28,6 @@ export class ApprovalService {
 
   create(
     taskId: string,
-    agentProfileId: string,
     conversationKey: string,
     principalId: string,
     request: ApprovalRequest,
@@ -37,13 +36,12 @@ export class ApprovalService {
     this.store.transaction(() => {
       this.store.run(
         `INSERT INTO approvals(
-          request_id, task_id, agent_profile_id, conversation_key, principal_id,
+          request_id, task_id, conversation_key, principal_id,
           tool_name, sanitized_input, risk, status, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
         ON CONFLICT(request_id) DO NOTHING`,
         request.requestId,
         taskId,
-        agentProfileId,
         conversationKey,
         principalId,
         request.toolName,

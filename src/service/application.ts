@@ -20,7 +20,14 @@ import { CredentialStore } from "../security/credential-store.js";
 import { SkillHostTools } from "../skills/host-tools.js";
 import { builtInSkillsDirectory } from "../skills/paths.js";
 import { SkillRegistry } from "../skills/registry.js";
+import {
+  cleanupExpiredRawEvents,
+  clearLocalMediaPaths,
+  referencedMediaPaths,
+  releasableMediaEvents,
+} from "../storage/media.js";
 import { IMGentStore } from "../storage/store.js";
+import { collectReadiness, type ReadinessReport } from "./readiness.js";
 import type {
   AgentDriver,
   ErrorDescriptor,
@@ -34,12 +41,7 @@ import type {
 
 const WECHAT_BASE_URL = "https://ilinkai.weixin.qq.com";
 
-export interface ReadinessReport {
-  ready: boolean;
-  issues: ErrorDescriptor[];
-  bots: Record<string, { ready: boolean; issues: ErrorDescriptor[] }>;
-  profiles: Record<string, { ready: boolean; version?: string; issues: ErrorDescriptor[] }>;
-}
+export type { ReadinessReport } from "./readiness.js";
 
 export class IMGentApplication {
   readonly identity: IdentityService;
@@ -58,10 +60,19 @@ export class IMGentApplication {
   private readonly routes: ReadonlyMap<string, string>;
   private readonly botAssemblyIssues = new Map<string, ErrorDescriptor[]>();
   private readonly adapterStartIssues = new Map<string, ErrorDescriptor[]>();
+  private readinessValue: ReadinessReport = {
+    ready: false,
+    checkedAt: new Date(0).toISOString(),
+    depth: "runtime",
+    issues: [],
+    bots: {},
+    profiles: {},
+  };
+  private readinessRefresh:
+    { depth: "runtime" | "diagnostic"; promise: Promise<ReadinessReport> } | undefined;
   private maintenanceTimer: NodeJS.Timeout | undefined;
   private mediaCleanupRunning = false;
-  private started = false;
-  private closed = false;
+  private phase: "created" | "running" | "closed" = "created";
 
   private constructor(
     readonly configPath: string,
@@ -273,95 +284,55 @@ export class IMGentApplication {
     }
   }
 
-  async checkReady(): Promise<ReadinessReport> {
-    const issues: ErrorDescriptor[] = [];
-    const bots: ReadinessReport["bots"] = {};
-    const profiles: ReadinessReport["profiles"] = {};
-    try {
-      this.store.database.prepare("SELECT 1").get();
-      this.store.database.exec("CREATE TEMP TABLE IF NOT EXISTS readiness_probe(value INTEGER)");
-      this.store.database.exec("DELETE FROM readiness_probe");
-    } catch (error) {
-      issues.push(normalizeError(error, "STORAGE_UNAVAILABLE").descriptor);
+  readiness(): ReadinessReport {
+    return this.readinessValue;
+  }
+
+  async refreshReadiness(depth: "runtime" | "diagnostic" = "runtime"): Promise<ReadinessReport> {
+    const current = this.readinessRefresh;
+    if (current) {
+      if (current.depth === "diagnostic" || depth === "runtime") return current.promise;
+      await current.promise;
     }
-    for (const bot of this.config.bots) {
-      if (bot.enabled === false) continue;
-      const assemblyIssues = this.botAssemblyIssues.get(bot.id);
-      const startIssues = this.adapterStartIssues.get(bot.id);
-      if (assemblyIssues || startIssues) {
-        bots[bot.id] = {
-          ready: false,
-          issues: [...(assemblyIssues ?? []), ...(startIssues ?? [])],
-        };
-      }
-    }
-    await Promise.all(
-      [...this.drivers.entries()].map(async ([profileId, driver]) => {
-        const profile = this.profiles.get(profileId);
-        if (!profile) return;
-        try {
-          const result = await driver.checkReady(profile);
-          profiles[profileId] = {
-            ready: result.ready,
-            ...(result.version ? { version: result.version } : {}),
-            issues: result.issues,
-          };
-        } catch (error) {
-          profiles[profileId] = {
-            ready: false,
-            issues: [normalizeError(error, "AGENT_UNAVAILABLE").descriptor],
-          };
-        }
-      }),
-    );
-    await Promise.all(
-      [...this.adapters.entries()].map(async ([botId, adapter]) => {
-        try {
-          const result = await adapter.checkReady();
-          const startIssues = this.adapterStartIssues.get(botId) ?? [];
-          bots[botId] = {
-            ready: result.ready && startIssues.length === 0,
-            issues: [...result.issues, ...startIssues],
-          };
-        } catch (error) {
-          bots[botId] = {
-            ready: false,
-            issues: [normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor],
-          };
-        }
-      }),
-    );
-    const readyRoute = this.config.routes.some((route) => {
-      const bot = this.config.bots.find((entry) => entry.id === route.botInstanceId);
-      return (
-        bot?.enabled !== false &&
-        bots[route.botInstanceId]?.ready === true &&
-        profiles[route.agentProfileId]?.ready === true
-      );
+    const promise = this.checkReady(depth).finally(() => {
+      if (this.readinessRefresh?.promise === promise) this.readinessRefresh = undefined;
     });
-    if (!readyRoute) {
-      issues.push(new IMGentError("PROFILE_OR_DRIVER_MISSING").descriptor);
-    }
-    return {
-      ready: issues.length === 0,
-      issues,
-      bots,
-      profiles,
-    };
+    this.readinessRefresh = { depth, promise };
+    return promise;
+  }
+
+  private async checkReady(depth: "runtime" | "diagnostic"): Promise<ReadinessReport> {
+    const report = await collectReadiness(
+      {
+        config: this.config,
+        store: this.store,
+        profiles: this.profiles,
+        drivers: this.drivers,
+        adapters: this.adapters,
+        botAssemblyIssues: this.botAssemblyIssues,
+        adapterStartIssues: this.adapterStartIssues,
+      },
+      depth,
+    );
+    this.readinessValue = report;
+    return report;
   }
 
   async start(_options: { skipReadiness?: boolean } = {}): Promise<void> {
-    if (this.started) throw new Error("IMGent 已启动");
+    if (this.phase !== "created") throw new Error("IMGent 不能重复启动");
     this.scheduler.start();
     this.curator.start();
     await this.cleanupReleasedMedia();
     await this.outbound.drain(this.adapters);
     this.maintenanceTimer = setInterval(() => {
       this.approvals.expirePending();
-      this.store.cleanupExpiredRawEvents();
+      cleanupExpiredRawEvents(this.store);
       void this.cleanupReleasedMedia();
       void this.outbound.drain(this.adapters).catch((error: unknown) => {
         this.logger.errorFrom("outbound.drain-failed", error);
+      });
+      void this.refreshReadiness("runtime").catch((error: unknown) => {
+        this.logger.errorFrom("readiness.refresh-failed", error);
       });
     }, 60_000);
     this.maintenanceTimer.unref();
@@ -378,7 +349,7 @@ export class IMGentApplication {
         this.logger.errorFrom("adapter.start-failed", error, { botInstanceId: botId });
       }
     }
-    this.started = true;
+    this.phase = "running";
     this.logger.info("application.started", {
       bots: this.adapters.size,
       profiles: this.drivers.size,
@@ -386,9 +357,8 @@ export class IMGentApplication {
   }
 
   async stop(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    this.started = false;
+    if (this.phase === "closed") return;
+    this.phase = "closed";
     const failures: unknown[] = [];
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
     this.maintenanceTimer = undefined;
@@ -703,7 +673,7 @@ export class IMGentApplication {
     this.mediaCleanupRunning = true;
     const mediaRoot = resolve(this.config.dataDir, "media", "wechat-ilink");
     try {
-      for (const event of this.store.releasableMediaEvents()) {
+      for (const event of releasableMediaEvents(this.store)) {
         let removed = true;
         for (const path of event.paths) {
           const candidate = resolve(path);
@@ -723,11 +693,11 @@ export class IMGentApplication {
             });
           }
         }
-        if (removed) this.store.clearLocalMediaPaths(event.eventId);
+        if (removed) clearLocalMediaPaths(this.store, event.eventId);
       }
       await this.cleanupOrphanedMedia(
         mediaRoot,
-        new Set(this.store.referencedMediaPaths().map((path) => resolve(path))),
+        new Set(referencedMediaPaths(this.store).map((path) => resolve(path))),
       );
     } finally {
       this.mediaCleanupRunning = false;
@@ -813,6 +783,8 @@ export function renderReadiness(report: ReadinessReport, locale: SupportedLocale
   });
   return {
     ready: report.ready,
+    checkedAt: report.checkedAt,
+    depth: report.depth,
     locale,
     issues: report.issues.map((issue) => renderError(issue, locale)),
     bots: Object.fromEntries(

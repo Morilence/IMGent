@@ -194,7 +194,7 @@ export class OutboundDispatcher {
   async drain(adapters: ReadonlyMap<string, ImAdapter>): Promise<number> {
     const rows = this.store.all<{ id: string; bot_instance_id: string }>(
       `SELECT id, bot_instance_id
-       FROM outbound_messages
+       FROM outbound_messages INDEXED BY outbound_claim_idx
        WHERE status IN ('pending', 'retry_wait')
          AND next_attempt_at <= ?
          AND attempt < 3

@@ -424,14 +424,12 @@ export class IdentityService {
       }
       this.store.run(
         `INSERT INTO group_authorizations(
-          conversation_space_id, agent_profile_id,
-          authorized_by_principal_id, created_at
-        ) VALUES (?, ?, ?, ?)
+          conversation_space_id, authorized_by_principal_id, created_at
+        ) VALUES (?, ?, ?)
         ON CONFLICT(conversation_space_id) DO UPDATE SET
           authorized_by_principal_id = excluded.authorized_by_principal_id,
           created_at = excluded.created_at`,
         conversationSpaceId,
-        group.agent_profile_id,
         authorizedByPrincipalId,
         now(),
       );

@@ -151,25 +151,27 @@ export class QqAdapter implements ImAdapter {
     this.fullGroupEventPermission = true;
   }
 
-  async checkReady(): Promise<AdapterReadiness> {
+  async checkReady(depth: "runtime" | "diagnostic" = "diagnostic"): Promise<AdapterReadiness> {
     const issues: ErrorDescriptor[] = [];
     let fullGroupPermissionIssue: ErrorDescriptor | undefined;
     if (!this.options.appId || !this.options.credential.appSecret) {
       issues.push(new IMGentError("ADAPTER_AUTH_REQUIRED").descriptor);
     }
     if (this.blockedIssue) issues.push(this.blockedIssue);
-    try {
-      const token = await this.token();
-      const gateway = await this.gateway(token);
-      if (!gateway.url.startsWith("wss://") && !gateway.url.startsWith("ws://")) {
-        issues.push(
-          new IMGentError("ADAPTER_COMPATIBILITY_ERROR", {
-            diagnostic: { platform: "qq", reason: "invalid gateway URL" },
-          }).descriptor,
-        );
+    if (depth === "diagnostic") {
+      try {
+        const token = await this.token();
+        const gateway = await this.gateway(token);
+        if (!gateway.url.startsWith("wss://") && !gateway.url.startsWith("ws://")) {
+          issues.push(
+            new IMGentError("ADAPTER_COMPATIBILITY_ERROR", {
+              diagnostic: { platform: "qq", reason: "invalid gateway URL" },
+            }).descriptor,
+          );
+        }
+      } catch (error) {
+        issues.push(normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor);
       }
-    } catch (error) {
-      issues.push(normalizeError(error, "ADAPTER_CONNECTION_FAILED").descriptor);
     }
     if (!this.fullGroupEventPermission) {
       fullGroupPermissionIssue = new IMGentError("ADAPTER_PERMISSION_DENIED", {

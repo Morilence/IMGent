@@ -304,3 +304,42 @@ test("Claude driver starts a new session when resume fails before producing outp
     await driver.close();
   }
 });
+
+test("runtime readiness never invokes a Claude model probe", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-claude-readiness-"));
+  const executable = join(directory, "fake-claude.mjs");
+  await writeFile(executable, "#!/usr/bin/env node\nprocess.stdout.write('2.1.89\\n');\n", {
+    mode: 0o700,
+  });
+  await chmod(executable, 0o700);
+  let probes = 0;
+  const sdk: ClaudeSdk = {
+    query: () => {
+      probes += 1;
+      const iterable = (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          session_id: "probe",
+          result: "READY",
+          terminal_reason: "completed",
+        };
+      })();
+      return Object.assign(iterable, {
+        interrupt: async () => undefined,
+        close: () => undefined,
+      }) as never;
+    },
+  };
+  const driver = new ClaudeCodeDriver({ sdk });
+  try {
+    const testProfile = profile("claude-code", executable, directory);
+    assert.equal((await driver.checkReady(testProfile, "runtime")).ready, true);
+    assert.equal(probes, 0);
+    assert.equal((await driver.checkReady(testProfile, "diagnostic")).ready, true);
+    assert.equal(probes, 1);
+  } finally {
+    await driver.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

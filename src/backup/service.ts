@@ -27,7 +27,7 @@ interface ArchiveFile {
 }
 
 interface BackupArchive {
-  format: "imgent-backup/v1";
+  format: "imgent-backup/v2";
   manifest: {
     createdAt: string;
     schemaVersion: number;
@@ -92,7 +92,7 @@ export async function createBackup(
     }
     files.push(...(await archiveSkillFiles(dataDir)));
     const archive: BackupArchive = {
-      format: "imgent-backup/v1",
+      format: "imgent-backup/v2",
       manifest: {
         createdAt: new Date().toISOString(),
         schemaVersion: SCHEMA_VERSION,
@@ -140,7 +140,7 @@ export async function restoreBackup(
   const archive = JSON.parse(
     await readFile(resolve(archivePath), "utf8"),
   ) as Partial<BackupArchive>;
-  if (archive.format !== "imgent-backup/v1" || !archive.manifest || !Array.isArray(archive.files)) {
+  if (archive.format !== "imgent-backup/v2" || !archive.manifest || !Array.isArray(archive.files)) {
     throw new Error("备份 manifest 或格式无效");
   }
   if (archive.manifest.schemaVersion !== SCHEMA_VERSION) {

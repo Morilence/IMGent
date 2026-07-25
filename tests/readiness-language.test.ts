@@ -85,14 +85,21 @@ test("/healthz stays simple and /readyz localizes issues from Accept-Language", 
     assert.equal(response.status, 503);
     const readiness = (await response.json()) as {
       ready: boolean;
+      checkedAt: string;
+      depth: string;
       locale: string;
       issues: Array<{ code: string; message: string; action?: string }>;
     };
     assert.equal(readiness.ready, false);
+    assert.equal(readiness.depth, "runtime");
     assert.equal(readiness.locale, "en-US");
     assert.equal(readiness.issues[0]?.code, "PROFILE_OR_DRIVER_MISSING");
     assert.match(readiness.issues[0]?.message ?? "", /AgentProfile|Driver/);
     assert.ok(readiness.issues[0]?.action);
+    const repeated = (await (await fetch(`http://127.0.0.1:${port}/readyz`)).json()) as {
+      checkedAt: string;
+    };
+    assert.equal(repeated.checkedAt, readiness.checkedAt);
   } finally {
     await service?.stop();
     await rm(directory, { recursive: true, force: true });

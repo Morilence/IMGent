@@ -176,7 +176,10 @@ export class ClaudeCodeDriver implements AgentDriver {
     this.probeOnReady = options.probeOnReady ?? true;
   }
 
-  async checkReady(profile: AgentProfile): Promise<DriverReadiness> {
+  async checkReady(
+    profile: AgentProfile,
+    depth: "runtime" | "diagnostic" = "diagnostic",
+  ): Promise<DriverReadiness> {
     const issues: DriverReadiness["issues"] = [];
     let version: string | undefined;
     try {
@@ -204,7 +207,7 @@ export class ClaudeCodeDriver implements AgentDriver {
         }).descriptor,
       );
     }
-    if (issues.length === 0 && this.probeOnReady) {
+    if (issues.length === 0 && depth === "diagnostic" && this.probeOnReady) {
       try {
         const probe = this.sdk.query({
           prompt: "Reply with exactly READY.",

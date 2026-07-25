@@ -131,7 +131,10 @@ export class CodexDriver implements AgentDriver {
 
   constructor(private readonly options: CodexDriverOptions = {}) {}
 
-  async checkReady(profile: AgentProfile): Promise<DriverReadiness> {
+  async checkReady(
+    profile: AgentProfile,
+    depth: "runtime" | "diagnostic" = "diagnostic",
+  ): Promise<DriverReadiness> {
     const issues: DriverReadiness["issues"] = [];
     let version: string | undefined;
     try {
@@ -159,7 +162,7 @@ export class CodexDriver implements AgentDriver {
         }).descriptor,
       );
     }
-    if (issues.length === 0) {
+    if (issues.length === 0 && depth === "diagnostic") {
       try {
         await this.ensureReady(profile);
         const account = await this.rpc!.request<{

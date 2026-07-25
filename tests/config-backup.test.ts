@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createBackup, restoreBackup } from "../src/backup/service.js";
-import { openAdminContext } from "../src/cli/context.js";
 import { defaultConfig } from "../src/config/index.js";
 import { configSchema } from "../src/config/schema.js";
 import { writeConfig } from "../src/config/write.js";
@@ -95,9 +94,7 @@ test("backup and restore verify checksums and preserve encrypted local credentia
     ...defaultConfig(workspace),
     dataDir,
   });
-  const context = await openAdminContext(configPath);
-  await context.credentials.set("qq-main", { appSecret: "secret-value" });
-  context.store.close();
+  await new CredentialStore(dataDir).set("qq-main", { appSecret: "secret-value" });
   const skillRoot = join(dataDir, "skills", "backup-skill");
   await mkdir(join(skillRoot, "scripts"), { recursive: true });
   await writeFile(
@@ -126,17 +123,16 @@ test("backup and restore verify checksums and preserve encrypted local credentia
     manifest: { externalAgentAuthenticationIncluded: boolean };
     files: Array<{ path: string }>;
   };
-  assert.equal(raw.format, "imgent-backup/v1");
+  assert.equal(raw.format, "imgent-backup/v2");
   assert.ok(raw.files.some((file) => file.path === "data/imgent.sqlite"));
   assert.equal(raw.manifest.externalAgentAuthenticationIncluded, false);
 
   const legacyArchivePath = join(directory, "legacy.backup");
-  const legacyFormat = `${["agent", ["pig", "eon"].join("")].join("-")}-backup/v1`;
   await writeFile(
     legacyArchivePath,
     JSON.stringify({
       ...raw,
-      format: legacyFormat,
+      format: "imgent-backup/v1",
     }),
   );
   await assert.rejects(

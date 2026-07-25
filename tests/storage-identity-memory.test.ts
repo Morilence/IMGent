@@ -14,6 +14,11 @@ import { SecretBox } from "../src/security/secret-box.js";
 import { SkillHostTools } from "../src/skills/host-tools.js";
 import { builtInSkillsDirectory } from "../src/skills/paths.js";
 import { SkillRegistry } from "../src/skills/registry.js";
+import {
+  cleanupExpiredRawEvents,
+  clearLocalMediaPaths,
+  releasableMediaEvents,
+} from "../src/storage/media.js";
 import { IMGentStore } from "../src/storage/store.js";
 import { directMessage, testStore } from "./helpers.js";
 import type {
@@ -114,7 +119,7 @@ test("restart recovery requeues safe work and dead-letters possibly executed wor
   assert.equal(store.claimNextTask()?.id, second.taskId);
   const waiting = store.claimNextTask();
   assert.equal(waiting?.id, third.taskId);
-  new ApprovalService(store).create(waiting!.id, "main", "approval", third.principalId, {
+  new ApprovalService(store).create(waiting!.id, "approval", third.principalId, {
     requestId: "restart-approval",
     toolName: "shell",
     sanitizedInput: {},
@@ -413,7 +418,6 @@ test("approvals are idempotent and bound to principal and conversation", async (
     const approvals = new ApprovalService(fixture.store);
     approvals.create(
       task!.id,
-      "main",
       "conversation-one",
       ingested.principalId,
       {
@@ -486,18 +490,18 @@ test("local inbound media is retained only while a task can still consume it", a
       "main",
       "media-conversation",
     );
-    assert.deepEqual(fixture.store.releasableMediaEvents(), []);
+    assert.deepEqual(releasableMediaEvents(fixture.store), []);
     const task = fixture.store.claimNextTask();
     assert.equal(task?.id, ingested.taskId);
     fixture.store.transitionTask(task!.id, ["active"], "succeeded");
-    assert.deepEqual(fixture.store.releasableMediaEvents(), [
+    assert.deepEqual(releasableMediaEvents(fixture.store), [
       {
         eventId: ingested.eventId,
         paths: [`${fixture.directory}/media.bin`],
       },
     ]);
-    fixture.store.clearLocalMediaPaths(ingested.eventId);
-    assert.deepEqual(fixture.store.releasableMediaEvents(), []);
+    clearLocalMediaPaths(fixture.store, ingested.eventId);
+    assert.deepEqual(releasableMediaEvents(fixture.store), []);
   } finally {
     await fixture.cleanup();
   }
@@ -596,7 +600,7 @@ test("full-mode group context gets seven-day retention and asynchronous scoped c
       new Date(Date.now() - 1_000).toISOString(),
       ingested.eventId,
     );
-    assert.equal(fixture.store.cleanupExpiredRawEvents(), 1);
+    assert.equal(cleanupExpiredRawEvents(fixture.store), 1);
     assert.equal(
       fixture.store.get<{ message_json: string }>(
         "SELECT message_json FROM inbound_events WHERE id = ?",

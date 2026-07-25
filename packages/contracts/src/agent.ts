@@ -35,7 +35,7 @@ export interface DriverReadiness {
 
 export interface AgentDriver {
   readonly id: "codex" | "claude-code";
-  checkReady(profile: AgentProfile): Promise<DriverReadiness>;
+  checkReady(profile: AgentProfile, depth?: "runtime" | "diagnostic"): Promise<DriverReadiness>;
   runTurn(input: AgentTurnInput): AsyncIterable<AgentEvent>;
   answerRequest(requestId: string, answer: AgentRequestAnswer): Promise<void>;
   interrupt(turnId: string): Promise<void>;

@@ -163,7 +163,6 @@ export class ConversationScheduler {
           case "session":
             this.options.store.saveSession(
               task.conversationKey,
-              profile.id,
               profile.driver,
               event.sessionId,
               profile.workspace,
@@ -185,7 +184,6 @@ export class ConversationScheduler {
             ].join("\n");
             this.options.approvals.create(
               task.id,
-              profile.id,
               task.conversationKey,
               task.principalId,
               event.request,
@@ -202,7 +200,6 @@ export class ConversationScheduler {
             ].join("\n");
             this.options.approvals.create(
               task.id,
-              profile.id,
               task.conversationKey,
               task.principalId,
               {

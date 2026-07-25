@@ -1,7 +1,7 @@
 # IMGent CLI 与常驻服务架构
 
-> 状态：v0.3 已实现架构基线
-> 日期：2026-07-24
+> 状态：v0.4 已实现架构基线
+> 日期：2026-07-25
 > 适用范围：v1 单机部署与 Docker 单容器
 > 实现进度以 [implementation-status.md](implementation-status.md) 为准。
 
@@ -34,7 +34,7 @@ API。systemd、launchd、Windows Service 或 Docker 负责拉起、重启、日
 - `imgent start` 由 `IMGentService` 组装 Application、Control Server 与 Health
   Server，并等待退出信号；QQ 仍使用 Gateway WebSocket，微信仍使用 HTTP long
   polling。
-- Control Server 在 Unix socket 或 Windows Named Pipe 上承载 `/v1` 管理协议；
+- Control Server 在 Unix socket 或 Windows Named Pipe 上承载 `/v2` 管理协议；
   Health Server 在 loopback TCP 上只提供 `/healthz` 与 `/readyz`。
 - `status`、在线 `doctor`、identity/group/skill 查询和在线备份通过 Control
   Client 查询同一 `instanceId`，不再创建第二个 Application。
@@ -198,7 +198,7 @@ BotInstance → AgentProfile 路由可以服务。`degraded` 不是崩溃态。
 每个命令显式声明 `offline`、`online` 或 `dual` capability。CLI 执行时：
 
 1. 从已解析的 `configPath` 得到 `dataDir` 和控制 endpoint。
-2. 尝试 `GET /v1/meta` 握手。
+2. 尝试 `GET /v2/meta` 握手。
 3. 握手成功时，online/dual 命令走 Control Client；offline 命令返回
    `RUNTIME_SERVICE_MUST_STOP`。
 4. endpoint 确认不存在时，offline/dual 命令走离线路径；online 命令返回
@@ -246,7 +246,7 @@ v1 配置和用户 skills 是启动快照：
 执行本地数据操作期间短暂持有 lease。服务绑定前先探测 endpoint：
 
 - 任意活动监听者能够接受连接：视为已有服务或 ownership lease，启动失败且不删除
-  endpoint；CLI 另通过 `/v1/meta` 区分真实服务和不可达控制面。
+  endpoint；CLI 另通过 `/v2/meta` 区分真实服务和不可达控制面。
 - 无活动监听者：只有确认是当前用户拥有的 socket 特殊文件时，才可清理 stale
   endpoint。
 - 普通文件、符号链接、其他用户拥有的路径一律拒绝删除。
@@ -260,7 +260,7 @@ resolver 得到的 endpoint：
   "pid": 1234,
   "startedAt": "2026-07-24T00:00:00.000Z",
   "appVersion": "0.1.0",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "instanceKey": "stable-hash",
   "endpoint": "<redacted-runtime-endpoint>",
   "configPath": "<redacted-or-relative>",
@@ -276,18 +276,18 @@ PID 和 PID 重用。
 
 控制面使用 HTTP/1.1 + JSON，原因是：
 
-- Node.js、Fastify 和测试工具可以直接复用。
+- Node.js 原生 HTTP 模块和测试工具可以直接复用。
 - Unix socket 与 Named Pipe 都能承载 HTTP。
 - 路由、状态码、超时和请求体上限容易审计。
 - 将来可以为 Web UI 复用 application service，但不承诺直接暴露相同 transport。
 
-所有路径带协议版本 `/v1`。握手响应至少包含：
+所有路径带协议版本 `/v2`。握手响应至少包含：
 
 ```json
 {
   "ok": true,
   "data": {
-    "protocolVersion": 1,
+    "protocolVersion": 2,
     "appVersion": "0.1.0",
     "instanceId": "uuid",
     "state": "ready",
@@ -329,20 +329,21 @@ PID 和 PID 重用。
 服务端和 CLI 都要设置请求体上限、响应超时和每次请求的 `requestId`。CLI 不自动
 重试 mutation；需要重试的 mutation 必须先在业务层定义幂等键或幂等终态。
 
-### 7.3 v1 路由
+### 7.3 v2 路由
 
-| Method | Path                         | 用途                                       |
-| ------ | ---------------------------- | ------------------------------------------ |
-| `GET`  | `/v1/meta`                   | 握手、版本与实例身份                       |
-| `GET`  | `/v1/status`                 | 真实运行状态、队列、Adapter、Driver 和积压 |
-| `GET`  | `/v1/readiness`              | 带稳定错误 descriptor 的详细 readiness     |
-| `GET`  | `/v1/identities`             | 身份映射列表                               |
-| `POST` | `/v1/pairings/:code/confirm` | 消费一次性配对码                           |
-| `GET`  | `/v1/groups`                 | QQ 群空间和授权状态                        |
-| `POST` | `/v1/groups/:id/authorize`   | 由指定 Principal 授权群                    |
-| `GET`  | `/v1/skills`                 | 当前活动的 skill 启动快照                  |
-| `POST` | `/v1/skills/validate`        | 在服务 owner 内校验磁盘与 Profile 引用     |
-| `POST` | `/v1/backups`                | 由服务创建一致性备份                       |
+| Method | Path                         | 用途                                   |
+| ------ | ---------------------------- | -------------------------------------- |
+| `GET`  | `/v2/meta`                   | 握手、版本与实例身份                   |
+| `GET`  | `/v2/status`                 | 运行状态与缓存的 runtime readiness     |
+| `GET`  | `/v2/readiness`              | 缓存的 runtime readiness 快照          |
+| `POST` | `/v2/diagnostics`            | 显式执行平台、账号和模型深度探测       |
+| `GET`  | `/v2/identities`             | 身份映射列表                           |
+| `POST` | `/v2/pairings/:code/confirm` | 消费一次性配对码                       |
+| `GET`  | `/v2/groups`                 | QQ 群空间和授权状态                    |
+| `POST` | `/v2/groups/:id/authorize`   | 由指定 Principal 授权群                |
+| `GET`  | `/v2/skills`                 | 当前活动的 skill 启动快照              |
+| `POST` | `/v2/skills/validate`        | 在服务 owner 内校验磁盘与 Profile 引用 |
+| `POST` | `/v2/backups`                | 由服务创建一致性备份                   |
 
 `reload`、`shutdown`、实时日志、任务取消和 dead-letter 管理只有在明确产品语义与
 权限后再增加；它们不是为了显得“像完整 API”而预留空路由。
@@ -352,10 +353,12 @@ PID 和 PID 重用。
 健康接口继续使用配置中的 loopback TCP 地址：
 
 - `GET /healthz`：只返回进程、本地核心和生命周期状态。
-- `GET /readyz`：返回是否至少有一条可工作路由；失败时为 503。
+- `GET /readyz`：只投影最近一次 runtime readiness；失败时为 503，不触发外部
+  网络、账号或模型请求。
 
 它们不能执行 mutation，不能返回身份、队列明细、配置、平台 ID 或本机路径。
-`imgent status` 使用控制面，不把 `/readyz` 当作管理 API。
+`imgent status` 使用控制面并同样读取缓存快照；只有 `imgent doctor` 通过
+`POST /v2/diagnostics` 主动执行深度探测。
 
 ## 8. 状态与数据所有权
 
@@ -397,18 +400,21 @@ SQLite 保存运行事实：
 
 `imgent backup` 是双模式命令：
 
-- 服务在线：通过 `/v1/backups` 请求服务执行 SQLite backup，并在同一配置快照下
+- 服务在线：通过 `/v2/backups` 请求服务执行 SQLite backup，并在同一配置快照下
   收集配置、凭据和用户 skills。
 - 服务离线：CLI 可以直接执行同一 backup application service。
 
-两种模式生成相同 archive format、manifest 和校验和。CLI 不在控制请求中传递任意
+两种模式都生成 `imgent-backup/v2` archive、manifest 和校验和；backup v1
+明确拒绝恢复。CLI 不在控制请求中传递任意
 服务端输出路径；默认由服务写入数据目录下的受控临时文件，再通过安全的文件移动或
-流式响应交付到 CLI 指定位置。当前 `/v1/backups` 只返回受控 artifact 名称和
+流式响应交付到 CLI 指定位置。当前 `/v2/backups` 只返回受控 artifact 名称和
 统计，不返回服务端绝对路径；CLI 在已知 backup 目录内解析、校验 owner/mode 后
 复制并原子落到目标路径。
 
 `restore` 始终要求目标实例停止，并验证目标目录、控制 endpoint、manifest、
-schema version、权限和 SQLite integrity。`--force` 不能绕过活动实例检查。
+schema version、权限和 SQLite integrity。当前 schema v4 只允许空数据目录初始化，
+任何旧 schema 都保持不变并返回 `STORAGE_SCHEMA_UNSUPPORTED`。`--force` 不能绕过
+活动实例检查。
 
 ## 9. 安全边界
 
@@ -436,17 +442,19 @@ imgent/
 ├─ src/
 │  ├─ cli/
 │  │  ├─ command-capability.ts
-│  │  ├─ context.ts
 │  │  ├─ control-client.ts
 │  │  ├─ main.ts
+│  │  ├─ program.ts
 │  │  └─ presentation.ts
 │  ├─ service/
+│  │  ├─ admin-queries.ts
 │  │  ├─ admin-service.ts
 │  │  ├─ application.ts
 │  │  ├─ instance.ts
 │  │  ├─ lifecycle.ts
 │  │  ├─ offline-admin-service.ts
-│  │  └─ offline-lease.ts
+│  │  ├─ offline-lease.ts
+│  │  └─ readiness.ts
 │  ├─ control/
 │  │  ├─ protocol.ts
 │  │  └─ server.ts
@@ -458,6 +466,10 @@ imgent/
 │  │  └─ outbound.ts
 │  ├─ config/
 │  ├─ storage/
+│  │  ├─ database.ts
+│  │  ├─ media.ts
+│  │  ├─ migrations.ts
+│  │  └─ store.ts
 │  ├─ queue/
 │  ├─ identity/
 │  ├─ approvals/
@@ -476,13 +488,15 @@ imgent/
 目录职责：
 
 - `cli/` 只负责参数解析、command capability、Control Client、离线入口和输出。
-  v1 命令量仍适合集中注册在 `main.ts`；出现独立演进需求时再按 capability 拆文件，
-  不预建空目录。
+  `main.ts` 只保留可执行入口，命令注册集中在 `program.ts`；出现独立演进需求时
+  再按 capability 拆文件，不预建 command context 抽象。
 - `service/` 负责进程生命周期、依赖组装、状态机、readiness 聚合和在线/离线管理
-  application service。
-- `control/` 负责本地协议、transport 和薄路由，不含业务 SQL。v1 路由数量有限，
+  application service；两种管理入口复用 `admin-queries.ts` 的只读查询。
+- `control/` 负责本地协议、transport 和薄路由，不含业务 SQL。v2 路由数量有限，
   因此集中在一个 server 模块中。
-- `health/` 只负责无副作用的 health/readiness TCP 表面。
+- `health/` 只用 `node:http` 投影无副作用的 health/readiness 缓存。
+- `storage/` 中 `database.ts` 管打开和 schema 校验，`media.ts` 管保留清理，
+  `store.ts` 保留事务性领域操作；不增加 repository interface 层。
 - `runtime/` 保存消息运行期通用能力，不再同时承担进程组装和管理 server。
 - 领域目录负责业务规则；在线/离线管理入口都位于 service 层，并复用相同领域与
   backup service，不把 SQL 放进 control route。
@@ -509,7 +523,7 @@ flowchart TD
 
 - Control route 直接拼 SQL。
 - CLI online command 直接 import `IMGentStore`。
-- Domain service import Commander、Fastify request/reply 或终端输出。
+- Domain service import Commander、Node HTTP request/response 或终端输出。
 - Adapter/Driver package import 根包 control protocol。
 - Health route 复用带敏感字段的 status DTO。
 
@@ -565,7 +579,7 @@ esbuild 只收敛 npm 发布边界，不改变运行时模块边界。只有出�
 
 - 引入 `service/lifecycle`、状态机和实例元数据。
 - 拆分 health server 与 control server。
-- 实现 Unix socket/Named Pipe endpoint、`GET /v1/meta` 和单实例保护。
+- 实现 Unix socket/Named Pipe endpoint、`GET /v2/meta` 和单实例保护。
 - 先建立协议、权限与单实例测试，再迁移命令。
 
 完成标准：第二个 `imgent start` 被可靠拒绝；CLI 可以区分 starting、ready、
@@ -626,7 +640,7 @@ runtime directory 行为属于对应平台发布前 smoke；Linux CI 只验证�
 
 当前真实子进程测试包含：
 
-1. 启动 `imgent start`，等待 `/v1/meta`。
+1. 启动 `imgent start`，等待 `/v2/meta`。
 2. 在第二进程执行 online `status`，并验证 lifecycle 与 readiness。
 3. 验证第二个 `start` 被拒绝，所有 online 输出携带同一 `instanceId`。
 4. 执行 pairing 和 group authorization mutation，并验证服务内数据库事实。
