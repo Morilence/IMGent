@@ -1,5 +1,12 @@
 # imgent
 
+## 0.2.0-alpha.6
+
+### Minor Changes
+
+- 5b0371e: Add stable conversation and speaker context to Codex and Claude Code turns, privacy-scoped hybrid
+  memory recall and curation, and local CLI and Control API memory auditing.
+
 ## 0.2.0-alpha.5
 
 ### Minor Changes

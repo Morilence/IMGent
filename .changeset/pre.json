@@ -16,6 +16,7 @@
     "clean-runtime-boundaries",
     "improve-im-pairing-workspaces",
     "instantiate-license-copyright",
+    "perceive-conversation-members",
     "retry-npm-visibility",
     "tidy-tools-publish"
   ]
