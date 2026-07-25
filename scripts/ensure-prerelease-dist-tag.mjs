@@ -36,7 +36,41 @@ async function defaultRunNpm(args) {
   });
 }
 
-export async function ensurePrereleaseDistTag({ name, version, runNpm = defaultRunNpm }) {
+function defaultWait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForDistTags(readDistTags, accept, wait) {
+  let lastError;
+  let lastTags;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      lastTags = await readDistTags();
+      lastError = undefined;
+      if (accept(lastTags)) {
+        return lastTags;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < 5) {
+      await wait(2 ** attempt * 1000);
+    }
+  }
+
+  if (lastTags !== undefined) {
+    return lastTags;
+  }
+  throw lastError;
+}
+
+export async function ensurePrereleaseDistTag({
+  name,
+  version,
+  runNpm = defaultRunNpm,
+  wait = defaultWait,
+}) {
   const tag = prereleaseTagForVersion(version);
   if (tag === undefined) {
     return { tag: undefined, removedLatest: false };
@@ -49,12 +83,21 @@ export async function ensurePrereleaseDistTag({ name, version, runNpm = defaultR
     return parseDistTags(result.stdout);
   };
 
-  let tags = await readDistTags();
+  let tags = await waitForDistTags(readDistTags, (candidate) => candidate[tag] === version, wait);
   let removedLatest = false;
   if (typeof tags.latest === "string" && prereleaseTagForVersion(tags.latest) !== undefined) {
     await runNpm(["dist-tag", "rm", name, "latest"]);
     removedLatest = true;
-    tags = await readDistTags();
+    tags = await waitForDistTags(
+      readDistTags,
+      (candidate) =>
+        candidate[tag] === version &&
+        !(
+          typeof candidate.latest === "string" &&
+          prereleaseTagForVersion(candidate.latest) !== undefined
+        ),
+      wait,
+    );
   }
 
   if (tags[tag] !== version) {
