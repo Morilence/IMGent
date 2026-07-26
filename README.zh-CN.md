@@ -2,70 +2,83 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-IMGent 是一个自托管桥接器，让用户可以通过 QQ 官方机器人或微信 iLink 机器人使用本地
-Codex 或 Claude Code Agent，同时继续在本机掌控工作区、身份、审批、会话和记忆。
+IMGent 是一个自托管桥接器，让你通过 QQ 官方机器人或微信 iLink 使用本机的 Codex 和
+Claude Code Agent。它把每个会话路由到已授权工作区，并将结果、审批和追问送回原会话；代码、
+凭据、会话、skills 和记忆都留在本机。
 
-> **Alpha：**IMGent 目前仍处于实验阶段，尚不适合生产环境。API、配置、数据库 schema、
-> 备份格式和运行行为可能发生不向后兼容的变化。
+> **Alpha：**IMGent 仍处于实验阶段，尚不适合生产环境。API、配置、数据库 schema、备份格式
+> 和运行行为可能发生不向后兼容的变化。
 
-本文分为三个部分：
+- [从聊天到工作区](#从聊天到工作区)
+- [如何工作](#如何工作)
+- [快速开始](#快速开始)
+- [命令速查](#命令速查)
+- [运行与恢复](#运行与恢复)
+- [开发与发布](#开发与发布)
 
-1. [认识 IMGent](#1-认识-imgent)：IMGent 能做什么、如何工作，以及能力边界。
-2. [使用 IMGent](#2-使用-imgent)：安装、完整工作流、命令和输出。
-3. [开发与维护 IMGent](#3-开发与维护-imgent)：仓库结构、验证、部署和发布。
+第一次安装时，按顺序完成[快速开始](#快速开始)即可。服务已经跑起来后，可以在
+[命令速查](#命令速查)中查 CLI 用法，在[运行与恢复](#运行与恢复)中查健康检查、备份和部署。
 
-## 1. 认识 IMGent
+## 从聊天到工作区
 
-### IMGent 是什么
+配对完成后，你可以在已授权私聊或 QQ 群中让 Agent 阅读仓库、排查故障、修改文件或运行测试。
+较长的任务可以分多轮继续。审批和追问会回到同一个聊天，IMGent 只加载该会话有权使用的记忆。
 
-IMGent 与你已经掌控的工作区和 Agent CLI 运行在同一环境中。它接收 IM 消息，将发送者映射到本地
-身份，只加载当前会话允许使用的记忆和 skills，运行选定的本地 Agent，处理审批或问题，再把结果
-发回原会话。
+部署者决定每个机器人使用哪个 Agent Profile、用户能访问哪些工作区、权限上限是多少，以及
+Agent 可以加载哪些本地 skills。QQ 群需要在本机授权。开启全量群采集时，QQ 还必须能确认
+发起者是群主或管理员。
 
-它面向个人开发者和由一名部署者管理的小团队：
+### 能力概览
 
-- **部署者**安装 IMGent，登录 Codex 或 Claude Code，选择工作区和权限上限，配置机器人，并负责
-  备份和升级。
-- **已配对用户**可以在已授权的私聊或 QQ 群中要求 Agent 工作。
-- **已配对管理员**可以授权已发现的 QQ 群。开启 QQ 群全量采集还要求发起者是平台可验证的群主或
-  管理员。
+| 能力            | QQ 官方机器人                        | 微信 iLink                  |
+| --------------- | ------------------------------------ | --------------------------- |
+| 私聊            | 支持                                 | 支持                        |
+| 群聊            | 支持                                 | 安全拒绝                    |
+| 默认群采集      | `triggered`：@、回复和命令           | 不支持                      |
+| 可选全量群采集  | 由已配对、平台可验证的 QQ 管理员批准 | 不支持                      |
+| 回复入站消息    | 支持                                 | 要求 `context_token` 仍有效 |
+| 主动投递        | 支持                                 | 不支持                      |
+| 定时 Agent 任务 | 支持                                 | 在 Agent 工作开始前拒绝     |
+| 本地 Agent 驱动 | Codex 或 Claude Code                 | Codex 或 Claude Code        |
+| 跨平台身份绑定  | 需要用户手动确认                     | 需要用户手动确认            |
 
-IMGent 只有一个 npm 包和一个 `imgent` 可执行入口。`imgent start` 是前台常驻服务，其他每次调用
-都是短生命周期管理 CLI。
+IMGent 会把收到的文本、图片、音频、视频和文件整理成统一消息格式。如果驱动支持对应媒体类型，
+QQ 附件 URL 和安全物化后的微信媒体会直接传给它；其余附件仍会出现在 Agent 上下文中。
 
-### 支持的能力
+Codex 使用本地 app-server 协议。Claude Code 使用本地 Agent SDK 和 CLI 认证。IMGent 直接使用
+机器上已有的登录状态，不会收集或代理 Agent 厂商的登录 token。
 
-| 能力                       | QQ 官方机器人                              | 微信 iLink                                    |
-| -------------------------- | ------------------------------------------ | --------------------------------------------- |
-| 私聊                       | 支持                                       | 支持                                          |
-| 群聊                       | 支持                                       | 不支持；疑似群事件会被安全拒绝                |
-| 默认群采集                 | `triggered`：只处理 @、回复和命令          | 不适用                                        |
-| 可选全量群采集             | 支持，但需要配对并由可验证的 QQ 管理员批准 | 不支持                                        |
-| 回复入站消息               | 支持                                       | 支持，但要求 `context_token` 仍有效           |
-| 没有近期入站消息时主动投递 | 支持                                       | 不支持                                        |
-| 定时 Agent 任务            | 支持                                       | 不支持；创建或恢复会在 Agent 工作开始前被拒绝 |
-| 本地 Agent 驱动            | Codex 或 Claude Code                       | Codex 或 Claude Code                          |
-| 跨平台身份绑定             | 只允许用户显式确认绑定                     | 只允许用户显式确认绑定                        |
+### 当前边界
 
-两个 Agent 驱动对外提供相同的 IMGent 层语义，但保留真实协议差异。Codex 使用本地 app-server
-协议；Claude Code 使用本地 Agent SDK 和 CLI 认证。IMGent 不会索取、导出或代理 Agent
-厂商的登录凭据。
+这个 npm 包只安装一个命令：`imgent`。`imgent start` 在前台运行常驻服务；其他命令完成一次
+管理操作后就会退出。
 
-入站文本、图片、音频、视频和文件都会规范化成统一消息契约。QQ 附件 URL 和安全物化后的微信
-媒体会在驱动支持对应类型时传给选定驱动；不支持的类型仍会作为明确的附件上下文，而不是静默
-变成文本。平台之间没有统一富交互映射时，Agent 结果、审批和问题使用文本。
+IMGent 负责管理：
 
-### 一条消息如何被处理
+- 本地工作区和本地 Agent 登录；
+- QQ 官方机器人和微信 iLink 私聊；
+- 一个常驻服务、一个 SQLite 数据库和一个数据目录；
+- 本地 skills、分作用域长期记忆、审批、队列和定时任务；
+- 受保护的本地控制 socket 或 Windows Named Pipe。
+
+它不提供远程管理 API、多节点调度、云端记忆、向量数据库、动态适配器加载、个人客户端模拟、
+微信群或自动身份匹配。遇到不兼容的数据库和备份归档时，IMGent 会保持原文件不变并拒绝打开。
+
+完整产品与安全契约见[产品设计](docs/imgent-product-design.md)。
+
+## 如何工作
+
+### 消息链路
 
 ```mermaid
 flowchart LR
     U["QQ 或微信中的用户"] --> A["官方平台适配器"]
     A --> N["规范化、去重、持久化"]
     N --> I["身份、授权、记忆作用域"]
-    I --> Q["按会话 FIFO 排队"]
+    I --> Q["按会话 FIFO"]
     Q --> S["IMGent skills 与 Host Tools"]
-    S --> D["Codex 或 Claude Code 驱动"]
-    D --> O["回复 / 主动投递队列"]
+    S --> D["Codex 或 Claude Code"]
+    D --> O["回复或主动投递"]
     O --> A
     D --> M["受限记忆策展"]
     M --> DB[("SQLite")]
@@ -73,113 +86,88 @@ flowchart LR
     I --> DB
 ```
 
-这条链路上的重要行为：
+同一会话一次只运行一个 Agent turn，后续消息按 FIFO 排队；不同会话可以同时工作。IMGent
+单独确认平台事件，不让耗时的 Agent 工作阻塞确认流程。重复事件会在创建第二个任务前被过滤。
 
-- 平台事件确认与耗时较长的 Agent 工作相互独立。
-- 重复投递会在创建第二个任务前被去重。
-- 一个会话同一时间只运行一个 turn，后续消息按 FIFO 等待；不同会话可以并发。
-- 每个 Agent turn 都以宿主生成的 `[IMGent Context]` JSON 行开始，其中包含稳定、匿名化的会话
-  和发言者引用。群成员共享群 Agent session，但每条消息仍能区分具体发言者；可变昵称只是不可信
-  展示标签。
-- 私聊记忆、QQ 群共享记忆和群成员档案是独立作用域。群聊 turn 永远不会加载成员的私聊记忆。
-- 高风险 Host Tool 请求会把审批发回原会话。只有原请求对应的已授权 Principal 可以允许、
-  拒绝或回答。
-- 进程重启会让未完成审批失效，而不是猜测某个副作用是否已经发生。
-- 安全的瞬时失败使用有界重试；未知或危险副作用不会被自动重放。
+IMGent 会在每个 Agent turn 开头加入一行宿主生成的 `[IMGent Context]` JSON，其中包含稳定、
+匿名化的会话和发言者引用。群成员可以共享 Agent session，每条消息仍能对应到具体发言者。
 
-### 进程与数据所有权
+记忆不会跨越自己的作用域：
+
+- 私聊记忆属于 Principal；
+- QQ 群拥有群共享记忆；
+- 成员档案只用于该成员所在的当前群；
+- 群聊 turn 无法加载私聊记忆或其他成员档案。
+
+Host Tool 请求执行高风险操作时，IMGent 会把审批送回原会话。只有该请求对应的已授权 Principal
+可以允许、拒绝或回答。进程重启后，未完成请求会失效。安全的瞬时失败会有限重试；如果重放操作
+可能产生重复副作用，IMGent 会停止执行。
+
+### 运行时所有权
 
 ```mermaid
 flowchart TB
     OP["部署者或自动化"] --> CLI["短生命周期 imgent 命令"]
     SUP["systemd / launchd / Windows Service / Docker"] --> SVC["imgent start"]
-    CLI -->|"online 命令：本地 HTTP/JSON v3"| CP["受保护的 Unix socket / Named Pipe"]
+    CLI -->|"online：本地 HTTP/JSON v3"| CP["受保护的 Unix socket / Named Pipe"]
     CP --> SVC
-    CLI -->|"停服时的 offline 或 dual 命令"| LEASE["短期 ownership lease"]
+    CLI -->|"停服时的 offline 或 dual"| LEASE["短期所有权 lease"]
     LEASE --> DATA["配置、凭据、SQLite、用户 skills"]
     SVC --> DATA
-    SVC --> IM["QQ / 微信连接"]
+    SVC --> IM["QQ / 微信"]
     SVC --> AG["Codex / Claude Code"]
     PROBE["本机健康探针"] --> HEALTH["Loopback /healthz 与 /readyz"]
     HEALTH --> SVC
 ```
 
-常驻服务是 SQLite、凭据、适配器、驱动、队列、定时任务和不可变 skill 快照的唯一在线
-所有者。在线 CLI 命令使用受保护的 Unix socket 或用户范围 Windows Named Pipe。健康端点只绑定
-loopback，只提供 `/healthz` 和 `/readyz`，不是管理 API。
+常驻服务运行期间会独占 SQLite、凭据、适配器、驱动、队列、定时任务和 skill 快照。管理命令
+通过受保护的本地控制端点访问它。健康服务只绑定 loopback，只报告存活和就绪状态。
 
-IMGent 明确**不提供**：
+IMGent 会在启动时读取配置和用户 skills。离线修改前先停止服务，校验 skills，再重启加载新的
+快照。
 
-- 公开或远程管理 API；
-- 第二个 daemon 二进制或 `start --daemon`；
-- 动态第三方适配器/驱动加载或插件市场；
-- 多节点调度、分布式队列或数据库集群；
-- 云端记忆服务、向量数据库或外部 embedding API；
-- 根据姓名、手机号或消息内容自动合并身份；
-- 个人 QQ/微信客户端模拟、微信群、企业微信、视频号或公众号；
-- 旧 SQLite schema 或备份格式的自动迁移。
-
-完整产品与安全契约见[产品设计](docs/imgent-product-design.md)。进程模型和本地控制协议见
+生命周期、所有权和协议细节见
 [CLI 与常驻服务架构](docs/cli-service-architecture.md)。
 
-## 2. 使用 IMGent
+## 快速开始
 
 ### 环境要求
 
 - Node.js **24.18.0 或更高版本**。
-- 已在本机安装并登录 `codex` CLI。使用 Claude Code 驱动时还需安装并登录 `claude`。
+- 本机已经安装并登录 `codex` CLI。
+- 使用 Claude Code 驱动时，本机已经安装并登录 `claude` CLI。
 - QQ 官方机器人凭据，或能够完成 iLink QR 授权的微信账号。
-- 长期部署建议使用专用本机用户和受保护的数据目录。
+- 长期运行时使用绝对工作区路径和受保护的数据目录。
 
-以下示例使用 Unix 路径，请替换为适合当前系统的绝对路径：
+下文使用这些占位值：
 
-| 下文占位值                  | 含义                            |
-| --------------------------- | ------------------------------- |
-| `/srv/imgent/imgent.json`   | 选定的 IMGent 配置文件          |
-| `/srv/imgent/state`         | 根据该配置解析出的数据目录      |
-| `/srv/workspaces/main`      | 示例 Profile 的回退与允许工作区 |
-| `main`                      | AgentProfile ID                 |
-| `qq-main` / `wechat-main`   | BotInstance ID                  |
-| `principal_01`              | 已配对的 IMGent Principal ID    |
-| `conversation_qq_direct_01` | 已发现的 ConversationSpace ID   |
-| `schedule_01`               | IMGent 返回的计划 ID            |
+| 值                          | 含义                                                   |
+| --------------------------- | ------------------------------------------------------ |
+| `/srv/imgent/imgent.json`   | IMGent 配置文件                                        |
+| `/srv/imgent/state`         | 根据该配置解析出的数据目录                             |
+| `/srv/workspaces/main`      | Agent 可以使用的工作区                                 |
+| `main`                      | 选择驱动、默认工作区、skills 和权限边界的 AgentProfile |
+| `qq-main`、`wechat-main`    | 分别连接 QQ 和微信的 BotInstance                       |
+| `principal_01`              | 在本机代表一名已配对用户的 Principal                   |
+| `conversation_qq_direct_01` | 在本机代表一个私聊或群聊的 ConversationSpace           |
+| `schedule_01`               | IMGent 创建的定时任务                                  |
 
-输出示例中的值（包括 ID、时间、计数和大小）是说明性数据，但字段名和外层响应结构与当前 CLI
-一致。示例不会展示 secret、token、本地控制 endpoint 或真实用户标识。
+### 1. 安装
 
-### 安装
-
-全局安装长期运行的 CLI：
+全局安装 alpha 版本：
 
 ```bash
 npm install --global imgent@alpha
 imgent --version
 ```
 
-只想临时查看帮助而不做全局安装：
+不做全局安装，直接查看 CLI：
 
 ```bash
 npx --package imgent@alpha imgent --help
 ```
 
-### 先理解命令运行模式
-
-每个管理命令都会声明自己如何访问状态：
-
-| 模式      | 可运行条件                                         | 命令                                                                                                                     |
-| --------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `offline` | 同一数据目录的 `imgent start` 已停止               | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`                                              |
-| `online`  | 常驻服务正在运行；始终走本地控制面                 | `pair`、`identity workspace set`、`group authorize`、`group authorize-code`、`conversation list`、所有 `schedule` 子命令 |
-| `dual`    | 运行时访问服务，停服时取得短期离线 ownership lease | `doctor`、`status`、`identity list`、`group list`、`memory status/list/show`、`skills list`、`skills validate`、`backup` |
-
-`imgent start` 本身是常驻进程。服务运行时执行 offline 命令会返回
-`RUNTIME_SERVICE_MUST_STOP`；服务停止时执行 online 命令会返回
-`RUNTIME_SERVICE_NOT_RUNNING`。如果控制 endpoint 存在但无法安全握手，IMGent 会报告错误，
-不会静默打开 SQLite。
-
-### 端到端配置
-
-#### 1. 初始化配置并添加 Agent Profile
+### 2. 初始化 Profile
 
 ```bash
 imgent --config /srv/imgent/imgent.json init \
@@ -188,30 +176,38 @@ imgent --config /srv/imgent/imgent.json init \
 
 imgent --config /srv/imgent/imgent.json profile add main \
   --driver codex \
-  --agent-user-home /home/codex-user \
+  --agent-user-home /srv/workspaces \
   --workspace /srv/workspaces/main \
   --max-mode ask
 ```
 
-使用 Claude Code 时传入 `--driver claude-code`。`deny`、`ask`、`allow` 是权限上限，Agent
-或 skill 无法提高已配置的上限。
+Claude Code 使用 `--driver claude-code`。`deny`、`ask`、`allow` 设置 Profile 权限上限，
+Agent 指令和 skills 无法提高该上限。添加 `--no-memory` 可以关闭此 Profile 的长期记忆。
 
-#### 2. 可选：创建本机操作指令
+`--agent-user-home` 是 Profile 的默认工作区和隐式允许根目录，不会修改操作系统用户或 `HOME`。
+
+### 3. 添加可选本地指令
+
+IMGent 内置会话和记忆 skills。部署者可以添加项目指令：
 
 ```bash
 imgent --config /srv/imgent/imgent.json skills init project-conventions \
   --description "Apply this workspace's build, test, and review conventions"
+
+# 编辑 /srv/imgent/state/skills/project-conventions/SKILL.md
 imgent --config /srv/imgent/imgent.json skills validate
 ```
 
-编辑 `/srv/imgent/state/skills/project-conventions/SKILL.md`；后续修改需要再次校验并重启
-IMGent。内置和部署者自定义的 skills 都是 IMGent 托管指令，可供两种 Agent 驱动使用，但无法扩大
-Host Tool 权限。
+skill 修改会在下次服务启动后生效。两种 Agent 驱动共用这些 skills，并继续受 Profile 权限上限
+约束。
 
-#### 3A. 添加 QQ 机器人
+### 4. 接入机器人
 
-不要把 QQ AppSecret 写入命令历史。`bot add` 会从指定环境变量读取 secret，加密写入数据目录，
-不会把 secret 写入 `imgent.json`。
+可以选择 QQ、微信 iLink，也可以同时配置。
+
+#### QQ 官方机器人
+
+避免把 AppSecret 写入命令历史。`bot add` 会从环境变量读取并加密保存到数据目录。
 
 ```bash
 export IMGENT_QQ_APP_ID='123456789'
@@ -225,1134 +221,255 @@ imgent --config /srv/imgent/imgent.json bot add qq qq-main \
 unset IMGENT_QQ_APP_SECRET
 ```
 
-确保启动 IMGent 的 supervisor 仍能取得 `IMGENT_QQ_APP_ID`，也可以用
-`--app-id 123456789` 把非敏感 AppID 直接写入配置。
+后续启动 IMGent 的 supervisor 仍需提供 `IMGENT_QQ_APP_ID`。也可以使用
+`--app-id 123456789` 把非敏感 AppID 写入配置。
 
-#### 3B. 或添加并授权微信 iLink 机器人
+#### 微信 iLink
 
 ```bash
 imgent --config /srv/imgent/imgent.json bot add wechat-ilink wechat-main \
   --profile main
+
 imgent --config /srv/imgent/imgent.json bot authorize wechat-main
 ```
 
-第二条命令会显示 QR 码，必要时要求输入微信验证码，并加密保存返回的 bot token。两条命令都是
-offline；重新授权前必须停止服务。
+授权过程会显示 QR 码，必要时要求输入微信验证码。返回的 bot token 会加密保存在数据目录。
+重新授权前先停止服务。
 
-#### 4. 诊断并启动
+### 5. 诊断并启动
 
 ```bash
 imgent --config /srv/imgent/imgent.json doctor
 imgent --config /srv/imgent/imgent.json start
 ```
 
-`doctor` 会显式检查 Node、SQLite、平台凭据、Agent 命令、版本和登录状态。`start` 保持在前台
-运行，每行输出一个 JSON 日志对象。请使用 systemd、launchd、Windows Service 或 Docker
-托管它。
+`start` 保持前台运行并处理 `SIGINT` 和 `SIGTERM`。在一个终端保持服务运行，在另一个终端使用
+online 命令。无人值守时交给服务管理器。
 
-#### 5. 配对用户
+### 6. 配对用户
 
-第一次私聊会返回一次性配对码。保持 `imgent start` 运行，在另一个终端确认：
-
-```bash
-imgent --config /srv/imgent/imgent.json pair ABCD-EFGH
-```
-
-不传 `--workspace` 时，工作目录默认使用配对路由所选 AgentProfile 的
-`agentUserHome`。该路径表示实际连接此 Profile 的 Codex 或 Claude Code 本地用户 Home，
-不会从 IMGent 服务用户或执行 `pair` 时的当前目录推断。也可以由本机部署者显式指定：
+先向机器人发送私聊消息。IMGent 会返回一次性配对码，然后在本机确认：
 
 ```bash
-imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
+imgent --config /srv/imgent/imgent.json pair PAIR-7Q2M9K \
   --workspace /srv/workspaces/main
 ```
 
-配对码只使用一次，重复确认成功使用过的码是幂等的。工作目录保存在 Principal 上；其私聊及由
-该 Principal 授权的 QQ 群使用同一工作目录。完成配对后，用户才可以运行 Agent turn。
-如果 IMGent 已发现尚未授权的群，`pair` 结果会在 `nextSteps` 中直接给出每个群的授权命令；
-对于 QQ，配对成功后还会立即把排队中的群授权码发送到该用户私聊。
+命令会返回 Principal ID。省略 `--workspace` 时使用所选 Profile 的 `agentUserHome`。Principal
+工作区用于私聊 turn；已授权 QQ 群使用授权 Principal 的工作区。
 
-#### 6. 授权 QQ 群
-
-先在群里 @机器人一次，让 IMGent 发现该群。IMGent 会主动私聊触发用户：身份尚未配对时先发送
-配对码，本机配对成功后立刻续发排队中的群授权码；身份已经配对时直接发送群授权码。把授权码
-交给部署者，在本机确认：
+后续可以修改工作区：
 
 ```bash
-imgent --config /srv/imgent/imgent.json group authorize-code GRP-8F12A4B9C0DE \
+imgent --config /srv/imgent/imgent.json \
+  identity workspace set principal_01 /srv/workspaces/another-project
+```
+
+修改工作区会重置受影响的 Agent session。
+
+### 7. 授权可选 QQ 群
+
+先在群内触发一次机器人。IMGent 会向发起者私聊发送配对指引或 `GRP-...` 授权码。已配对
+Principal 可以完成授权：
+
+```bash
+imgent --config /srv/imgent/imgent.json \
+  group authorize-code GRP-8F12A4B9C0DE \
   --principal principal_01
 ```
 
-`GRP-...` 只用于标识本机已经发现的群，本身不是授权凭据；命令仍要求连接本机常驻控制面，并
-提供已配对 Principal。授权提交后，IMGent 会主动在群里告知已可运行 Agent；如果 Adapter
-暂时不可用，群授权仍然有效，通知失败会留给部署者审计。部署者也可以手动查看本地 ID，继续
-使用 ConversationSpace 形式：
+该代码对应这个 IMGent 实例已经发现的群。本地控制面会检查已配对 Principal 并提交授权，然后
+IMGent 会在群里告知成员已经可以运行 Agent。如果 Adapter 暂时不可用，群授权仍然有效，失败的
+通知会出现在运维审计数据中。
+
+也可以使用本地 ID：
 
 ```bash
 imgent --config /srv/imgent/imgent.json identity list
 imgent --config /srv/imgent/imgent.json group list
-imgent --config /srv/imgent/imgent.json group authorize conversation_qq_group_01 \
+imgent --config /srv/imgent/imgent.json \
+  group authorize conversation_qq_group_01 \
   --principal principal_01
 ```
 
-该群会保持 `triggered` 模式，直到已配对、且平台可验证为 QQ 群主或管理员的用户在群中发送
-`/imgent group full`。
+默认 `triggered` 模式处理 @、回复和命令。平台可验证的群主或管理员可以在群内发送
+`/imgent group full` 开启全量采集。
 
-#### 7. 在聊天中运行 Agent turn
+### 8. 运行 Agent turn
 
-在已配对私聊中直接发送普通请求。QQ 群使用默认 `triggered` 模式时，需要 @机器人、回复机器人，
-或发送 `/imgent` 命令：
-
-```text
-用户：检查当前仓库状态，并总结需要注意的事项。
-Agent：工作树干净；当前分支是 main，并且与 origin/main 一致。
-```
-
-回复由选定的本地 Agent 在该 Principal 工作区中生成。如果 Agent 需要审批，IMGent 会把操作、
-风险说明、影响、目的、范围、命令或权限预览以及一次性审批编号整理成可读卡片发回同一会话，
-而不是转发 Driver 的原始请求 JSON；按下文说明使用 `/imgent allow`、`/imgent deny` 或
-`/imgent answer` 回答。发送 `/imgent cancel` 或“取消”可以取消该会话运行中和排队中的工作。
-
-原始请求进入 Codex 或 Claude Code 前，IMGent 会增加一行紧凑的宿主元数据，例如：
+在已配对私聊或已授权 QQ 群中直接发送任务：
 
 ```text
-[IMGent Context] {"conversation":{"kind":"group","ref":"group_7bc41a930f","platform":"qq","botInstanceId":"qq-main"},"speaker":{"ref":"person_a42f9c10de","displayName":"示例用户","role":"member"}}
+检查这个仓库，运行相关测试，并简要说明失败项。
 ```
 
-同一 Principal 和 ConversationSpace 的引用保持稳定，但不会暴露 QQ/微信原始用户 ID。该行是
-宿主元数据，不是用户指令。
+IMGent 会先为请求添加稳定的发言者和会话引用，再把它交给 Agent。普通 Agent 回答没有前缀。
+IMGent 自己发送的配对、排队、审批、询问、错误、命令回执和计划状态消息会以本地化
+`[IMGent: 状态]` 开头。
 
-配对、群授权、排队、审批、询问、错误、定时任务投递和命令回执等 IMGent 控制消息使用
-`[IMGent: 状态]` 首行。定时任务的正式回答使用 `[IMGent: 定时任务]`；定时运行中产生的审批、
-询问或错误保留对应的更具体状态，同时带上任务名称和计划时间。微信 iLink 的未配对提示不会
-出现群聊说明；普通交互式 Agent 的正式回答不加前缀。
+### 9. 添加可选定时任务
 
-#### 8. 可选：创建定时任务
-
-计划要求服务正在运行，且目标 Adapter 支持主动投递。先发现目标：
+定时任务需要主动投递，目前只有 QQ 支持：
 
 ```bash
 imgent --config /srv/imgent/imgent.json conversation list
+
 imgent --config /srv/imgent/imgent.json schedule add morning-report \
   --conversation conversation_qq_direct_01 \
-  --prompt "Inspect the workspace and send a concise status report." \
+  --prompt "Review the workspace and send a concise status report." \
   --cron "0 9 * * 1-5" \
   --timezone Asia/Shanghai \
   --context fresh
 ```
 
-`fresh` 每次运行都创建隔离的 Agent session，不留下可复用的计划上下文：Codex session 在
-该次运行进入终态后归档，Claude Code session 不持久化。`series` 只复用该计划自己的 session，
-永远不会复用或阻塞目标 IM 会话的普通 Agent session。
+一次性任务使用 `--at 2026-07-27T09:00:00+08:00`。群计划还要通过 `--principal <id>` 选择
+执行身份。
 
-创建、修改、暂停、恢复或删除计划时，如果目标当前可用，IMGent 会主动发送简明状态通知。通知
-不可用或投递失败不会回滚计划操作；跳过的通知会被审计，已入队的通知按常规出站重试/死信策略
-处理。
+默认的 `fresh` 模式会为每次运行创建隔离 session。运行结束后，IMGent 会归档 Codex session，
+也不会持久化 Claude Code session。`series` 会为该计划保留一个专用 session。两种模式都让
+定时任务与目标会话的交互式 session 保持分离。
 
-### 全局 CLI 参数与输出契约
+创建、修改、暂停、恢复或删除计划时，只要 Adapter 可用，IMGent 就会向目标发送一条简短通知。
+投递失败会被记录，但不会撤销计划变更。定时回答以 `[IMGent: 定时任务]` 开头；审批、询问和
+错误使用各自的状态，并附上计划名称和计划时间。
 
-为了让 shell 脚本行为清晰，建议把全局参数放在命令前：
+## 命令速查
+
+### 全局参数
 
 ```text
 imgent [--config <path>] [--locale zh-CN|en-US] [--json] <command>
-imgent --help
-imgent --version
 ```
 
-| 参数                  | 行为                                           |
-| --------------------- | ---------------------------------------------- |
-| `-c, --config <path>` | 选择配置文件，默认 `./imgent.json`             |
-| `--locale <locale>`   | 为错误和 readiness 诊断选择 `zh-CN` 或 `en-US` |
-| `--json`              | 用稳定、机器可读的 envelope 包装成功或失败     |
-| `--help`              | 输出当前命令的 Commander 帮助                  |
-| `--version`           | 输出 IMGent 包版本                             |
+| 参数                    | 用途                               |
+| ----------------------- | ---------------------------------- |
+| `-c, --config <path>`   | 配置文件，默认为 `./imgent.json`   |
+| `--locale zh-CN\|en-US` | 本次 CLI 调用的输出语言            |
+| `--json`                | 面向自动化的稳定成功/错误 envelope |
+| `--help`、`--version`   | 命令帮助和包版本                   |
 
-成功命令默认直接输出格式化 JSON：
+默认输出适合在终端中阅读，脚本应使用 `--json`。命令成功时返回
+`{"ok":true,"result":...}`，失败时返回 `{"ok":false,"error":...}`。错误中包含稳定错误码、
+本地化消息和操作建议、重试策略及可选事件编号。IMGent 会从输出中移除 secret、本地控制端点、
+堆栈、SQL、平台原始身份和厂商响应。
 
-```json
-{
-  "mode": "offline",
-  "skills": []
-}
-```
-
-使用 `--json` 时，成功结果写入 stdout：
-
-```json
-{
-  "ok": true,
-  "locale": "zh-CN",
-  "result": {
-    "mode": "offline",
-    "skills": []
-  }
-}
-```
-
-不使用 `--json` 时，失败会把本地化安全文本写入 stderr：
-
-```text
-IMGent 服务当前未运行。
-请先运行 imgent start。
-```
-
-使用 `--json` 时，失败会把稳定 envelope 写入 stdout，且不会暴露 cause、stack、SQL、本机路径、
-消息正文、token 或平台原始响应：
-
-```json
-{
-  "ok": false,
-  "locale": "zh-CN",
-  "error": {
-    "code": "RUNTIME_SERVICE_NOT_RUNNING",
-    "message": "IMGent 服务当前未运行。",
-    "action": "请先运行 imgent start。",
-    "retry": {
-      "strategy": "after_user_action",
-      "replay": "safe"
-    }
-  }
-}
-```
-
-自动化应根据 `error.code` 而不是翻译后的文本分支。退出码类别保持稳定：
-
-| 退出码 | 含义                                         |
-| ------ | -------------------------------------------- |
-| `0`    | 成功                                         |
-| `1`    | 内部或其他未分类运行失败                     |
-| `2`    | 输入/配置无效、未找到、冲突或取消            |
-| `3`    | 认证、授权、兼容性或其他必须由用户处理的操作 |
-| `4`    | 限流、超时、瞬时失败或有界退避状态           |
-
-### 完整命令参考
-
-以下示例展示未加 `--json` 时的直接成功输出。Agent 或脚本需要稳定 envelope 时，请加
-`--json`。为保持可读性，后续 online 示例可能只展示与命令有关的 `service` 或 schedule 字段；
-完整对象形状分别见 `pair` 和 `schedule add`，调用方应容忍附加字段。
-
-#### `init`：创建最小配置和数据目录
-
-**模式：** offline。
-**必需输入：** 已存在或可创建的工作区；只有明确要替换现有配置时才使用 `--force`。
+每个命令的完整参数以对应帮助为准：
 
 ```bash
-imgent --config /srv/imgent/imgent.json init \
-  --workspace /srv/workspaces/main \
-  --data-dir ./state
+imgent profile add --help
+imgent memory list --help
+imgent schedule add --help
 ```
 
-```json
-{
-  "result": "initialized",
-  "configPath": "/srv/imgent/imgent.json",
-  "workspace": "/srv/workspaces/main",
-  "dataDir": "/srv/imgent/state"
-}
-```
-
-生成的配置不包含 BotInstance 或 AgentProfile。相对 `dataDir`、`agentUserHome` 和
-workspace 条目都从配置文件所在目录解析。`--force` 无法绕过服务运行检查。
-
-#### `profile add`：添加 Codex 或 Claude Code Profile
-
-**模式：** offline。
-**必需输入：** 唯一 Profile ID、`--driver codex|claude-code` 和允许使用的工作区。
-
-```bash
-imgent --config /srv/imgent/imgent.json profile add main \
-  --driver codex \
-  --agent-user-home /home/codex-user \
-  --workspace /srv/workspaces/main \
-  --max-mode ask
-```
-
-```json
-{
-  "result": "profile-added",
-  "profile": {
-    "id": "main",
-    "driver": "codex",
-    "command": "codex",
-    "agentUserHome": "../../home/codex-user",
-    "workspace": "../workspaces/main",
-    "skills": ["*"],
-    "permissions": {
-      "maxMode": "ask"
-    },
-    "memory": {
-      "enabled": true
-    }
-  }
-}
-```
-
-可选参数：
-
-- `--command <path>` 覆盖默认的 `codex` 或 `claude` 可执行文件。
-- `--agent-user-home <path>` 记录连接此 Profile 的 Codex 或 Claude Code 本地用户 Home。
-  默认取执行 `profile add` 的用户 Home；Agent CLI 由其他用户运行时必须显式指定。
-- `--max-mode deny|ask|allow` 设置 Host Tool 权限上限，默认是 `ask`。
-- `--no-memory` 为该 Profile 禁用 IMGent 长期记忆，并隐藏内置记忆 skill。
-- 新 Profile 默认使用 `skills: ["*"]`。需要指定 skill 时，在服务停止状态编辑
-  `imgent.json`。
-
-#### `skills init`：创建部署者拥有的 skill 包
-
-**模式：** offline。
-**必需输入：** 最长 63 个字符的小写 kebab-case 名称。
-
-```bash
-imgent --config /srv/imgent/imgent.json skills init project-conventions \
-  --description "Apply this workspace's build, test, and review conventions"
-```
-
-```json
-{
-  "result": "skill-initialized",
-  "name": "project-conventions",
-  "path": "/srv/imgent/state/skills/project-conventions",
-  "restartRequired": true
-}
-```
-
-该命令创建带严格 `name` 和 `description` frontmatter 的 `SKILL.md`。用户 skill 与内置
-skill 同名时，会在下次启动覆盖内置版本。
-
-#### `skills list`：查看生效的 skill 目录
-
-**模式：** dual。
-online 输出描述服务不可变的启动快照；offline 输出读取当前磁盘状态。
-
-```bash
-imgent --config /srv/imgent/imgent.json skills list
-```
-
-```json
-{
-  "mode": "offline",
-  "skills": [
-    {
-      "name": "imgent-conversation",
-      "description": "Guide every user-facing IMGent conversation across direct messages and groups.",
-      "source": "builtin",
-      "files": 1,
-      "bytes": 2048
-    },
-    {
-      "name": "project-conventions",
-      "description": "Apply this workspace's build, test, and review conventions",
-      "source": "user",
-      "files": 1,
-      "bytes": 312
-    }
-  ]
-}
-```
-
-online 输出还包含 `service` 元数据和 `configDrift`。
-
-#### `skills validate`：校验包和 Profile 引用
-
-**模式：** dual。
-
-```bash
-imgent --config /srv/imgent/imgent.json skills validate
-```
-
-```json
-{
-  "mode": "offline",
-  "result": "valid",
-  "skills": 3,
-  "profiles": [
-    {
-      "profileId": "main",
-      "skills": ["imgent-conversation", "imgent-memory", "project-conventions"]
-    }
-  ],
-  "restartRequiredAfterChanges": true
-}
-```
-
-校验会拒绝符号链接、不安全包条目、无效 frontmatter、超大包、缺少必需内置 skill，以及
-AgentProfile 引用了不存在的 skill。
-
-#### `bot add qq`：添加 QQ 官方机器人
-
-**模式：** offline。
-**必需输入：** 唯一 BotInstance ID、已有 Profile、AppID 或 AppID 环境变量，以及 AppSecret
-环境变量。
-
-```bash
-export IMGENT_QQ_APP_ID='123456789'
-export IMGENT_QQ_APP_SECRET='<qq-app-secret>'
-imgent --config /srv/imgent/imgent.json bot add qq qq-main \
-  --profile main \
-  --app-id-env IMGENT_QQ_APP_ID \
-  --app-secret-env IMGENT_QQ_APP_SECRET
-unset IMGENT_QQ_APP_SECRET
-```
-
-```json
-{
-  "result": "bot-added",
-  "bot": {
-    "id": "qq-main",
-    "adapter": "qq",
-    "transport": "websocket",
-    "platformBotIdEnv": "IMGENT_QQ_APP_ID",
-    "credentialRef": "qq-main",
-    "groupIngestionDefault": "triggered",
-    "enabled": true
-  }
-}
-```
-
-`--app-secret-env` 默认是 `IMGENT_QQ_APP_SECRET`，执行命令时该变量必须存在。正常部署应在
-`--app-id <id>` 和 `--app-id-env <name>` 中选择一种。
-
-#### `bot add wechat-ilink`：添加微信 iLink 机器人
-
-**模式：** offline。
-
-```bash
-imgent --config /srv/imgent/imgent.json bot add wechat-ilink wechat-main \
-  --profile main
-```
-
-```json
-{
-  "result": "bot-added",
-  "bot": {
-    "id": "wechat-main",
-    "adapter": "wechat-ilink",
-    "credentialRef": "wechat-main",
-    "enabled": true
-  }
-}
-```
-
-添加 BotInstance 不等于完成授权，接下来需要运行 `bot authorize`。
-
-#### `bot authorize`：授权微信 iLink 机器人
-
-**模式：** offline。
-**必需输入：** 已存在的 `wechat-ilink` BotInstance。只有明确选择兼容 iLink endpoint 时才使用
-`--base-url <url>`。
-
-```bash
-imgent --config /srv/imgent/imgent.json bot authorize wechat-main
-```
-
-执行期间，终端会显示 QR 码和授权状态，必要时要求输入验证码。最终输出：
-
-```json
-{
-  "result": "wechat-authorized",
-  "botInstanceId": "wechat-main",
-  "platformBotId": "ilink_bot_01",
-  "authorizingPlatformUserId": "ilink_user_01"
-}
-```
-
-bot token 会加密保存在本机，不会出现在输出中。
-
-#### `doctor`：执行显式深度诊断
-
-**模式：** dual。
-offline 诊断检查本机环境但不启动平台 Adapter；online 诊断要求常驻服务刷新平台、账号和模型检查。
-
-```bash
-imgent --locale zh-CN --config /srv/imgent/imgent.json doctor
-```
-
-具有代表性的 offline 输出：
-
-```json
-{
-  "mode": "offline",
-  "checks": [
-    {
-      "check": "node",
-      "ok": true,
-      "details": "24.18.0"
-    },
-    {
-      "check": "runtime",
-      "ok": true,
-      "details": {
-        "mode": "offline",
-        "service": {
-          "state": "stopped"
-        },
-        "database": {},
-        "skills": {
-          "result": "valid",
-          "skills": 3,
-          "profiles": [
-            {
-              "profileId": "main",
-              "skills": ["imgent-conversation", "imgent-memory", "project-conventions"]
-            }
-          ],
-          "restartRequiredAfterChanges": true
-        },
-        "environmentReadiness": {
-          "ready": true,
-          "depth": "diagnostic",
-          "locale": "zh-CN",
-          "issues": [],
-          "bots": {
-            "qq-main": {
-              "ready": true,
-              "issues": []
-            }
-          },
-          "profiles": {
-            "main": {
-              "ready": true,
-              "issues": []
-            }
-          }
-        },
-        "liveReadinessAvailable": false
-      }
-    }
-  ]
-}
-```
-
-即使打印了全部检查，命令仍可能返回非零退出码。自动化应使用 `imgent --json doctor`，同时检查
-`result.checks` 和进程退出码。
-
-#### `status`：读取缓存的运行状态或持久化状态
-
-**模式：** dual。
-与 `doctor` 不同，`status` 永远不会执行厂商网络或模型探测。
-
-```bash
-imgent --config /srv/imgent/imgent.json status
-```
-
-服务停止时的代表性输出：
-
-```json
-{
-  "mode": "offline",
-  "service": {
-    "state": "stopped"
-  },
-  "database": {
-    "pending_approvals": 0,
-    "memory_outbox": 0,
-    "dead_letters": 0
-  },
-  "transports": [],
-  "lastInboundByBot": [],
-  "groups": [],
-  "oldestWaitingTask": null,
-  "schedules": [],
-  "nextSchedule": null,
-  "readiness": null,
-  "liveReadinessAvailable": false
-}
-```
-
-online 输出包含 `mode: "online"`、`service`、`configDrift`、数据库/任务摘要，以及已本地化的
-缓存 `readiness` 投影。
-
-#### `start`：运行常驻服务
-
-**模式：** 前台常驻进程。
-**必需输入：** 有效配置、受支持 Node 版本，以及没有被其他 IMGent 进程或 offline lease
-占用的数据目录。
-
-```bash
-imgent --config /srv/imgent/imgent.json start
-```
-
-代表性 JSON Lines 输出：
-
-```jsonl
-{"timestamp":"2026-07-25T01:00:00.000Z","level":"info","component":"application","eventType":"adapter.started","botInstanceId":"qq-main"}
-{"timestamp":"2026-07-25T01:00:00.100Z","level":"info","component":"application","eventType":"application.started","bots":1,"profiles":1}
-{"timestamp":"2026-07-25T01:00:00.200Z","level":"info","component":"service","eventType":"service.started","instanceId":"<uuid>","state":"ready","bots":1,"profiles":1}
-```
-
-`ready` 表示至少一条配置路由可用。平台或 Agent 依赖失败可能使进程保持 `degraded`，从而继续
-提供 `status` 和 `doctor`。`SIGINT` 和 `SIGTERM` 会触发有序关闭；IMGent 不会自行后台化。
-
-#### `pair`：确认私聊配对码
-
-**模式：** online。
-**必需输入：** 返回给未配对私聊用户的当前一次性码。
-**可选输入：** `--workspace <path>`；省略时使用配对路由所选 AgentProfile 的
-`agentUserHome`。
-
-```bash
-imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
-  --workspace /srv/workspaces/main
-```
-
-```json
-{
-  "mode": "online",
-  "service": {
-    "protocolVersion": 3,
-    "appVersion": "0.1.0",
-    "instanceId": "<uuid>",
-    "instanceKey": "<stable-hash>",
-    "state": "ready",
-    "startedAt": "2026-07-25T01:00:00.000Z",
-    "configHash": "<sha256>"
-  },
-  "configDrift": false,
-  "result": "paired",
-  "platformIdentityId": "platform_identity_01",
-  "principalId": "principal_01",
-  "workspace": "/srv/workspaces/main",
-  "nextSteps": [
-    {
-      "action": "authorize-group",
-      "conversationSpaceId": "conversation_qq_group_01",
-      "authorizationCode": "GRP-8F12A4B9C0DE",
-      "botInstanceId": "qq-main",
-      "command": "imgent group authorize-code GRP-8F12A4B9C0DE --principal principal_01"
-    }
-  ]
-}
-```
-
-`appVersion` 跟随已安装包版本。成功消费过的码再次提交时，只要配对仍有效，就会返回同一个
-Principal 及其已经保存的工作区。显式路径必须存在、服务用户可访问，并位于对应
-AgentProfile 的 `agentUserHome` 或 `allowedWorkspaceRoots` 中。`nextSteps` 只列出同一
-AgentProfile 下已发现但尚未授权的群；没有待授权群时返回空数组。QQ Adapter 支持私聊主动
-投递时，相同的群授权码和命令会在配对成功后立即发送给该用户。
-
-#### `identity list`：列出平台身份与 Principal
-
-**模式：** dual。
-
-```bash
-imgent --config /srv/imgent/imgent.json identity list
-```
-
-```json
-{
-  "mode": "online",
-  "service": {
-    "state": "ready",
-    "instanceId": "<uuid>"
-  },
-  "configDrift": false,
-  "identities": [
-    {
-      "platformIdentityId": "platform_identity_01",
-      "agentProfileId": "main",
-      "platform": "qq",
-      "botInstanceId": "qq-main",
-      "platformUserId": "qq_user_01",
-      "principalId": "principal_01",
-      "displayName": "示例用户",
-      "paired": 1,
-      "workspace": "/srv/workspaces/main"
-    }
-  ]
-}
-```
-
-offline 输出省略 `service` 和 `configDrift`，但保留 `mode` 和已持久化身份。
-
-#### `identity workspace set`：修改 Principal 工作目录
-
-**模式：** online。
-**必需输入：** 已配对 Principal ID 和允许的现有目录。
-
-```bash
-imgent --config /srv/imgent/imgent.json identity workspace set \
-  principal_01 /srv/workspaces/another-project
-```
-
-如果该 Principal 的私聊或其授权 QQ 群仍有 active/waiting approval 任务，命令会拒绝修改。
-成功后清除相关 Agent session；后续 turn 在新工作目录创建或恢复会话。
-
-#### `group list`：列出已发现的 QQ 群
-
-**模式：** dual。
-
-```bash
-imgent --config /srv/imgent/imgent.json group list
-```
-
-```json
-{
-  "mode": "online",
-  "service": {
-    "state": "ready",
-    "instanceId": "<uuid>"
-  },
-  "configDrift": false,
-  "groups": [
-    {
-      "conversationSpaceId": "conversation_qq_group_01",
-      "agentProfileId": "main",
-      "botInstanceId": "qq-main",
-      "platformConversationId": "qq_group_01",
-      "authorizationCode": "GRP-8F12A4B9C0DE",
-      "mode": "triggered",
-      "platformFullCapability": 1,
-      "authorized": 0
-    }
-  ]
-}
-```
-
-只有 IMGent 收到能够发现该群的事件后，群才会出现在列表中。
-
-#### `group authorize-code`：使用私聊收到的授权码授权 QQ 群
-
-**模式：** online。
-**必需输入：** 发送给已配对 QQ 用户的 `GRP-...` 授权码，以及该已配对 Principal 的 ID。
-
-```bash
-imgent --config /srv/imgent/imgent.json group authorize-code GRP-8F12A4B9C0DE \
-  --principal principal_01
-```
-
-IMGent 会在本机已发现群列表中解析该码，要求唯一匹配，再执行与 `group authorize` 相同的
-授权校验。
-
-#### `group authorize`：授权已发现的 QQ 群
-
-**模式：** online。
-**必需输入：** 已发现的群 ConversationSpace，以及属于同一 AgentProfile 的已配对 Principal。
-
-```bash
-imgent --config /srv/imgent/imgent.json group authorize conversation_qq_group_01 \
-  --principal principal_01
-```
-
-```json
-{
-  "mode": "online",
-  "service": {
-    "state": "ready",
-    "instanceId": "<uuid>"
-  },
-  "configDrift": false,
-  "result": "group-authorized",
-  "conversationSpaceId": "conversation_qq_group_01",
-  "principalId": "principal_01"
-}
-```
-
-这会授权使用该群，但不会开启全量采集。
-
-#### `conversation list`：发现主动投递目标
-
-**模式：** online。
-
-```bash
-imgent --config /srv/imgent/imgent.json conversation list
-```
-
-```json
-{
-  "mode": "online",
-  "service": {
-    "state": "ready",
-    "instanceId": "<uuid>"
-  },
-  "configDrift": false,
-  "conversations": [
-    {
-      "id": "conversation_qq_direct_01",
-      "agentProfileId": "main",
-      "platform": "qq",
-      "botInstanceId": "qq-main",
-      "kind": "direct",
-      "platformConversationId": "qq_user_01",
-      "principals": [
-        {
-          "principalId": "principal_01",
-          "displayName": "示例用户"
-        }
-      ],
-      "supportsProactiveSend": true
-    }
-  ]
-}
-```
-
-把 `id` 用作 `--conversation`。存在多个候选 Principal 的群还需要传入 `--principal`。
-不要为 `supportsProactiveSend` 为 `false` 的目标创建计划。
-
-#### `memory status`、`memory list`、`memory show`：审计本机记忆
-
-**模式：** dual。
-
-```bash
-imgent --config /srv/imgent/imgent.json memory status
-imgent --config /srv/imgent/imgent.json memory list \
-  --scope group_member \
-  --conversation conversation_qq_group_01 \
-  --status active \
-  --limit 50
-imgent --config /srv/imgent/imgent.json memory show memory_01
-```
-
-`status` 按作用域、状态和来源统计记忆，并显示 Memory Curator outbox 状态及最近成功/失败时间。
-`list` 支持 `--principal`、`--conversation`、`--scope`、`--origin`、`--status`、
-`--limit` 和上一页返回的不透明 `--cursor`。`show` 返回指定记录的正文、生命周期以及来源
-task/message ID。
-
-这些命令只供本机部署者审计：服务运行时走 Control v3，停服时取得短期离线 ownership lease；
-不会返回 reply context、平台原始用户 ID 或凭据，也不新增对应的 IM 聊天命令。
-
-#### `schedule add`：创建一次性或 cron 任务
-
-**模式：** online。
-**必需输入：** `--prompt`/`--prompt-file` 二选一，`--at`/`--cron` 二选一。`--at` 必须是
-带 `Z` 或显式偏移量的未来 RFC 3339 时间；cron 使用五字段表达式和 IANA 时区。
-
-一次性示例：
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule add release-check \
-  --conversation conversation_qq_direct_01 \
-  --prompt-file ./release-check.md \
-  --at 2026-08-01T10:00:00+08:00 \
-  --context series
-```
-
-cron 示例：
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule add morning-report \
-  --conversation conversation_qq_direct_01 \
-  --prompt "Inspect the workspace and send a concise status report." \
-  --cron "0 9 * * 1-5" \
-  --timezone Asia/Shanghai \
-  --context fresh
-```
-
-```json
-{
-  "mode": "online",
-  "service": {
-    "state": "ready",
-    "instanceId": "<uuid>"
-  },
-  "configDrift": false,
-  "schedule": {
-    "id": "schedule_01",
-    "name": "morning-report",
-    "prompt": "Inspect the workspace and send a concise status report.",
-    "conversationSpaceId": "conversation_qq_direct_01",
-    "principalId": "principal_01",
-    "agentProfileId": "main",
-    "scheduleKind": "cron",
-    "scheduleExpression": "0 9 * * 1-5",
-    "timezone": "Asia/Shanghai",
-    "contextMode": "fresh",
-    "status": "active",
-    "nextRunAt": "2026-07-27T01:00:00.000Z",
-    "skippedRunCount": 0,
-    "createdAt": "2026-07-25T02:00:00.000Z",
-    "updatedAt": "2026-07-25T02:00:00.000Z"
-  }
-}
-```
-
-上面是完整 schedule 对象形状，后续示例只展示与操作有关的字段。错过多个 cron 时间点时只补跑
-一次；重叠运行会被跳过，而不是无限排队。`fresh` 每次使用隔离 session，并在运行进入终态后
-丢弃或归档；`series` 只保留该计划专用的 session。add、update、pause、resume 和 remove 会在
-目标可用时主动通知，但不会泄露 prompt；通知失败会留下审计记录，且不会回滚已提交的计划变更。
-
-#### `schedule list`：列出 active、paused、completed 或 blocked 计划
-
-**模式：** online。
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule list
-```
-
-```json
-{
-  "mode": "online",
-  "schedules": [
-    {
-      "id": "schedule_01",
-      "name": "morning-report",
-      "prompt": "Inspect the workspace and send a concise status report.",
-      "conversationSpaceId": "conversation_qq_direct_01",
-      "principalId": "principal_01",
-      "agentProfileId": "main",
-      "scheduleKind": "cron",
-      "scheduleExpression": "0 9 * * 1-5",
-      "timezone": "Asia/Shanghai",
-      "contextMode": "fresh",
-      "status": "active",
-      "nextRunAt": "2026-07-27T01:00:00.000Z",
-      "skippedRunCount": 0,
-      "createdAt": "2026-07-25T02:00:00.000Z",
-      "updatedAt": "2026-07-25T02:00:00.000Z"
-    }
-  ]
-}
-```
-
-软删除的计划不会出现在这里，但仍可通过 ID 查询历史。
-
-#### `schedule update`：修改计划内容或执行时间
-
-**模式：** online。
-至少提供一个变更字段。`--prompt` 与 `--prompt-file` 互斥。提供新的执行时间会重新激活计划并
-计算 `nextRunAt`；只修改名称、prompt 或上下文时保持当前状态。
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule update schedule_01 \
-  --name weekday-report \
-  --cron "30 9 * * 1-5" \
-  --timezone Asia/Shanghai \
-  --context series
-```
-
-```json
-{
-  "mode": "online",
-  "schedule": {
-    "id": "schedule_01",
-    "name": "weekday-report",
-    "scheduleKind": "cron",
-    "scheduleExpression": "30 9 * * 1-5",
-    "timezone": "Asia/Shanghai",
-    "contextMode": "series",
-    "status": "active",
-    "nextRunAt": "2026-07-27T01:30:00.000Z"
-  }
-}
-```
-
-实际 `schedule` 值包含 `schedule add` 中展示的完整对象。
-
-#### `schedule pause` 与 `schedule resume`
-
-**模式：** online。
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule pause schedule_01
-```
-
-```json
-{
-  "mode": "online",
-  "result": {
-    "id": "schedule_01",
-    "status": "paused",
-    "nextRunAt": "2026-07-27T01:30:00.000Z"
-  }
-}
-```
-
-暂停会阻止未来触发，但不会取消已经运行的任务。
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule resume schedule_01
-```
-
-```json
-{
-  "mode": "online",
-  "result": {
-    "id": "schedule_01",
-    "status": "active",
-    "nextRunAt": "2026-07-27T01:30:00.000Z"
-  }
-}
-```
-
-恢复时会重新验证主动投递能力并计算下次运行时间。两种操作的 `result` 都是完整 schedule 对象。
-
-#### `schedule run`：立即排队运行一次
-
-**模式：** online。
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule run schedule_01
-```
-
-```json
-{
-  "mode": "online",
-  "result": {
-    "result": "schedule-enqueued",
-    "id": "schedule_01",
-    "taskId": "task_01"
-  }
-}
-```
-
-计划处于 blocked、无法主动投递或已有待处理工作时，IMGent 会拒绝该请求。
-
-#### `schedule reset-context`：清除 series session
-
-**模式：** online。
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule reset-context schedule_01
-```
-
-```json
-{
-  "mode": "online",
-  "result": {
-    "id": "schedule_01",
-    "contextMode": "series",
-    "status": "active"
-  }
-}
-```
-
-实际 `result` 是完整 schedule 对象。如果该计划仍有 queued、active、retrying 或
-waiting-approval 工作，重置会被拒绝。
-
-#### `schedule history`：查看运行与投递历史
-
-**模式：** online。
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule history schedule_01
-```
-
-```json
-{
-  "mode": "online",
-  "history": [
-    {
-      "runId": "schedule_run_01",
-      "scheduledFor": "2026-07-25T01:30:00.000Z",
-      "enqueuedAt": "2026-07-25T01:30:00.100Z",
-      "taskId": "task_01",
-      "status": "completed",
-      "finalText": "Workspace checks passed.",
-      "error": null,
-      "outboundStatus": "sent",
-      "sendMode": "proactive"
-    }
-  ]
-}
-```
-
-执行 `schedule remove` 后仍可查询历史。
-
-#### `schedule remove`：停止并软删除计划
-
-**模式：** online。
-
-```bash
-imgent --config /srv/imgent/imgent.json schedule remove schedule_01
-```
-
-```json
-{
-  "mode": "online",
-  "result": {
-    "result": "schedule-removed",
-    "id": "schedule_01"
-  }
-}
-```
-
-已有任务和运行审计数据会保留。
-
-#### `backup`：创建一致性敏感归档
-
-**模式：** dual。
-使用 `--output <file>` 可以避免默认的时间戳文件名。
+### 访问模式
+
+| 模式      | 服务状态                                             | 命令                                                                                                                   |
+| --------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `offline` | 此数据目录的服务已经停止                             | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`                                            |
+| `online`  | 常驻服务正在运行                                     | `pair`、`identity workspace set`、`group authorize`、`group authorize-code`、`conversation list`、所有 `schedule` 命令 |
+| `dual`    | 运行时使用本地控制面，停服时获取短期 ownership lease | `doctor`、`status`、`identity list`、`group list`、`memory status/list/show`、`skills list/validate`、`backup`         |
+
+服务占有数据目录时，offline 命令返回 `RUNTIME_SERVICE_MUST_STOP`。服务停止时，online 命令返回
+`RUNTIME_SERVICE_NOT_RUNNING`。如果发现不安全或版本不兼容的控制服务，命令会停止，也不会
+打开 SQLite。
+
+### 配置与运行
+
+| 命令                                                      | 用途                                                    |
+| --------------------------------------------------------- | ------------------------------------------------------- |
+| `init [--workspace <path>] [--data-dir <path>] [--force]` | 创建最小配置和数据目录                                  |
+| `profile add <id> --driver codex\|claude-code [...]`      | 添加 Agent Profile、工作区、权限上限、skills 和记忆策略 |
+| `bot add qq\|wechat-ilink <id> --profile <id> [...]`      | 添加 BotInstance 并路由到 Profile                       |
+| `bot authorize <id> [--base-url <url>]`                   | 运行微信 iLink QR 授权                                  |
+| `doctor`                                                  | 执行 Node、SQLite、平台和 Agent 深度诊断                |
+| `status`                                                  | 读取缓存 readiness 和持久化积压状态                     |
+| `start`                                                   | 启动前台常驻服务                                        |
+
+### Skills、身份与群
+
+| 命令                                                       | 用途                                        |
+| ---------------------------------------------------------- | ------------------------------------------- |
+| `skills init <name> [--description <text>]`                | 创建 `dataDir/skills/<name>/SKILL.md`       |
+| `skills list`                                              | 列出当前启动快照中的内置和本地 skills       |
+| `skills validate`                                          | 校验 skill 包和 Profile 引用                |
+| `pair <code> [--workspace <path>]`                         | 确认私聊配对码                              |
+| `identity list`                                            | 列出平台身份及其 Principal                  |
+| `identity workspace set <principal-id> <path>`             | 修改 Principal 工作区并重置相关 session     |
+| `group list`                                               | 列出已发现 QQ 群和授权状态                  |
+| `group authorize-code <code> --principal <id>`             | 授权 `GRP-...` 代码所代表的群               |
+| `group authorize <conversation-space-id> --principal <id>` | 使用本地 ID 授权已发现群                    |
+| `conversation list`                                        | 列出投递目标、可用 Principal 和主动发送能力 |
+
+### 记忆
+
+| 命令                      | 用途                                          |
+| ------------------------- | --------------------------------------------- |
+| `memory status`           | 显示记忆数量和后台策展状态                    |
+| `memory list [filters]`   | 按作用域、Principal、会话、来源和生命周期分页 |
+| `memory show <memory-id>` | 显示一条记录的作用域、来源、内容和生命周期    |
+
+`memory list` 支持 `--scope`、`--principal`、`--conversation`、`--origin`、`--status`、
+`--limit 1..100` 和上一页返回的不透明 `--cursor`。这些审计命令只能由本机部署者使用，聊天中
+无法管理记忆。
+
+### 定时任务
+
+| 命令                                          | 用途                                           |
+| --------------------------------------------- | ---------------------------------------------- |
+| `schedule add <name> --conversation <id> ...` | 创建一次性或五字段 cron 计划                   |
+| `schedule list`                               | 列出 active、paused、completed 和 blocked 计划 |
+| `schedule update <id> [...]`                  | 修改名称、prompt、时间、时区或上下文模式       |
+| `schedule pause <id>`                         | 暂停未来触发                                   |
+| `schedule resume <id>`                        | 恢复计划并计算下次时间                         |
+| `schedule run <id>`                           | 立即排队运行一次                               |
+| `schedule reset-context <id>`                 | 清除专用 `series` Agent session                |
+| `schedule history <id>`                       | 显示运行和投递历史                             |
+| `schedule remove <id>`                        | 软删除计划并保留已有任务审计数据               |
+
+添加计划时必须在 `--at` 和 `--cron` 中选择一个。Cron 使用五字段表达式，`--timezone` 接受
+IANA 时区并默认采用宿主机时区。prompt 通过 `--prompt` 或 `--prompt-file` 提供。错过多个 cron
+时间点时只补跑一次；重叠运行会被跳过并计数。
+
+### 备份与恢复
 
 ```bash
 imgent --config /srv/imgent/imgent.json backup \
-  --output /srv/backups/imgent-2026-07-25.backup
+  --output /srv/backups/imgent.backup
+
+imgent --config /srv/imgent/restored.json restore \
+  /srv/backups/imgent.backup \
+  --data-dir /srv/imgent/restored-state
 ```
 
-```json
-{
-  "mode": "online",
-  "service": {
-    "state": "ready",
-    "instanceId": "<uuid>"
-  },
-  "configDrift": false,
-  "path": "/srv/backups/imgent-2026-07-25.backup",
-  "files": 6,
-  "bytes": 131072
-}
-```
+服务运行时可以通过常驻服务执行 `backup`，停服后也可以在短期所有权 lease 下执行。运行
+`restore` 前要停止服务并准备空目标目录；`--force` 允许替换已有目标。`imgent-backup/v2`
+归档包含配置、加密平台凭据、一致性 SQLite 快照和用户 skills，不包含 Codex 或 Claude 的认证
+目录。
 
-`imgent-backup/v2` 归档包含配置、加密的平台凭据、加密密钥、SQLite 快照和用户 skills；
-**不包含** Codex 或 Claude 认证目录。应把归档当作 secret 处理，IMGent 会用 `0600` 权限写入。
+### 会话内命令
 
-#### `restore`：验证并恢复归档
+发送 `/imgent` 或 `/imgent help` 可以查看列表。无法识别的 `/imgent ...` 操作也会返回帮助。
 
-**模式：** offline。
-**必需输入：** v2 归档、目标数据目录，以及由全局 `--config` 选择的配置路径。
+| 输入                                | 使用位置                                 | 结果                                                   |
+| ----------------------------------- | ---------------------------------------- | ------------------------------------------------------ |
+| `/imgent cancel` 或 `取消`          | 当前已授权会话                           | 取消运行中和排队中的 turn                              |
+| `/imgent bind`                      | 已配对私聊                               | 创建短期跨平台绑定码                                   |
+| `/imgent bind <code>`               | 同一 Profile 下的另一个私聊身份          | 把两个身份绑定到同一 Principal；Agent session 保持分离 |
+| `/imgent unbind`                    | 已绑定私聊身份                           | 为后续记忆创建独立 Principal                           |
+| `/imgent allow <requestId>`         | 原始已授权请求人                         | 允许待处理 Host Tool 请求                              |
+| `/imgent deny <requestId>`          | 原始已授权请求人                         | 拒绝待处理请求                                         |
+| `/imgent answer <requestId> <内容>` | 原始已授权请求人                         | 回答 Agent 问题                                        |
+| `/imgent group full`                | 已授权 QQ 群；已配对且平台可验证的管理员 | 开启全量采集并公布七天原文保留规则                     |
+| `/imgent group triggered`           | 已授权 QQ 群                             | 恢复 @、回复和命令触发                                 |
+| `/imgent language zh-CN`            | 已识别 Principal                         | 错误和诊断使用简体中文                                 |
+| `/imgent language en-US`            | 已识别 Principal                         | 错误和诊断使用英文                                     |
 
-```bash
-imgent --config /srv/imgent-restored/imgent.json \
-  restore /srv/backups/imgent-2026-07-25.backup \
-  --data-dir /srv/imgent-restored/state
-```
+审批或问题 ID 属于原 Principal 和原会话，只能使用一次，也可能过期。绑定身份时，先用一个身份
+创建代码，再从另一个身份提交。
 
-```json
-{
-  "dataDir": "/srv/imgent-restored/state",
-  "configPath": "/srv/imgent-restored/imgent.json",
-  "files": 6
-}
-```
+## 运行与恢复
 
-目标目录必须为空，目标配置必须不存在。`--force` 会明确允许覆盖目标文件，但永远不能绕过停服/
-所有权检查。恢复会验证 manifest、校验和、路径、权限、schema 版本和最终 SQLite 完整性。旧
-backup v1 会被拒绝。
-
-### IM 会话内命令
-
-发送 `/imgent` 或 `/imgent help` 会显示当前命令列表。无法识别的 `/imgent ...` 操作也会
-返回帮助。
-
-| 输入                                | 使用位置/身份                             | 当前回复或结果                                             |
-| ----------------------------------- | ----------------------------------------- | ---------------------------------------------------------- |
-| `/imgent cancel` 或 `取消`          | 当前已授权会话                            | `已取消：运行中 <n> 个，排队中 <n> 个。`                   |
-| `/imgent bind`                      | 已配对私聊                                | 返回 `绑定码：<code>`，并提示另一个身份消费                |
-| `/imgent bind <code>`               | 同一 AgentProfile 下的另一个私聊身份      | 把两个平台身份绑定到同一 Principal；Agent session 仍分离   |
-| `/imgent unbind`                    | 已绑定的私聊身份                          | 为当前身份创建独立 Principal；历史合并记忆不会被复制或拆分 |
-| `/imgent allow <requestId>`         | 原始已授权请求人                          | `已允许该请求。`                                           |
-| `/imgent deny <requestId>`          | 原始已授权请求人                          | `已拒绝该请求。`                                           |
-| `/imgent answer <requestId> <内容>` | 原始已授权请求人                          | `已提交回答。`                                             |
-| `/imgent group full`                | 已授权 QQ 群；已配对且可验证的群主/管理员 | 开启全量采集并公布七天原文保留规则                         |
-| `/imgent group triggered`           | 已授权 QQ 群                              | 停止持久化新的普通消息；触发消息仍运行 Agent               |
-| `/imgent language zh-CN`            | 任意已识别 Principal                      | `错误与诊断信息将使用简体中文。`                           |
-| `/imgent language en-US`            | 任意已识别 Principal                      | `Errors and diagnostics will use English.`                 |
-
-帮助输出：
-
-```text
-/imgent cancel
-/imgent bind [绑定码]
-/imgent unbind
-/imgent allow <requestId>
-/imgent deny <requestId>
-/imgent answer <requestId> <内容>
-/imgent group full|triggered
-/imgent language zh-CN|en-US
-```
-
-审批和问题 ID 都是一次性的，只属于原 Principal 和原会话，并且可能过期。身份绑定必须显式完成：
-一个已配对身份创建短期码，另一个身份提交该码进行确认。IMGent 永远不会自动合并用户。
-
-### 运维与恢复
+### 健康与诊断
 
 初始化配置默认把健康检查绑定到 `127.0.0.1:8787`：
 
@@ -1361,31 +478,46 @@ curl http://127.0.0.1:8787/healthz
 curl -H 'Accept-Language: zh-CN' http://127.0.0.1:8787/readyz
 ```
 
-```json
-{ "status": "ok", "started": true, "state": "ready" }
-```
+`/healthz` 表示进程是否存活。`/readyz` 返回缓存、本地化的 readiness；ready 时使用 HTTP
+200，degraded 时使用 HTTP 503。两个端点都不会联系厂商、检查账号或探测模型。
 
-ready 时 `/readyz` 返回缓存的本地化 readiness 对象和 HTTP 200，degraded 时返回 HTTP 503。
+使用 `status` 快速查看运行状态。需要重新检查依赖和认证时，运行 `doctor`。degraded 服务会
+继续运行，部署者仍能查看脱敏 JSON Lines 日志并修复环境。
 
-- 使用 `status` 获取低成本缓存视图；只有需要刷新依赖检查时才运行 `doctor`。
-- `degraded` 服务会刻意保持运行以便诊断。检查脱敏 JSON Lines 日志，修复平台或 Agent 条件，
-  再运行 `doctor`。
-- 服务或 offline CLI lease 占有数据目录时，绝不能直接打开或修改 `imgent.sqlite`。
-- 配置和用户 skills 是启动快照。修改前停止服务，完成校验后重新启动。
-- `/healthz` 表示进程存活；`/readyz` 反映缓存 readiness，并支持
-  `Accept-Language: zh-CN|en-US`；两者都不会执行深度探测。
-- 升级前先备份。SQLite schema v6 只会在空数据目录创建；不兼容 schema 会被原样拒绝。
-- QQ 全量采集默认保留未触发的群原文七天。策展后的群共享记忆遵循记忆纠正和删除规则。
-- 自动召回组合少量、作用域安全的成员/群基础画像、FTS5 相关结果和近期 episode；群聊永远
-  不会收到私聊记忆或其他成员档案。
+### 数据与恢复
 
-## 3. 开发与维护 IMGent
+- SQLite schema **v7** 只会在空数据目录创建，其他版本会保持原样并被拒绝。
+- 备份格式 **`imgent-backup/v2`** 会在恢复前校验 manifest、checksum 和 schema 版本。
+- 服务或 offline CLI lease 会独占数据目录。所有者运行时不要直接打开或修改
+  `imgent.sqlite`。
+- QQ 群默认只保存触发消息。full 模式下，普通群聊原文默认保留七天。
+- 自动召回组合少量作用域安全的基础记录、SQLite FTS5 结果和近期 episode。中文与混合语言搜索
+  使用生成的 bigram。
+- 出站任务使用有界重试和死信处理。副作用不明确的操作会安全终止。
+
+每次升级前先备份。Alpha 版本可能拒绝旧存储或归档，也不会自动迁移。
+
+### 交给 supervisor
+
+`imgent start` 保持前台运行。使用 systemd、launchd、Windows Service 或 Docker 在后台运行
+它，并负责故障重启、环境变量、信号转发和日志收集。
+
+容器需要：
+
+- IMGent 配置和持久化数据目录；
+- 所有允许使用的工作区；
+- 兼容的 `codex` 和/或 `claude` 可执行文件；
+- 仅挂载部署者明确选择的 Agent 认证目录。
+
+本地控制 socket 或 pipe 应保持私有。只有容器健康检查需要时才暴露 loopback 健康端点。
+
+## 开发与发布
 
 ### 仓库结构
 
 ```text
 packages/
-  contracts/                    # 共享 IM、Agent、配置和错误契约
+  contracts/                    # 共享消息、Agent、配置和错误契约
   im-adapters/
     qq/                         # QQ Gateway WebSocket 适配器
     wechat-ilink/               # 微信 iLink 长轮询适配器
@@ -1394,20 +526,16 @@ packages/
     claude-code/                # Claude Code Agent SDK 驱动
 skills/
   imgent-conversation/          # 始终激活的会话指令
-  imgent-memory/                # 交互与后台记忆指令
+  imgent-memory/                # 交互和后台记忆指令
 src/
-  cli/                          # Commander 程序和本地控制客户端
-  service/                      # 组装、生命周期、readiness、管理服务
-  control/ health/              # 本地管理协议和 loopback 健康面
+  cli/ service/ control/ health/
   config/ runtime/ queue/ schedule/ storage/
   identity/ approvals/ memory/ skills/ security/ backup/
-tests/                          # 契约、集成、双进程和 smoke 导向测试
+tests/
 ```
 
-这些包保留了确实存在替代实现的边界，但最终仍构建成一个 runtime、一个 SQLite 数据库和一个数据
-目录。TypeScript project references 使用 `tsc -b`。npm 发布前，esbuild 把内部
-`@imgent/*` workspace 包合并到 `dist/src/cli/main.js`；第三方运行时依赖仍是普通 npm
-依赖。
+QQ 与微信、Codex 与 Claude Code 各有不同实现，因此仓库把这些部分拆成独立 workspace 包。
+发布到 npm 时，它们会打包成一个 runtime、一个可执行文件和一个 SQLite 所有者。
 
 ### 配置源码工作区
 
@@ -1428,12 +556,10 @@ pnpm dev -- --config /absolute/path/to/imgent.json status
 pnpm start
 ```
 
-根包二进制 smoke 应使用 `pnpm imgent --help`；在不同 pnpm 布局中，`pnpm exec imgent`
-不一定能解析到根包自己的 bin。
+根包二进制 smoke 使用 `pnpm imgent --help`。不同 pnpm 布局下，`pnpm exec imgent` 可能解析到
+其他入口。
 
 ### 验证变更
-
-运行完整本地边界：
 
 ```bash
 pnpm lint
@@ -1443,98 +569,46 @@ pnpm test
 pnpm verify:package
 ```
 
-本机已经真实登录 Codex CLI 时：
+本机已经登录 Codex CLI 时，运行真实 app-server smoke：
 
 ```bash
 pnpm verify:codex
 ```
 
-自动化测试覆盖配置、SQLite 事务和 schema 拒绝、FIFO、定时任务、主动投递能力检查、session
-隔离、出站重试/死信、身份绑定、群授权、审批、skill 快照、记忆作用域和中文 FTS5、备份恢复、
-IM 规范化、控制面所有权以及两个驱动的契约。
+标准测试覆盖配置与存储、队列与定时任务、身份与审批、skills 与记忆、备份恢复、两种适配器和
+驱动、本地控制所有权及双进程行为。
 
-报告验证结果时必须准确保留边界：
+`verify:codex` 会打开真实的本机 Codex app-server session。Claude Code 由构建和
+mock/contract 测试覆盖，`doctor` 会检查本机认证和实时协议。Linux CI 无法验证 Windows Named
+Pipe ACL 或 Windows Service 身份。
 
-- `verify:codex` 是真实本机 Codex app-server smoke，覆盖 initialize、登录状态、新 thread、
-  turn 和最终输出。
-- Claude Code 有构建和 mock/contract 测试。`doctor` 会执行真实本机认证/协议诊断，但自动化
-  测试不会调用真实 Claude 模型。
-- Linux CI 不能证明 Windows Named Pipe ACL 或 Windows Service 身份；它们仍是 Windows
-  发布门槛。
-- Node 22 结果不是受支持环境证据；必须在 Node 24.18.0 或更高版本重复验证。
+### 设计资料
 
-安装依赖后会启用 Husky。pre-commit hook 检查并格式化暂存文件；提交信息使用
-Conventional Commits，例如：
+- [产品设计](docs/imgent-product-design.md)：能力、安全、身份、记忆、持久化和验收标准。
+- [CLI 与常驻服务架构](docs/cli-service-architecture.md)：进程生命周期、控制协议、所有权、
+  健康检查和部署。
+- [实现状态](docs/implementation-status.md)：已交付基线和验证边界。
+- [托管 skills](docs/imgent-skills.md)：包格式、选择、覆盖和快照。
+- [架构审计](docs/architecture-audit.md)：刻意简化和剩余复杂度。
 
-```text
-feat(codex): support host tools
-docs: rewrite bilingual readme
-```
-
-### 使用 supervisor 或 Docker 运行
-
-`imgent start` 始终保持前台运行。由 systemd、launchd、Windows Service 或 Docker 负责
-后台化、重启策略、环境变量、信号和日志收集。
-
-容器必须提供：
-
-- IMGent 配置和持久化数据目录；
-- 所有允许使用的工作区；
-- 兼容的 `codex` 和/或 `claude` 可执行文件；
-- 只有部署者明确决定挂载的 Agent 认证目录。
-
-Docker 镜像不会安装或管理 Agent 登录。不要把本地控制 socket/pipe 暴露成公开 TCP API。只有
-明确配置容器健康检查时才暴露 loopback 健康端点。
-
-### 保持设计与实现同步
-
-- [产品设计](docs/imgent-product-design.md)定义能力、安全、身份、记忆、适配器、驱动、持久化和
-  验收标准。
-- [CLI 与常驻服务架构](docs/cli-service-architecture.md)定义生命周期、online/offline
-  所有权、本地协议、健康/readiness 和部署。
-- [实现状态](docs/implementation-status.md)记录当前已交付基线和验证边界。
-- [IMGent 托管技能](docs/imgent-skills.md)定义 skill 包格式、覆盖、Profile 选择和不可变快照。
-- [架构审计](docs/architecture-audit.md)记录刻意简化和剩余复杂度。
-
-行为发生变化时，应在同一个变更中同步代码、测试、这些设计文档、两份 README 和实现状态。
-implementation-status 快照只应作为索引，不能单独作为完成证明。
+行为发生变化时，在同一个变更中更新代码、测试、设计文档、两份 README 和实现状态。
 
 ### 发布
 
-面向用户的变更使用 [Changesets](https://github.com/changesets/changesets)。不要手动修改版本
-或创建 tag：
+面向用户的变更使用 [Changesets](https://github.com/changesets/changesets)：
 
 ```bash
 pnpm changeset
 git add .changeset/*.md
-git commit -m "docs: add release changeset"
+git commit -m "docs: describe the change"
 ```
 
-仓库当前处于 Changesets `alpha` 预发布模式。首条公开预发布版本线是
-`0.2.0-alpha.x`。公开版本仍处于实验阶段时，应保持预发布模式：
-
-```bash
-pnpm changeset pre enter alpha
-```
-
-剩余发布门槛完成后，先退出预发布模式，再创建稳定版本：
-
-```bash
-pnpm changeset pre exit
-```
-
-带 changeset 的 PR 进入 `main` 后，发布 workflow 会运行验证和 npm 安装 smoke，然后创建或
-更新 `ci: release imgent` Release PR。合并 Release PR 后会更新 changelog、创建 tag 和
-GitHub Release，并发布到 npm。发布完成后，workflow 会显式校正预发布 channel，并从
-registry 安装刚发布的精确版本，再执行一次包级 smoke。npm 要求每个包都有 `latest` tag，
-因此 IMGent 发布首个稳定版前，`alpha` 和 `latest` 都会指向当前 Alpha。用户应显式使用
-`imgent@alpha` 安装实验版本；发布首个稳定版时，`latest` 才会转到非预发布版本。
-
-workflow 可以使用 `PAT_TOKEN` 作为专用发布身份，首次发布需要 `NPM_TOKEN`。包创建后，尽量
-把仓库 workflow 配置成 npm Trusted Publisher，并移除长期写 token。
+仓库使用 Changesets `alpha` 预发布通道。发布 workflow 会检查源码和包产物、维护 Release PR、
+发布 npm、校正 dist-tags，并从 registry 安装已发布版本执行最后一次包级 smoke。安装实验版本
+时使用 `imgent@alpha`。
 
 ### 许可证
 
 Copyright © 2026 Morilence.
 
-IMGent 使用 [Apache License 2.0](LICENSE)，分发归属信息见 [NOTICE](NOTICE)。
+项目使用 [Apache License 2.0](LICENSE)，分发归属信息见 [NOTICE](NOTICE)。
