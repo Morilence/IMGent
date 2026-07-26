@@ -881,6 +881,64 @@ test("approvals are idempotent and bound to principal and conversation", async (
   }
 });
 
+test("duplicate approval IDs roll back task state and orphan waits fail closed", async () => {
+  const fixture = await testStore();
+  try {
+    const firstIngested = fixture.store.ingest(
+      directMessage({ messageId: "approval-first", dedupeKey: "approval-first" }),
+      "main",
+      "approval-first",
+    );
+    const secondIngested = fixture.store.ingest(
+      directMessage({
+        messageId: "approval-second",
+        dedupeKey: "approval-second",
+        conversation: { kind: "direct", platformConversationId: "user-2" },
+        actor: { platformUserId: "user-2" },
+      }),
+      "main",
+      "approval-second",
+    );
+    const firstTask = fixture.store.claimNextTask();
+    assert.equal(firstTask?.id, firstIngested.taskId);
+    const secondTask = fixture.store.claimNextTask();
+    assert.equal(secondTask?.id, secondIngested.taskId);
+
+    const approvals = new ApprovalService(fixture.store);
+    const duplicateRequest = {
+      requestId: "APR-SHARED",
+      toolName: "shell",
+      sanitizedInput: { command: "pwd" },
+      risk: "low" as const,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    approvals.create(
+      firstTask!.id,
+      firstTask!.conversationKey,
+      firstTask!.principalId,
+      duplicateRequest,
+    );
+    assert.throws(() =>
+      approvals.create(
+        secondTask!.id,
+        secondTask!.conversationKey,
+        secondTask!.principalId,
+        duplicateRequest,
+      ),
+    );
+    assert.equal(fixture.store.task(firstTask!.id)?.status, "waiting_approval");
+    assert.equal(fixture.store.task(secondTask!.id)?.status, "active");
+
+    fixture.store.transitionTask(secondTask!.id, ["active"], "waiting_approval");
+    assert.equal(approvals.expirePending(), 1);
+    const orphaned = fixture.store.task(secondTask!.id);
+    assert.equal(orphaned?.status, "failed");
+    assert.equal(orphaned?.error?.code, "APPROVAL_NOT_FOUND");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("local inbound media is retained only while a task can still consume it", async () => {
   const fixture = await testStore();
   try {

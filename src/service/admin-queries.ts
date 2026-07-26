@@ -1,3 +1,4 @@
+import { groupAuthorizationCode } from "../identity/group-authorization.js";
 import type { IMGentStore } from "../storage/store.js";
 
 export function persistentStatus(store: IMGentStore): Record<string, unknown> {
@@ -76,8 +77,17 @@ export function identities(store: IMGentStore): unknown[] {
 }
 
 export function groups(store: IMGentStore): unknown[] {
-  return store.all(
-    `SELECT cs.id AS conversationSpaceId, cs.agent_profile_id AS agentProfileId,
+  return store
+    .all<{
+      conversationSpaceId: string;
+      agentProfileId: string;
+      botInstanceId: string;
+      platformConversationId: string;
+      mode: string;
+      platformFullCapability: number;
+      authorized: number;
+    }>(
+      `SELECT cs.id AS conversationSpaceId, cs.agent_profile_id AS agentProfileId,
             cs.bot_instance_id AS botInstanceId,
             cs.platform_conversation_id AS platformConversationId,
             gp.mode, gp.platform_full_capability AS platformFullCapability,
@@ -87,7 +97,11 @@ export function groups(store: IMGentStore): unknown[] {
      LEFT JOIN group_authorizations ga ON ga.conversation_space_id = cs.id
      WHERE cs.kind = 'group'
      ORDER BY cs.created_at`,
-  );
+    )
+    .map((group) => ({
+      ...group,
+      authorizationCode: groupAuthorizationCode(group.conversationSpaceId),
+    }));
 }
 
 export function conversations(store: IMGentStore): Array<Record<string, unknown>> {

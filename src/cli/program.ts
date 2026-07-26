@@ -23,6 +23,7 @@ import { restoreBackup } from "../backup/service.js";
 import { defaultConfig, loadConfig } from "../config/index.js";
 import { readRawConfig, updateConfig, writeConfig } from "../config/write.js";
 import { normalizeLocale, renderError, renderErrorText, resolveLocale } from "../i18n/index.js";
+import { normalizeGroupAuthorizationCode } from "../identity/group-authorization.js";
 import {
   MEMORY_ORIGIN_VALUES,
   MEMORY_SCOPE_VALUES,
@@ -460,6 +461,35 @@ group
       configDrift: discovery.configDrift,
       ...(await discovery.client.post<Record<string, unknown>>(
         `/v3/groups/${encodeURIComponent(conversationSpaceId)}/authorize`,
+        { principalId: options.principal },
+      )),
+    });
+  });
+
+group
+  .command("authorize-code <code>")
+  .description("使用私聊收到的群授权码授权一个 QQ 群")
+  .requiredOption("--principal <id>", "执行授权的已配对 Principal ID")
+  .action(async (code: string, options: { principal: string }) => {
+    const authorizationCode = normalizeGroupAuthorizationCode(code);
+    if (!authorizationCode) throw new IMGentError("CLI_USAGE_INVALID");
+    const discovery = await requireRunning("group authorize-code");
+    const groups =
+      await discovery.client.get<
+        Array<{ authorizationCode?: unknown; conversationSpaceId?: unknown }>
+      >("/v3/groups");
+    const matches = groups.filter(
+      (candidate) =>
+        candidate.authorizationCode === authorizationCode &&
+        typeof candidate.conversationSpaceId === "string",
+    );
+    if (matches.length !== 1) throw new IMGentError("IDENTITY_OPERATION_REJECTED");
+    print({
+      mode: "online",
+      service: discovery.meta,
+      configDrift: discovery.configDrift,
+      ...(await discovery.client.post<Record<string, unknown>>(
+        `/v3/groups/${encodeURIComponent(matches[0]!.conversationSpaceId as string)}/authorize`,
         { principalId: options.principal },
       )),
     });
@@ -928,6 +958,7 @@ async function requireRunning(
     | "pair"
     | "identity workspace set"
     | "group authorize"
+    | "group authorize-code"
     | "conversation list"
     | "schedule add"
     | "schedule list"

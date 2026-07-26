@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import { formatAgentContextHeader, IMGentError, normalizeError } from "@imgent/contracts";
@@ -19,9 +20,27 @@ import type {
 
 const execute = promisify(execFile);
 const MINIMUM_VERSION = [0, 145, 0] as const;
+const SAFE_COMMAND_ACTIONS = new Set(["read", "search", "list"]);
 
 interface ThreadResponse {
   thread: { id: string };
+}
+
+function externalRequestId(prefix: "APR" | "ASK"): string {
+  return `${prefix}-${randomBytes(12).toString("hex").toUpperCase()}`;
+}
+
+function approvalRisk(method: string, params: Record<string, unknown>): ApprovalRequest["risk"] {
+  if (!method.includes("command") && !method.includes("execCommand")) return "high";
+  if (!Array.isArray(params.commandActions) || params.commandActions.length === 0) return "high";
+  const actions = params.commandActions.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const type = (entry as { type?: unknown }).type;
+    return typeof type === "string" ? [type] : [];
+  });
+  return actions.length > 0 && actions.every((action) => SAFE_COMMAND_ACTIONS.has(action))
+    ? "low"
+    : "high";
 }
 
 interface TurnResponse {
@@ -497,7 +516,9 @@ export class CodexDriver implements AgentDriver {
       this.rpc?.respondError(request.id, -32_601, "unsupported server request");
       return;
     }
-    const requestId = `${request.method}:${String(request.id)}`;
+    const requestId = externalRequestId(
+      request.method === "item/tool/requestUserInput" ? "ASK" : "APR",
+    );
     const expiresAt = expiry();
     const timer = setTimeout(() => {
       const item = this.pending.get(requestId);
@@ -549,7 +570,7 @@ export class CodexDriver implements AgentDriver {
       requestId,
       toolName: toolName(request.method),
       sanitizedInput: sanitizeRequest(params),
-      risk: "high",
+      risk: approvalRisk(request.method, params),
       expiresAt,
     };
     active.queue.push({ type: "approval-request", request: approval });

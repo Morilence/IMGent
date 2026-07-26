@@ -38,8 +38,7 @@ export class ApprovalService {
         `INSERT INTO approvals(
           request_id, task_id, conversation_key, principal_id,
           tool_name, sanitized_input, risk, status, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-        ON CONFLICT(request_id) DO NOTHING`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
         request.requestId,
         taskId,
         conversationKey,
@@ -50,7 +49,11 @@ export class ApprovalService {
         now(),
         request.expiresAt,
       );
-      this.store.transitionTask(taskId, ["active"], "waiting_approval");
+      if (!this.store.transitionTask(taskId, ["active"], "waiting_approval")) {
+        throw new IMGentError("TASK_EXECUTION_FAILED", {
+          diagnostic: { taskId, operation: "approval.create" },
+        });
+      }
       if (outbound) this.store.enqueueOutbound(outbound, taskId);
     });
   }
@@ -172,7 +175,20 @@ export class ApprovalService {
           error: new IMGentError("APPROVAL_EXPIRED").descriptor,
         });
       }
-      return pending.length;
+      const orphans = this.store.all<{ id: string }>(
+        `SELECT t.id FROM tasks t
+         WHERE t.status = 'waiting_approval'
+           AND NOT EXISTS (
+             SELECT 1 FROM approvals a
+             WHERE a.task_id = t.id AND a.status = 'pending'
+           )`,
+      );
+      for (const task of orphans) {
+        this.store.transitionTask(task.id, ["waiting_approval"], "failed", {
+          error: new IMGentError("APPROVAL_NOT_FOUND").descriptor,
+        });
+      }
+      return pending.length + orphans.length;
     });
   }
 

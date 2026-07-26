@@ -169,7 +169,7 @@ npx --package imgent@alpha imgent --help
 | 模式      | 可运行条件                                         | 命令                                                                                                                     |
 | --------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `offline` | 同一数据目录的 `imgent start` 已停止               | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`                                              |
-| `online`  | 常驻服务正在运行；始终走本地控制面                 | `pair`、`identity workspace set`、`group authorize`、`conversation list`、所有 `schedule` 子命令                         |
+| `online`  | 常驻服务正在运行；始终走本地控制面                 | `pair`、`identity workspace set`、`group authorize`、`group authorize-code`、`conversation list`、所有 `schedule` 子命令 |
 | `dual`    | 运行时访问服务，停服时取得短期离线 ownership lease | `doctor`、`status`、`identity list`、`group list`、`memory status/list/show`、`skills list`、`skills validate`、`backup` |
 
 `imgent start` 本身是常驻进程。服务运行时执行 offline 命令会返回
@@ -269,13 +269,22 @@ imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
 
 配对码只使用一次，重复确认成功使用过的码是幂等的。工作目录保存在 Principal 上；其私聊及由
 该 Principal 授权的 QQ 群使用同一工作目录。完成配对后，用户才可以运行 Agent turn。
-如果 IMGent 已发现尚未授权的群，`pair` 结果会在 `nextSteps` 中直接给出每个群的授权命令。
+如果 IMGent 已发现尚未授权的群，`pair` 结果会在 `nextSteps` 中直接给出每个群的授权命令；
+对于 QQ，配对成功后还会立即把排队中的群授权码发送到该用户私聊。
 
 #### 6. 授权 QQ 群
 
-先在群里发送一条触发消息，让 IMGent 发现该群。未授权群中的机器人回复会明确引导部署者私聊
-获取配对码，并在配对成功结果中给出当前群的授权命令。也可以手动查看本地 ID，并使用已配对
-Principal 授权：
+先在群里 @机器人一次，让 IMGent 发现该群。IMGent 会主动私聊触发用户：身份尚未配对时先发送
+配对码，本机配对成功后立刻续发排队中的群授权码；身份已经配对时直接发送群授权码。把授权码
+交给部署者，在本机确认：
+
+```bash
+imgent --config /srv/imgent/imgent.json group authorize-code GRP-8F12A4B9C0DE \
+  --principal principal_01
+```
+
+`GRP-...` 只用于标识本机已经发现的群，本身不是授权凭据；命令仍要求连接本机常驻控制面，并
+提供已配对 Principal。部署者也可以手动查看本地 ID，继续使用 ConversationSpace 形式：
 
 ```bash
 imgent --config /srv/imgent/imgent.json identity list
@@ -297,8 +306,9 @@ imgent --config /srv/imgent/imgent.json group authorize conversation_qq_group_01
 Agent：工作树干净；当前分支是 main，并且与 origin/main 一致。
 ```
 
-回复由选定的本地 Agent 在该 Principal 工作区中生成。如果 Agent 需要高风险 Host Tool 或补充信息，
-IMGent 会把 request ID 发回同一会话；按下文说明使用 `/imgent allow`、`/imgent deny` 或
+回复由选定的本地 Agent 在该 Principal 工作区中生成。如果 Agent 需要审批，IMGent 会把操作、
+风险说明、影响、目的、范围、命令或权限预览以及一次性审批编号整理成可读卡片发回同一会话，
+而不是转发 Driver 的原始请求 JSON；按下文说明使用 `/imgent allow`、`/imgent deny` 或
 `/imgent answer` 回答。发送 `/imgent cancel` 或“取消”可以取消该会话运行中和排队中的工作。
 
 原始请求进入 Codex 或 Claude Code 前，IMGent 会增加一行紧凑的宿主元数据，例如：
@@ -797,8 +807,9 @@ imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
     {
       "action": "authorize-group",
       "conversationSpaceId": "conversation_qq_group_01",
+      "authorizationCode": "GRP-8F12A4B9C0DE",
       "botInstanceId": "qq-main",
-      "command": "imgent group authorize conversation_qq_group_01 --principal principal_01"
+      "command": "imgent group authorize-code GRP-8F12A4B9C0DE --principal principal_01"
     }
   ]
 }
@@ -807,7 +818,8 @@ imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
 `appVersion` 跟随已安装包版本。成功消费过的码再次提交时，只要配对仍有效，就会返回同一个
 Principal 及其已经保存的工作区。显式路径必须存在、服务用户可访问，并位于对应
 AgentProfile 的 `agentUserHome` 或 `allowedWorkspaceRoots` 中。`nextSteps` 只列出同一
-AgentProfile 下已发现但尚未授权的群；没有待授权群时返回空数组。
+AgentProfile 下已发现但尚未授权的群；没有待授权群时返回空数组。QQ Adapter 支持私聊主动
+投递时，相同的群授权码和命令会在配对成功后立即发送给该用户。
 
 #### `identity list`：列出平台身份与 Principal
 
@@ -878,6 +890,7 @@ imgent --config /srv/imgent/imgent.json group list
       "agentProfileId": "main",
       "botInstanceId": "qq-main",
       "platformConversationId": "qq_group_01",
+      "authorizationCode": "GRP-8F12A4B9C0DE",
       "mode": "triggered",
       "platformFullCapability": 1,
       "authorized": 0
@@ -887,6 +900,19 @@ imgent --config /srv/imgent/imgent.json group list
 ```
 
 只有 IMGent 收到能够发现该群的事件后，群才会出现在列表中。
+
+#### `group authorize-code`：使用私聊收到的授权码授权 QQ 群
+
+**模式：** online。
+**必需输入：** 发送给已配对 QQ 用户的 `GRP-...` 授权码，以及该已配对 Principal 的 ID。
+
+```bash
+imgent --config /srv/imgent/imgent.json group authorize-code GRP-8F12A4B9C0DE \
+  --principal principal_01
+```
+
+IMGent 会在本机已发现群列表中解析该码，要求唯一匹配，再执行与 `group authorize` 相同的
+授权校验。
 
 #### `group authorize`：授权已发现的 QQ 群
 

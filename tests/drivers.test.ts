@@ -174,6 +174,67 @@ lines.on("line", (line) => {
   }
 });
 
+test("Codex approval IDs stay unique when vendor request IDs restart at zero", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-codex-approval-"));
+  const executable = join(directory, "fake-codex-approval.mjs");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { createInterface } from "node:readline";
+const lines = createInterface({ input: process.stdin });
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+let currentTurn = "";
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "initialize") {
+    send({ id: request.id, result: { userAgent: "fake" } });
+  } else if (request.method === "thread/start") {
+    send({ id: request.id, result: { thread: { id: "thread-approval" } } });
+  } else if (request.method === "turn/start") {
+    currentTurn = request.params.clientUserMessageId;
+    send({ id: request.id, result: { turn: { id: currentTurn } } });
+    send({ id: 0, method: "item/commandExecution/requestApproval", params: {
+      threadId: "thread-approval",
+      turnId: currentTurn,
+      command: '/bin/bash -lc "pwd"',
+      cwd: ${JSON.stringify(directory)},
+      reason: "inspect the workspace",
+      commandActions: [{ type: "read", command: "pwd" }]
+    } });
+  } else if (request.id === 0 && request.result?.decision === "decline") {
+    send({ method: "turn/completed", params: {
+      threadId: "thread-approval",
+      turn: { id: currentTurn, status: "completed" }
+    } });
+  }
+});`,
+    { mode: 0o700 },
+  );
+  await chmod(executable, 0o700);
+  const driver = new CodexDriver();
+  const requestIds: string[] = [];
+  try {
+    for (const turnId of ["approval-turn-1", "approval-turn-2"]) {
+      for await (const event of driver.runTurn({
+        ...turn(profile("codex", executable, directory)),
+        turnId,
+      })) {
+        if (event.type !== "approval-request") continue;
+        requestIds.push(event.request.requestId);
+        assert.equal(event.request.risk, "low");
+        await driver.answerRequest(event.request.requestId, { decision: "deny" });
+      }
+    }
+    assert.equal(requestIds.length, 2);
+    assert.match(requestIds[0]!, /^APR-[A-F0-9]{24}$/);
+    assert.match(requestIds[1]!, /^APR-[A-F0-9]{24}$/);
+    assert.notEqual(requestIds[0], requestIds[1]);
+  } finally {
+    await driver.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Claude driver receives the same IMGent instructions and per-turn Host Tool filter", async () => {
   const directory = await mkdtemp(join(tmpdir(), "imgent-claude-"));
   const imagePath = join(directory, "input.png");

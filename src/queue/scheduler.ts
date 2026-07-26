@@ -1,4 +1,5 @@
 import { IMGentError, normalizeError, textOf } from "@imgent/contracts";
+import { approvalMessage } from "../approvals/presentation.js";
 import { renderErrorText } from "../i18n/index.js";
 import { agentTurnContext } from "../identity/agent-context.js";
 import { formatSystemMessage } from "../im/system-message.js";
@@ -194,13 +195,7 @@ export class ConversationScheduler {
           case "approval-request": {
             const approvalText = formatSystemMessage(
               "approval",
-              [
-                `需要审批：${event.request.toolName}`,
-                `风险：${event.request.risk}`,
-                `请求：${JSON.stringify(event.request.sanitizedInput)}`,
-                `允许：/imgent allow ${event.request.requestId}`,
-                `拒绝：/imgent deny ${event.request.requestId}`,
-              ].join("\n"),
+              approvalMessage(event.request, this.locale(task)),
               this.locale(task),
             );
             this.options.approvals.create(

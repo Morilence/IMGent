@@ -183,11 +183,11 @@ npx --package imgent@alpha imgent --help
 
 Management commands declare how they may access state:
 
-| Mode      | When it works                                                                   | Commands                                                                                                                 |
-| --------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `offline` | Only while `imgent start` for the same data directory is stopped                | `init`, `profile add`, `bot add`, `bot authorize`, `skills init`, `restore`                                              |
-| `online`  | Only while the resident service is running; always uses the local control plane | `pair`, `identity workspace set`, `group authorize`, `conversation list`, every `schedule` subcommand                    |
-| `dual`    | Uses the service when running, otherwise takes a short offline ownership lease  | `doctor`, `status`, `identity list`, `group list`, `memory status/list/show`, `skills list`, `skills validate`, `backup` |
+| Mode      | When it works                                                                   | Commands                                                                                                                      |
+| --------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `offline` | Only while `imgent start` for the same data directory is stopped                | `init`, `profile add`, `bot add`, `bot authorize`, `skills init`, `restore`                                                   |
+| `online`  | Only while the resident service is running; always uses the local control plane | `pair`, `identity workspace set`, `group authorize`, `group authorize-code`, `conversation list`, every `schedule` subcommand |
+| `dual`    | Uses the service when running, otherwise takes a short offline ownership lease  | `doctor`, `status`, `identity list`, `group list`, `memory status/list/show`, `skills list`, `skills validate`, `backup`      |
 
 `imgent start` is the resident process itself. An offline command returns
 `RUNTIME_SERVICE_MUST_STOP` if the service is active. An online command returns
@@ -291,14 +291,24 @@ The code is single-use, and confirming it is idempotent. The workspace belongs t
 its direct conversations and QQ groups authorized by that Principal use the same workspace. Once
 paired, the user can run Agent turns.
 If IMGent has discovered unauthorized groups, the `pair` result includes the exact authorization
-command for each group in `nextSteps`.
+command for each group in `nextSteps`. For QQ, pairing also immediately sends each queued group
+authorization code to the user's direct messages.
 
 #### 6. Authorize a QQ group
 
-Send one triggering message in the group so IMGent can discover it. The reply in an unauthorized
-group directs the deployer to obtain a pairing code by direct message, and the successful `pair`
-result includes the authorization command for that group. You can also inspect local IDs and
-authorize the group manually with a paired Principal:
+Mention the bot once so IMGent can discover the group. IMGent proactively sends the triggering
+user a direct message: an unpaired identity receives a pairing code first, then receives the
+queued group authorization code immediately after local pairing succeeds. A user who is already
+paired receives the group code immediately. Give that code to the deployer and confirm it locally:
+
+```bash
+imgent --config /srv/imgent/imgent.json group authorize-code GRP-8F12A4B9C0DE \
+  --principal principal_01
+```
+
+The `GRP-...` value identifies the discovered group; it is not an authorization capability by
+itself. The command still requires the resident local control plane and a paired Principal.
+Operators can also inspect local IDs and use the ConversationSpace form:
 
 ```bash
 imgent --config /srv/imgent/imgent.json identity list
@@ -321,8 +331,9 @@ Agent: The working tree is clean. The current branch is main and it matches orig
 ```
 
 The response is produced by the selected local Agent in that Principal's workspace. If the Agent
-needs a risky Host Tool or more information, IMGent sends a request ID back to the same
-conversation; answer it with `/imgent allow`, `/imgent deny`, or `/imgent answer` as documented
+needs approval, IMGent sends a readable card with the operation, risk explanation, impact,
+purpose, scope, command or permission preview, and one-time approval ID—not the driver's raw
+request JSON. Answer it with `/imgent allow`, `/imgent deny`, or `/imgent answer` as documented
 below. Send `/imgent cancel` or `取消` to cancel active and queued work for that conversation.
 
 Before the raw request reaches Codex or Claude Code, IMGent adds compact host metadata such as:
@@ -832,8 +843,9 @@ imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
     {
       "action": "authorize-group",
       "conversationSpaceId": "conversation_qq_group_01",
+      "authorizationCode": "GRP-8F12A4B9C0DE",
       "botInstanceId": "qq-main",
-      "command": "imgent group authorize conversation_qq_group_01 --principal principal_01"
+      "command": "imgent group authorize-code GRP-8F12A4B9C0DE --principal principal_01"
     }
   ]
 }
@@ -843,7 +855,9 @@ imgent --config /srv/imgent/imgent.json pair ABCD-EFGH \
 Principal and its persisted workspace while the pairing remains valid. An explicit path must exist,
 be accessible to the service account, and be inside the routed AgentProfile's `agentUserHome` or
 `allowedWorkspaceRoots`. `nextSteps` lists only discovered, unauthorized groups for the same
-AgentProfile and is empty when no group needs authorization.
+AgentProfile and is empty when no group needs authorization. When the QQ Adapter supports direct
+proactive delivery, the same group code and command are sent to the newly paired user's direct
+messages immediately.
 
 #### `identity list` — list platform identities and Principals
 
@@ -915,6 +929,7 @@ imgent --config /srv/imgent/imgent.json group list
       "agentProfileId": "main",
       "botInstanceId": "qq-main",
       "platformConversationId": "qq_group_01",
+      "authorizationCode": "GRP-8F12A4B9C0DE",
       "mode": "triggered",
       "platformFullCapability": 1,
       "authorized": 0
@@ -924,6 +939,19 @@ imgent --config /srv/imgent/imgent.json group list
 ```
 
 A group appears only after IMGent has received an event that discovers it.
+
+#### `group authorize-code` — authorize with a code received by direct message
+
+**Mode:** online.
+**Required input:** the `GRP-...` code sent to a paired QQ user and that paired Principal's ID.
+
+```bash
+imgent --config /srv/imgent/imgent.json group authorize-code GRP-8F12A4B9C0DE \
+  --principal principal_01
+```
+
+IMGent resolves the code against its local discovered-group list, requires exactly one match, and
+then applies the same authorization checks as `group authorize`.
 
 #### `group authorize` — authorize a discovered QQ group
 

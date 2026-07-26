@@ -1159,6 +1159,11 @@ decidedAt
 规则：
 
 - 只有请求所属 Principal 或明确授权管理员可以答复。
+- Driver 或 SDK 的进程内 request ID 不作为 IMGent 主键；每次请求生成独立的 `APR-...` 或
+  `ASK-...` 外部 ID，避免不同进程、会话或 Driver 重复使用相同序号。
+- 创建审批记录、将 task 迁移到 `waiting_approval` 和写入提示 outbox 必须位于同一事务；
+  唯一键冲突必须整体回滚。维护任务发现没有 pending 审批的 `waiting_approval` task 时，
+  以 `APPROVAL_NOT_FOUND` 失败关闭，不允许无限等待。
 - Driver 接受答复后，allow、deny、过期和重复答复形成幂等终态；Driver 投递失败
   时审批保持 pending，可在当前进程内重试。
 - 危险参数只显示必要的脱敏摘要。
@@ -1368,10 +1373,16 @@ CLI 错误退出码固定为：0 成功、2 输入/配置、3 需要部署者操
 ### 16.1 配对
 
 未配对用户收到一次性配对说明。配对码短期有效、单次使用，并绑定当前 BotInstance 下的 PlatformIdentity。
-配对码只在私聊中返回，群聊不得展示配对码。未授权群的触发消息必须说明完整初始化路径：
-私聊机器人获取配对码、本机执行 `imgent pair <code>`、再按 `pair` 结果中的 `nextSteps`
-授权已发现群。`nextSteps` 只列出同一 AgentProfile 下尚未授权的群，并包含可直接执行的
-`imgent group authorize` 命令。
+配对码只在私聊中返回，群聊不得展示配对码。用户首次在未授权 QQ 群触发机器人时，系统立即
+主动私聊该用户：尚未配对则先发送一次性配对码，并以已持久化的群空间和成员关系作为待发送
+队列；`imgent pair <code>` 成功后立即续发 `GRP-...` 群授权码。已经配对的用户直接收到群
+授权码。群内只说明私聊已发送及下一阶段，不暴露配对码、内部 ConversationSpace ID 或
+`nextSteps`。
+
+`nextSteps` 只列出同一 AgentProfile 下尚未授权且该 Principal 确实属于的群，并包含可直接
+执行的 `imgent group authorize-code <code> --principal <id>` 命令。`GRP-...` 是由本机
+ConversationSpace 稳定派生的短标识，不是授权能力；真正授权仍要求本地控制面和已配对
+Principal。原 `imgent group authorize <conversation-space-id>` 保留为兼容和运维入口。
 
 配对文案按 Adapter 能力生成：微信 iLink 是 direct-only，不得出现“群聊”或“待授权群”；
 QQ 私聊仅在 Adapter 支持群聊时显示后续群授权说明。所有 IMGent 控制消息使用独立首行
@@ -1388,7 +1399,10 @@ QQ 私聊仅在 Adapter 支持群聊时显示后续群授权说明。所有 IMGe
 
 ### 16.3 审批
 
-原生按钮可用时显示 allow / deny；不可用时使用带短期 request code 的文本命令。回复必须落在原会话并匹配当前 Principal。
+审批消息必须先把 Driver 请求解释成用户可判断的操作、风险说明、影响、目的、范围和必要预览，
+再给出一次性 `APR-...` 编号及 allow / deny 命令；不得把 transport JSON、`commandActions`
+等协议对象直接展示给用户。“高风险”表示需要人工确认，不等同于检测到恶意行为。回复必须
+落在原会话并匹配当前 Principal。
 
 ### 16.4 语言
 

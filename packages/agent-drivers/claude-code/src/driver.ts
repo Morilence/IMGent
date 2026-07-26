@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import {
@@ -29,6 +30,10 @@ import type {
 
 const execute = promisify(execFile);
 const MINIMUM_VERSION = [2, 1, 89] as const;
+
+function externalRequestId(prefix: "APR" | "ASK"): string {
+  return `${prefix}-${randomBytes(12).toString("hex").toUpperCase()}`;
+}
 
 export interface ClaudeSdk {
   query(parameters: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Options }): Query;
@@ -273,8 +278,8 @@ export class ClaudeCodeDriver implements AgentDriver {
           message: "AgentProfile 权限上限拒绝此工具",
         };
       }
-      const requestId = options.requestId || `${input.turnId}:${options.toolUseID}`;
       const isQuestion = toolName === "AskUserQuestion" && Array.isArray(toolInput.questions);
+      const requestId = externalRequestId(isQuestion ? "ASK" : "APR");
       return new Promise<PermissionResult>((resolve) => {
         const timer = setTimeout(() => {
           this.pending.delete(requestId);

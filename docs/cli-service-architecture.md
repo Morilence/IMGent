@@ -38,7 +38,7 @@ API。systemd、launchd、Windows Service 或 Docker 负责拉起、重启、日
   Health Server 在 loopback TCP 上只提供 `/healthz` 与 `/readyz`。
 - `status`、在线 `doctor`、identity/group/skill 查询和在线备份通过 Control
   Client 查询同一 `instanceId`，不再创建第二个 Application。
-- `pair`、`identity workspace set` 与 `group authorize` 在服务内执行；online
+- `pair`、`identity workspace set`、`group authorize` 与 `group authorize-code` 在服务内执行；online
   route 不直接打开 SQLite。
 - offline/online/dual capability 是显式命令矩阵。配置、凭据、skill 与恢复命令
   在活动实例存在时拒绝，dual 命令只有确认 endpoint 不存在才进入离线路径。
@@ -180,7 +180,7 @@ BotInstance → AgentProfile 路由可以服务。`degraded` 不是崩溃态。
 | 类型     | 数据路径                               | 服务运行时行为         | 命令                                                                                                           |
 | -------- | -------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------- |
 | 离线配置 | 直接读取/原子写入配置、凭据或 skills   | 明确拒绝，提示停止服务 | `init`、`profile add`、`bot add`、`bot authorize`、`skills init`、`restore`                                    |
-| 在线管理 | 只通过本地控制面                       | 服务未运行时明确失败   | `pair`、`identity workspace set`、`group authorize`、`conversation list`、`schedule *`                         |
+| 在线管理 | 只通过本地控制面                       | 服务未运行时明确失败   | `pair`、`identity workspace set`、`group authorize`、`group authorize-code`、`conversation list`、`schedule *` |
 | 双模式   | 运行时走控制面；停服时使用受限离线路径 | 不做不透明降级         | `doctor`、`status`、`identity list`、`group list`、`memory status/list/show`、`skills list/validate`、`backup` |
 
 双模式命令必须在输出中声明 `mode: "online" | "offline"`：

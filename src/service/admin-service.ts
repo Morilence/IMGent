@@ -48,30 +48,11 @@ export class AdminService {
       workspace,
       requestedWorkspace !== undefined,
     );
-    const pendingGroups = this.application.store.all<{
-      conversationSpaceId: string;
-      botInstanceId: string;
-    }>(
-      `SELECT cs.id AS conversationSpaceId, cs.bot_instance_id AS botInstanceId
-       FROM conversation_spaces cs
-       JOIN platform_identities pi
-         ON pi.agent_profile_id = cs.agent_profile_id
-       LEFT JOIN group_authorizations ga
-         ON ga.conversation_space_id = cs.id
-       WHERE pi.id = ? AND cs.kind = 'group'
-         AND ga.conversation_space_id IS NULL
-       ORDER BY cs.created_at`,
-      pairing.platformIdentityId,
-    );
+    const nextSteps = this.application.queuePendingGroupAuthorizations(pairing.platformIdentityId);
     return {
       result: "paired",
       ...pairing,
-      nextSteps: pendingGroups.map((group) => ({
-        action: "authorize-group",
-        conversationSpaceId: group.conversationSpaceId,
-        botInstanceId: group.botInstanceId,
-        command: `imgent group authorize ${group.conversationSpaceId} --principal ${pairing.principalId}`,
-      })),
+      nextSteps,
     };
   }
 

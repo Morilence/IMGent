@@ -623,6 +623,8 @@ test("CLI routes online commands to the service and blocks offline mutations", a
         service: { instanceId: string };
         nextSteps: Array<{
           action: string;
+          authorizationCode: string;
+          botInstanceId: string;
           conversationSpaceId: string;
           command: string;
         }>;
@@ -635,10 +637,14 @@ test("CLI routes online commands to the service and blocks offline mutations", a
       {
         action: "authorize-group",
         conversationSpaceId: group.conversationSpaceId,
+        authorizationCode: pairedEnvelope.result.nextSteps[0]!.authorizationCode,
         botInstanceId: "qq-main",
-        command: `imgent group authorize ${group.conversationSpaceId} --principal ${direct.principalId}`,
+        command:
+          `imgent group authorize-code ${pairedEnvelope.result.nextSteps[0]!.authorizationCode} ` +
+          `--principal ${direct.principalId}`,
       },
     ]);
+    assert.match(pairedEnvelope.result.nextSteps[0]!.authorizationCode, /^GRP-[A-F0-9]{12}$/);
     const defaultWorkspacePairing = await runCli(wrapper, executable, [
       "--json",
       "--config",
@@ -719,8 +725,8 @@ test("CLI routes online commands to the service and blocks offline mutations", a
       "--config",
       configPath,
       "group",
-      "authorize",
-      group.conversationSpaceId,
+      "authorize-code",
+      pairedEnvelope.result.nextSteps[0]!.authorizationCode,
       "--principal",
       direct.principalId,
     ]);
@@ -741,7 +747,11 @@ test("CLI routes online commands to the service and blocks offline mutations", a
     const groupsEnvelope = JSON.parse(listedGroups.stdout) as {
       result: {
         service: { instanceId: string };
-        groups: Array<{ conversationSpaceId: string; authorized: number }>;
+        groups: Array<{
+          authorizationCode: string;
+          conversationSpaceId: string;
+          authorized: number;
+        }>;
       };
     };
     assert.equal(groupsEnvelope.result.service.instanceId, instanceId);
@@ -750,6 +760,12 @@ test("CLI routes online commands to the service and blocks offline mutations", a
         (entry) => entry.conversationSpaceId === group.conversationSpaceId,
       )?.authorized,
       1,
+    );
+    assert.equal(
+      groupsEnvelope.result.groups.find(
+        (entry) => entry.conversationSpaceId === group.conversationSpaceId,
+      )?.authorizationCode,
+      pairedEnvelope.result.nextSteps[0]!.authorizationCode,
     );
 
     const backupPath = join(directory, "online.backup");

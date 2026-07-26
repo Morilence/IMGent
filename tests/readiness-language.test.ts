@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { defaultConfig } from "../src/config/index.js";
 import { writeConfig } from "../src/config/write.js";
 import { CredentialStore } from "../src/security/credential-store.js";
+import { AdminService } from "../src/service/admin-service.js";
 import { IMGentApplication } from "../src/service/application.js";
 import { IMGentService } from "../src/service/lifecycle.js";
 import { directMessage } from "./helpers.js";
@@ -59,6 +60,19 @@ function capturingAdapter(
       return { platformMessageId: `sent-${sent.length}`, mode: "reply" };
     },
   };
+}
+
+async function waitForOutbound(
+  sent: OutboundMessage[],
+  predicate: (message: OutboundMessage) => boolean,
+): Promise<OutboundMessage> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const found = sent.find(predicate);
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail("timed out waiting for outbound message");
 }
 
 test("/healthz stays simple and /readyz localizes issues from Accept-Language", async () => {
@@ -160,12 +174,27 @@ test("unpaired users can set a Principal language and receive localized command 
         actor: { platformUserId: "user-1", displayName: "User", role: "member" },
       }),
     );
-    const groupGuidance = JSON.stringify(sent.at(-1));
+    const proactivePairing = await waitForOutbound(
+      sent,
+      (message) =>
+        message.conversation.kind === "direct" &&
+        JSON.stringify(message).includes("排队中的群授权码"),
+    );
+    const proactivePairingText = JSON.stringify(proactivePairing);
+    assert.match(proactivePairingText, /\[IMGent: 配对\]/);
+    assert.match(proactivePairingText, /imgent pair [A-F0-9]{10}/);
+    assert.equal(proactivePairing.conversation.platformConversationId, "user-1");
+    assert.equal(proactivePairing.replyTo, undefined);
+    const groupPairingCode = proactivePairingText.match(/imgent pair ([A-F0-9]{10})/)?.[1];
+    assert.ok(groupPairingCode);
+
+    const groupGuidance = JSON.stringify(
+      await waitForOutbound(sent, (message) => message.conversation.kind === "group"),
+    );
     assert.match(groupGuidance, /\[IMGent: 群授权\]/);
-    assert.match(groupGuidance, /私聊机器人/);
-    assert.match(groupGuidance, /imgent pair <配对码>/);
-    assert.match(groupGuidance, /nextSteps/);
-    assert.match(groupGuidance, /请勿在群聊中发送配对码/);
+    assert.match(groupGuidance, /配对指引已发送到发起人的私聊/);
+    assert.match(groupGuidance, /配对完成后会自动续发群授权码/);
+    assert.doesNotMatch(groupGuidance, /imgent pair|当前群空间 ID|nextSteps/);
 
     await application.handleInbound(
       directMessage({
@@ -241,6 +270,70 @@ test("unpaired users can set a Principal language and receive localized command 
     );
     assert.match(latest?.payload_json ?? "", /\[IMGent: Error\].*language is not supported/i);
     assert.doesNotMatch(latest?.payload_json ?? "", /fr-FR|raw|diagnostic/);
+
+    application.adapters.set("qq-main", capturingAdapter(sent));
+    const paired = (await new AdminService(application).confirmPairing(groupPairingCode)) as {
+      principalId: string;
+      nextSteps: Array<{
+        action: string;
+        authorizationCode: string;
+        command: string;
+        conversationSpaceId: string;
+      }>;
+    };
+    assert.equal(paired.principalId, principal?.principal_id);
+    assert.equal(paired.nextSteps.length, 1);
+    assert.match(paired.nextSteps[0]!.authorizationCode, /^GRP-[A-F0-9]{12}$/);
+    assert.equal(paired.nextSteps[0]!.action, "authorize-group");
+    assert.match(
+      paired.nextSteps[0]!.command,
+      new RegExp(
+        `^imgent group authorize-code ${paired.nextSteps[0]!.authorizationCode} --principal principal_`,
+      ),
+    );
+    const authorizationGuidance = JSON.stringify(
+      await waitForOutbound(
+        sent,
+        (message) =>
+          message.conversation.kind === "direct" &&
+          JSON.stringify(message).includes("[IMGent: Group authorization]"),
+      ),
+    );
+    assert.match(authorizationGuidance, /Group authorization code: GRP-[A-F0-9]{12}/);
+    assert.match(authorizationGuidance, /imgent group authorize-code/);
+    assert.match(authorizationGuidance, /mention the bot in the group again/);
+    assert.doesNotMatch(authorizationGuidance, /conversationSpaceId|nextSteps/);
+
+    const firstAuthorizationCode = paired.nextSteps[0]!.authorizationCode;
+    await application.handleInbound(
+      directMessage({
+        messageId: "paired-unauthorized-group",
+        dedupeKey: "paired-unauthorized-group",
+        eventId: "paired-unauthorized-group-event",
+        conversation: { kind: "group", platformConversationId: "group-2" },
+        actor: { platformUserId: "user-1", displayName: "User", role: "member" },
+      }),
+    );
+    const pairedGroupGuidance = JSON.stringify(
+      await waitForOutbound(
+        sent,
+        (message) =>
+          message.conversation.kind === "direct" &&
+          JSON.stringify(message).includes("imgent group authorize-code") &&
+          !JSON.stringify(message).includes(firstAuthorizationCode),
+      ),
+    );
+    assert.match(pairedGroupGuidance, /Group authorization code: GRP-[A-F0-9]{12}/);
+    assert.doesNotMatch(pairedGroupGuidance, /imgent pair/);
+    const pairedGroupReply = JSON.stringify(
+      await waitForOutbound(
+        sent,
+        (message) =>
+          message.conversation.kind === "group" &&
+          message.conversation.platformConversationId === "group-2",
+      ),
+    );
+    assert.match(pairedGroupReply, /group authorization code was sent.*direct messages/i);
   } finally {
     await application?.stop();
     await rm(directory, { recursive: true, force: true });

@@ -525,20 +525,49 @@ export class IMGentApplication {
       }
     } else if (!this.identity.isGroupAuthorized(ingested.conversationSpaceId)) {
       if (message.triggered !== false) {
+        const locale = this.localeFor(ingested.principalId, message.botInstanceId);
+        if (this.identity.isPaired(ingested.platformIdentityId)) {
+          this.queuePendingGroupAuthorizations(
+            ingested.platformIdentityId,
+            ingested.conversationSpaceId,
+          );
+        } else {
+          const code = this.identity.createPairingCode(ingested.platformIdentityId);
+          this.queueDirectSystemMessage(
+            message.botInstanceId,
+            message.actor.platformUserId,
+            locale === "zh-CN"
+              ? [
+                  "你刚刚在一个尚未授权的 QQ 群中触发了机器人。",
+                  "请先完成私聊身份配对：",
+                  `请部署者在本机执行：imgent pair ${code}`,
+                  "配对码 10 分钟内有效且只能使用一次。",
+                  "配对成功后，IMGent 会立即在本私聊发送排队中的群授权码。",
+                ].join("\n")
+              : [
+                  "You just triggered the bot in an unauthorized QQ group.",
+                  "Pair this direct-message identity first:",
+                  `Ask the deployer to run locally: imgent pair ${code}`,
+                  "The pairing code expires in 10 minutes and can be used only once.",
+                  "After pairing, IMGent immediately sends the queued group authorization code here.",
+                ].join("\n"),
+            `group-pairing:${ingested.conversationSpaceId}:${ingested.eventId}`,
+            "pairing",
+            locale,
+          );
+        }
         await this.immediateReply(
           message,
-          [
-            "本群尚未授权，当前不会运行 Agent。",
-            "请由部署者按以下步骤完成初始化：",
-            "1. 私聊机器人发送任意消息，获取 10 分钟有效的一次性配对码。",
-            "2. 在本机执行：imgent pair <配对码>",
-            "3. 按配对结果的 nextSteps 授权本群。",
-            `当前群空间 ID：${ingested.conversationSpaceId}`,
-            "请勿在群聊中发送配对码。",
-          ].join("\n"),
+          locale === "zh-CN"
+            ? this.identity.isPaired(ingested.platformIdentityId)
+              ? "本群尚未授权，当前不会运行 Agent。群授权码已发送到发起人的私聊，请交给部署者在本机确认。"
+              : "本群尚未授权，当前不会运行 Agent。配对指引已发送到发起人的私聊；配对完成后会自动续发群授权码。"
+            : this.identity.isPaired(ingested.platformIdentityId)
+              ? "This group is not authorized, so the Agent will not run. The group authorization code was sent to the requester's direct messages for local confirmation by the deployer."
+              : "This group is not authorized, so the Agent will not run. Pairing instructions were sent to the requester's direct messages; the queued group authorization code follows automatically after pairing.",
           `group-unauthorized:${ingested.eventId}`,
           "group-authorization",
-          this.localeFor(ingested.principalId, message.botInstanceId),
+          locale,
         );
       }
       return;
@@ -716,6 +745,88 @@ export class IMGentApplication {
     };
     this.outbound.enqueue(outbound);
     void this.outbound.drain(this.adapters);
+  }
+
+  queuePendingGroupAuthorizations(
+    platformIdentityId: string,
+    onlyConversationSpaceId?: string,
+  ): Array<{
+    action: "authorize-group";
+    conversationSpaceId: string;
+    authorizationCode: string;
+    botInstanceId: string;
+    command: string;
+  }> {
+    const groups = this.identity.pendingGroupAuthorizations(
+      platformIdentityId,
+      onlyConversationSpaceId,
+    );
+    for (const group of groups) {
+      const locale = this.localeFor(group.principalId, group.botInstanceId);
+      const command =
+        `imgent group authorize-code ${group.authorizationCode} ` +
+        `--principal ${group.principalId}`;
+      this.queueDirectSystemMessage(
+        group.botInstanceId,
+        group.platformUserId,
+        locale === "zh-CN"
+          ? [
+              `群授权码：${group.authorizationCode}`,
+              "请将此授权码交给部署者，并在本机执行：",
+              command,
+              "授权完成后，回到群里再次 @机器人即可。",
+            ].join("\n")
+          : [
+              `Group authorization code: ${group.authorizationCode}`,
+              "Give this code to the deployer and run locally:",
+              command,
+              "After authorization, mention the bot in the group again.",
+            ].join("\n"),
+        `group-authorization:${group.conversationSpaceId}:${group.principalId}`,
+        "group-authorization",
+        locale,
+      );
+    }
+    return groups.map((group) => ({
+      action: "authorize-group",
+      conversationSpaceId: group.conversationSpaceId,
+      authorizationCode: group.authorizationCode,
+      botInstanceId: group.botInstanceId,
+      command:
+        `imgent group authorize-code ${group.authorizationCode} ` +
+        `--principal ${group.principalId}`,
+    }));
+  }
+
+  private queueDirectSystemMessage(
+    botInstanceId: string,
+    platformUserId: string,
+    text: string,
+    idempotencyKey: string,
+    status: SystemMessageStatus,
+    locale: SupportedLocale,
+  ): boolean {
+    const adapter = this.adapters.get(botInstanceId);
+    if (
+      adapter?.capabilities.supportsProactiveSend !== true ||
+      !adapter.capabilities.conversationKinds.includes("direct")
+    ) {
+      this.logger.warn("outbound.proactive-unavailable", {
+        botInstanceId,
+        conversationKind: "direct",
+      });
+      return false;
+    }
+    this.outbound.enqueue({
+      botInstanceId,
+      conversation: { kind: "direct", platformConversationId: platformUserId },
+      parts: [{ type: "text", text: formatSystemMessage(status, text, locale) }],
+      idempotencyKey,
+    });
+    void this.outbound.drain(this.adapters).catch((error: unknown) => {
+      this.logger.errorFrom("outbound.drain-failed", error, { botInstanceId });
+    });
+    return true;
   }
 
   private localeFor(principalId: string, botInstanceId: string): SupportedLocale {

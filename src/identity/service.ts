@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { IMGentError } from "@imgent/contracts";
+import { groupAuthorizationCode } from "./group-authorization.js";
 import type { IMGentStore } from "../storage/store.js";
 import type { ActorRole, SupportedLocale } from "@imgent/contracts";
 
@@ -630,6 +631,51 @@ export class IdentityService {
         conversationSpaceId,
       ),
     );
+  }
+
+  pendingGroupAuthorizations(
+    platformIdentityId: string,
+    onlyConversationSpaceId?: string,
+  ): Array<{
+    conversationSpaceId: string;
+    authorizationCode: string;
+    botInstanceId: string;
+    platformUserId: string;
+    principalId: string;
+  }> {
+    const groups = this.store.all<{
+      conversationSpaceId: string;
+      botInstanceId: string;
+      platformUserId: string;
+      principalId: string;
+    }>(
+      `SELECT cs.id AS conversationSpaceId,
+              cs.bot_instance_id AS botInstanceId,
+              pi.platform_user_id AS platformUserId,
+              pi.principal_id AS principalId
+       FROM platform_identities pi
+       JOIN group_memberships gm ON gm.principal_id = pi.principal_id
+       JOIN conversation_spaces cs ON cs.id = gm.conversation_space_id
+       LEFT JOIN group_authorizations ga ON ga.conversation_space_id = cs.id
+       WHERE pi.id = ? AND pi.paired = 1
+         AND pi.platform = 'qq' AND cs.platform = 'qq'
+         AND cs.kind = 'group'
+         AND cs.agent_profile_id = pi.agent_profile_id
+         AND cs.bot_instance_id = pi.bot_instance_id
+         AND ga.conversation_space_id IS NULL
+       ORDER BY cs.created_at`,
+      platformIdentityId,
+    );
+    return groups
+      .filter(
+        (group) =>
+          onlyConversationSpaceId === undefined ||
+          group.conversationSpaceId === onlyConversationSpaceId,
+      )
+      .map((group) => ({
+        ...group,
+        authorizationCode: groupAuthorizationCode(group.conversationSpaceId),
+      }));
   }
 
   changeGroupMode(

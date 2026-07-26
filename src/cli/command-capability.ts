@@ -10,6 +10,7 @@ export const COMMAND_CAPABILITIES = {
   pair: "online",
   "identity workspace set": "online",
   "group authorize": "online",
+  "group authorize-code": "online",
   "conversation list": "online",
   "schedule add": "online",
   "schedule list": "online",

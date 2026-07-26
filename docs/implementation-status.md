@@ -43,9 +43,10 @@ explicitly exiting Changesets prerelease mode and will move `latest` to that sta
   runs the restricted environment checks without constructing adapters.
 - Runtime readiness is refreshed during startup and maintenance with single-flight coordination.
   Diagnostic checks have a separate depth and timeout.
-- Pairing keeps one-time codes in direct messages. Unauthorized-group replies explain the complete
-  bootstrap flow, and successful `pair` results return executable `nextSteps` for discovered,
-  unauthorized groups in the same AgentProfile.
+- Pairing keeps one-time codes in direct messages. The first trigger in an unauthorized QQ group
+  proactively messages its author; unpaired identities receive pairing instructions first, and
+  successful `pair` immediately delivers queued `GRP-...` authorization guidance. `nextSteps`
+  remains the machine-readable local fallback.
 - Pairing accepts `--workspace`; omission resolves through the pairing route to the selected
   AgentProfile's required `agentUserHome`. That legacy field is a default/allowed workspace root,
   not an operating-system execution identity or `HOME` override. Principal workspaces drive direct
@@ -94,6 +95,10 @@ The current SQLite schema version is 7.
 - Results, approvals, and questions omit reply context and use proactive delivery. The existing
   Adapter capability contract rejects unsupported targets before work is accepted; QQ supports
   this path and current WeChat iLink does not.
+- Driver-local approval request IDs are translated to globally unique IMGent IDs. Approval
+  persistence and the `waiting_approval` transition are atomic, maintenance fails orphan waits
+  closed, and chat output presents interpreted operation/risk/impact fields instead of raw request
+  JSON.
 - Scheduling is a host/runtime feature. No built-in skill was added.
 
 ## Identity perception and memory
