@@ -1,5 +1,17 @@
 # imgent
 
+## 0.2.0-alpha.9
+
+### Minor Changes
+
+- d237780: Notify conversations after group authorization and schedule lifecycle changes, consistently prefix
+  scheduled messages, and archive isolated Codex schedule sessions after each run.
+
+### Patch Changes
+
+- a1923fa: Rewrite the English and Chinese READMEs with a shorter onboarding path, clearer capability
+  boundaries, complete command coverage, and more natural language.
+
 ## 0.2.0-alpha.8
 
 ### Patch Changes
