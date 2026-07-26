@@ -87,6 +87,9 @@ lines.on("line", (line) => {
   } else if (request.method === "thread/resume") {
     if (request.params.developerInstructions !== "RESUMED CATALOG") process.exit(13);
     send({ id: request.id, result: { thread: { id: "thread-1" } } });
+  } else if (request.method === "thread/archive") {
+    if (request.params.threadId !== "thread-1") process.exit(17);
+    send({ id: request.id, result: {} });
   } else if (request.method === "turn/start") {
     turns += 1;
     const prompt = request.params.input.find((part) => part.type === "text")?.text ?? "";
@@ -168,6 +171,7 @@ lines.on("line", (line) => {
       resumed.push(event);
     }
     assert.ok(resumed.some((event) => event.type === "completed" && event.result === "success"));
+    await driver.archiveSession("thread-1");
   } finally {
     await driver.close();
     await rm(directory, { recursive: true, force: true });

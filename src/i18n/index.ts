@@ -76,6 +76,9 @@ const zhCN = {
   "error.agent_turn_failed.action": "请稍后重试；若持续发生，请联系部署者检查本机日志。",
   "error.agent_session_mismatch.message": "会话对应的 Agent 或工作区已经变化。",
   "error.agent_session_mismatch.action": "请由部署者重置该会话后再试。",
+  "error.agent_session_archive_failed.message": "定时任务的 Agent 会话归档失败。",
+  "error.agent_session_archive_failed.action":
+    "任务结果不受影响；请由部署者检查 Agent 日志和死信。",
   "error.driver_protocol_incomplete.message": "本地 Agent 未返回完整的任务终态。",
   "error.driver_protocol_incomplete.action":
     "IMGent 将在确认安全时重试；持续发生时请升级或检查 Agent。",
@@ -208,6 +211,10 @@ const enUS = {
   "error.agent_session_mismatch.message":
     "The agent or workspace associated with this session has changed.",
   "error.agent_session_mismatch.action": "Ask the operator to reset the session and try again.",
+  "error.agent_session_archive_failed.message":
+    "The scheduled task's agent session could not be archived.",
+  "error.agent_session_archive_failed.action":
+    "The task result is unaffected; ask the operator to inspect agent logs and dead letters.",
   "error.driver_protocol_incomplete.message":
     "The local agent did not return a complete terminal result.",
   "error.driver_protocol_incomplete.action":

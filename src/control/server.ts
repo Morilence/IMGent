@@ -137,7 +137,7 @@ export class ControlServer {
       } else if (method === "GET" && url.pathname === "/v3/schedules") {
         data = admin.schedules();
       } else if (method === "POST" && url.pathname === "/v3/schedules") {
-        data = admin.createSchedule(parseCreateScheduleInput(await readBody(request)));
+        data = await admin.createSchedule(parseCreateScheduleInput(await readBody(request)));
       } else if (method === "GET" && url.pathname === "/v3/skills") {
         data = admin.skills();
       } else if (method === "POST" && url.pathname === "/v3/skills/validate") {
@@ -190,7 +190,7 @@ export class ControlServer {
           ) {
             throw new IMGentError("CLI_USAGE_INVALID");
           }
-          data = admin.authorizeGroup(decodePathSegment(group[1]!), body.principalId);
+          data = await admin.authorizeGroup(decodePathSegment(group[1]!), body.principalId);
         } else if (method === "GET" && memoryRecord) {
           data = admin.memoryRecord(decodePathSegment(memoryRecord[1]!));
         } else if (method === "GET" && scheduleHistory) {
@@ -200,12 +200,12 @@ export class ControlServer {
           const action = scheduleAction[2]!;
           const body = await readBody(request);
           if (action === "update") {
-            data = admin.updateSchedule(id, parseUpdateScheduleInput(body));
+            data = await admin.updateSchedule(id, parseUpdateScheduleInput(body));
           } else {
             assertEmptyObject(body);
-            if (action === "pause") data = admin.pauseSchedule(id);
-            else if (action === "resume") data = admin.resumeSchedule(id);
-            else if (action === "remove") data = admin.removeSchedule(id);
+            if (action === "pause") data = await admin.pauseSchedule(id);
+            else if (action === "resume") data = await admin.resumeSchedule(id);
+            else if (action === "remove") data = await admin.removeSchedule(id);
             else if (action === "run") data = admin.runSchedule(id);
             else data = admin.resetScheduleContext(id);
           }

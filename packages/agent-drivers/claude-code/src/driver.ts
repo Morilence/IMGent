@@ -176,6 +176,7 @@ function sanitizedInput(input: Record<string, unknown>): Record<string, unknown>
 
 export class ClaudeCodeDriver implements AgentDriver {
   readonly id = "claude-code" as const;
+  readonly freshSessionMode = "ephemeral" as const;
   private readonly sdk: ClaudeSdk;
   private readonly probeOnReady: boolean;
   private active = new Map<string, Active>();

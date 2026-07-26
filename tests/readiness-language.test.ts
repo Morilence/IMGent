@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { IMGentError } from "@imgent/contracts";
 import { defaultConfig } from "../src/config/index.js";
 import { writeConfig } from "../src/config/write.js";
 import { CredentialStore } from "../src/security/credential-store.js";
@@ -36,6 +37,7 @@ async function availablePort(): Promise<number> {
 function capturingAdapter(
   sent: OutboundMessage[],
   conversationKinds: ImAdapter["capabilities"]["conversationKinds"] = ["direct", "group"],
+  ready = true,
 ): ImAdapter {
   return {
     id: conversationKinds.includes("group") ? "qq" : "wechat-ilink",
@@ -47,7 +49,7 @@ function capturingAdapter(
       requiresReplyContext: false,
       supportsProactiveSend: true,
     },
-    checkReady: async (): Promise<AdapterReadiness> => ({ ready: true, issues: [] }),
+    checkReady: async (): Promise<AdapterReadiness> => ({ ready, issues: [] }),
     start: async (
       _onMessage: (
         message: InboundMessage,
@@ -272,7 +274,8 @@ test("unpaired users can set a Principal language and receive localized command 
     assert.doesNotMatch(latest?.payload_json ?? "", /fr-FR|raw|diagnostic/);
 
     application.adapters.set("qq-main", capturingAdapter(sent));
-    const paired = (await new AdminService(application).confirmPairing(groupPairingCode)) as {
+    const admin = new AdminService(application);
+    const paired = (await admin.confirmPairing(groupPairingCode)) as {
       principalId: string;
       nextSteps: Array<{
         action: string;
@@ -305,6 +308,128 @@ test("unpaired users can set a Principal language and receive localized command 
     assert.doesNotMatch(authorizationGuidance, /conversationSpaceId|nextSteps/);
 
     const firstAuthorizationCode = paired.nextSteps[0]!.authorizationCode;
+    const authorized = await admin.authorizeGroup(
+      paired.nextSteps[0]!.conversationSpaceId,
+      paired.principalId,
+    );
+    assert.deepEqual(authorized, {
+      result: "group-authorized",
+      conversationSpaceId: paired.nextSteps[0]!.conversationSpaceId,
+      principalId: paired.principalId,
+    });
+    const authorizedNotice = await waitForOutbound(
+      sent,
+      (message) =>
+        message.conversation.kind === "group" &&
+        JSON.stringify(message).includes("This group is now authorized"),
+    );
+    assert.match(JSON.stringify(authorizedNotice), /^\{.*\[IMGent: Group authorization\]/u);
+    assert.equal(authorizedNotice.replyTo, undefined);
+
+    const schedule = await admin.createSchedule({
+      name: "hourly-news",
+      prompt: "SECRET PROMPT MUST NOT LEAK",
+      conversationSpaceId: paired.nextSteps[0]!.conversationSpaceId,
+      principalId: paired.principalId,
+      cron: "35 * * * *",
+      timezone: "Asia/Shanghai",
+    });
+    const createdNotice = await waitForOutbound(sent, (message) =>
+      message.idempotencyKey.includes(`schedule-notice:${schedule.id}:created:`),
+    );
+    const createdText = JSON.stringify(createdNotice);
+    assert.match(createdText, /\[IMGent: Scheduled task\].*Created scheduled task/u);
+    assert.match(createdText, /Cron 35 \* \* \* \*/u);
+    assert.match(createdText, /Asia\/Shanghai/u);
+    assert.doesNotMatch(createdText, /SECRET PROMPT MUST NOT LEAK/u);
+
+    const updated = await admin.updateSchedule(schedule.id, {
+      name: "hourly-briefing",
+      prompt: "ANOTHER SECRET PROMPT",
+    });
+    assert.equal(updated.name, "hourly-briefing");
+    const updatedText = JSON.stringify(
+      await waitForOutbound(sent, (message) =>
+        message.idempotencyKey.includes(`schedule-notice:${schedule.id}:updated:`),
+      ),
+    );
+    assert.match(updatedText, /Updated scheduled task.*hourly-briefing/u);
+    assert.doesNotMatch(updatedText, /ANOTHER SECRET PROMPT/u);
+
+    await admin.pauseSchedule(schedule.id);
+    assert.match(
+      JSON.stringify(
+        await waitForOutbound(sent, (message) =>
+          message.idempotencyKey.includes(`schedule-notice:${schedule.id}:paused:`),
+        ),
+      ),
+      /Paused scheduled task.*Status: Paused/u,
+    );
+    await admin.resumeSchedule(schedule.id);
+    assert.match(
+      JSON.stringify(
+        await waitForOutbound(sent, (message) =>
+          message.idempotencyKey.includes(`schedule-notice:${schedule.id}:resumed:`),
+        ),
+      ),
+      /Resumed scheduled task.*Status: Active/u,
+    );
+
+    const rejecting = capturingAdapter(sent);
+    rejecting.send = async () => {
+      throw new IMGentError("ADAPTER_REQUEST_REJECTED");
+    };
+    application.adapters.set("qq-main", rejecting);
+    const updateDespiteNotificationFailure = await admin.updateSchedule(schedule.id, {
+      name: "delivery-independent",
+    });
+    assert.equal(updateDespiteNotificationFailure.name, "delivery-independent");
+    await application.outbound.drain(application.adapters);
+    assert.equal(
+      application.store.get<{ status: string }>(
+        `SELECT status FROM outbound_messages
+         WHERE idempotency_key LIKE ?
+         ORDER BY created_at DESC LIMIT 1`,
+        `schedule-notice:${schedule.id}:updated:%`,
+      )?.status,
+      "dead_letter",
+    );
+
+    application.adapters.set("qq-main", capturingAdapter(sent));
+    assert.deepEqual(await admin.removeSchedule(schedule.id), {
+      result: "schedule-removed",
+      id: schedule.id,
+    });
+    assert.match(
+      JSON.stringify(
+        await waitForOutbound(sent, (message) =>
+          message.idempotencyKey.includes(`schedule-notice:${schedule.id}:removed:`),
+        ),
+      ),
+      /Removed scheduled task.*Status: Removed/u,
+    );
+
+    application.adapters.set("qq-main", capturingAdapter(sent, ["direct", "group"], false));
+    const sentBeforeSkipped = sent.length;
+    const skippedNoticeSchedule = await admin.createSchedule({
+      name: "offline-notice",
+      prompt: "do not notify while offline",
+      conversationSpaceId: paired.nextSteps[0]!.conversationSpaceId,
+      principalId: paired.principalId,
+      at: new Date(Date.now() + 60_000).toISOString(),
+    });
+    assert.equal(sent.length, sentBeforeSkipped);
+    assert.equal(
+      application.store.get<{ count: number }>(
+        `SELECT count(*) AS count FROM audit_events
+         WHERE event_type = 'notification.skipped'
+           AND details_json LIKE ?`,
+        `%"subjectId":"${skippedNoticeSchedule.id}"%`,
+      )?.count,
+      1,
+    );
+
+    application.adapters.set("qq-main", capturingAdapter(sent));
     await application.handleInbound(
       directMessage({
         messageId: "paired-unauthorized-group",

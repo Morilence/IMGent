@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readdir, rm, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { QqAdapter, type QqCredential } from "@imgent/adapter-qq";
@@ -44,6 +45,17 @@ import type {
 const WECHAT_BASE_URL = "https://ilinkai.weixin.qq.com";
 
 export type { ReadinessReport } from "./readiness.js";
+
+interface ConversationSystemNotification {
+  conversationSpaceId: string;
+  principalId: string;
+  status: SystemMessageStatus;
+  body: Record<SupportedLocale, string>;
+  idempotencyKey: string;
+  category: "group-authorization" | "schedule";
+  action: string;
+  subjectId: string;
+}
 
 export class IMGentApplication {
   readonly identity: IdentityService;
@@ -796,6 +808,157 @@ export class IMGentApplication {
         `imgent group authorize-code ${group.authorizationCode} ` +
         `--principal ${group.principalId}`,
     }));
+  }
+
+  async notifyConversation(input: ConversationSystemNotification): Promise<void> {
+    const space = this.store.get<{
+      id: string;
+      agent_profile_id: string;
+      platform: "qq" | "wechat-ilink";
+      bot_instance_id: string;
+      kind: "direct" | "group";
+      platform_conversation_id: string;
+    }>(
+      `SELECT id, agent_profile_id, platform, bot_instance_id, kind,
+              platform_conversation_id
+       FROM conversation_spaces WHERE id = ?`,
+      input.conversationSpaceId,
+    );
+    if (!space) {
+      this.logger.warn("notification.skipped", {
+        category: input.category,
+        action: input.action,
+        subjectId: input.subjectId,
+        reason: "conversation-space-missing",
+      });
+      return;
+    }
+    const skip = (reason: string): void => {
+      this.auditNotification("notification.skipped", input, space, { reason });
+      this.logger.warn("notification.skipped", {
+        category: input.category,
+        action: input.action,
+        subjectId: input.subjectId,
+        botInstanceId: space.bot_instance_id,
+        conversationKind: space.kind,
+        reason,
+      });
+    };
+    try {
+      const principalAvailable =
+        space.kind === "direct"
+          ? Boolean(
+              this.store.get<{ available: number }>(
+                `SELECT 1 AS available FROM platform_identities
+                 WHERE principal_id = ? AND agent_profile_id = ?
+                   AND platform = ? AND bot_instance_id = ?
+                   AND platform_user_id = ? AND paired = 1`,
+                input.principalId,
+                space.agent_profile_id,
+                space.platform,
+                space.bot_instance_id,
+                space.platform_conversation_id,
+              ),
+            )
+          : Boolean(
+              this.store.get<{ available: number }>(
+                `SELECT 1 AS available FROM group_memberships gm
+                 JOIN group_authorizations ga
+                   ON ga.conversation_space_id = gm.conversation_space_id
+                 WHERE gm.conversation_space_id = ? AND gm.principal_id = ?`,
+                space.id,
+                input.principalId,
+              ),
+            );
+      if (!principalAvailable) {
+        skip("principal-unavailable");
+        return;
+      }
+      if (this.routes.get(space.bot_instance_id) !== space.agent_profile_id) {
+        skip("route-unavailable");
+        return;
+      }
+      const adapter = this.adapters.get(space.bot_instance_id);
+      if (
+        !adapter ||
+        !adapter.capabilities.supportsProactiveSend ||
+        !adapter.capabilities.conversationKinds.includes(space.kind)
+      ) {
+        skip("proactive-send-unavailable");
+        return;
+      }
+      const readiness = await adapter.checkReady("runtime");
+      if (!readiness.ready) {
+        skip("adapter-not-ready");
+        return;
+      }
+      const outboundId = this.outbound.enqueue({
+        botInstanceId: space.bot_instance_id,
+        conversation: {
+          kind: space.kind,
+          platformConversationId: space.platform_conversation_id,
+        },
+        parts: [
+          {
+            type: "text",
+            text: formatSystemMessage(
+              input.status,
+              input.body[this.localeFor(input.principalId, space.bot_instance_id)],
+              this.localeFor(input.principalId, space.bot_instance_id),
+            ),
+          },
+        ],
+        idempotencyKey: input.idempotencyKey,
+      });
+      this.auditNotification("notification.queued", input, space, { outboundId });
+      void this.outbound.drain(this.adapters).catch((error: unknown) => {
+        this.logger.errorFrom("outbound.drain-failed", error, {
+          botInstanceId: space.bot_instance_id,
+          outboundId,
+        });
+      });
+    } catch (error) {
+      try {
+        skip("notification-error");
+      } catch {
+        // Preserve the already committed control operation even if audit storage is unavailable.
+      }
+      this.logger.errorFrom("notification.failed", error, {
+        category: input.category,
+        action: input.action,
+        subjectId: input.subjectId,
+        botInstanceId: space.bot_instance_id,
+      });
+    }
+  }
+
+  private auditNotification(
+    eventType: "notification.queued" | "notification.skipped",
+    input: ConversationSystemNotification,
+    space: {
+      id: string;
+      agent_profile_id: string;
+    },
+    details: Record<string, unknown>,
+  ): void {
+    this.store.run(
+      `INSERT INTO audit_events(
+        id, agent_profile_id, principal_id, conversation_space_id,
+        event_type, details_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `audit_${randomUUID()}`,
+      space.agent_profile_id,
+      input.principalId,
+      space.id,
+      eventType,
+      JSON.stringify({
+        category: input.category,
+        action: input.action,
+        subjectId: input.subjectId,
+        ...details,
+      }),
+      new Date().toISOString(),
+    );
   }
 
   private queueDirectSystemMessage(

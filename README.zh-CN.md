@@ -284,7 +284,9 @@ imgent --config /srv/imgent/imgent.json group authorize-code GRP-8F12A4B9C0DE \
 ```
 
 `GRP-...` 只用于标识本机已经发现的群，本身不是授权凭据；命令仍要求连接本机常驻控制面，并
-提供已配对 Principal。部署者也可以手动查看本地 ID，继续使用 ConversationSpace 形式：
+提供已配对 Principal。授权提交后，IMGent 会主动在群里告知已可运行 Agent；如果 Adapter
+暂时不可用，群授权仍然有效，通知失败会留给部署者审计。部署者也可以手动查看本地 ID，继续
+使用 ConversationSpace 形式：
 
 ```bash
 imgent --config /srv/imgent/imgent.json identity list
@@ -320,8 +322,10 @@ Agent：工作树干净；当前分支是 main，并且与 origin/main 一致。
 同一 Principal 和 ConversationSpace 的引用保持稳定，但不会暴露 QQ/微信原始用户 ID。该行是
 宿主元数据，不是用户指令。
 
-配对、群授权、排队、审批、询问、错误和命令回执等 IMGent 控制消息使用
-`[IMGent: 状态]` 首行；微信 iLink 的未配对提示不会出现群聊说明。Agent 的正式回答不加前缀。
+配对、群授权、排队、审批、询问、错误、定时任务投递和命令回执等 IMGent 控制消息使用
+`[IMGent: 状态]` 首行。定时任务的正式回答使用 `[IMGent: 定时任务]`；定时运行中产生的审批、
+询问或错误保留对应的更具体状态，同时带上任务名称和计划时间。微信 iLink 的未配对提示不会
+出现群聊说明；普通交互式 Agent 的正式回答不加前缀。
 
 #### 8. 可选：创建定时任务
 
@@ -337,8 +341,13 @@ imgent --config /srv/imgent/imgent.json schedule add morning-report \
   --context fresh
 ```
 
-`fresh` 每次运行都创建新的临时 Agent session。`series` 只复用该计划自己的 session，永远
-不会复用或阻塞目标 IM 会话的普通 Agent session。
+`fresh` 每次运行都创建隔离的 Agent session，不留下可复用的计划上下文：Codex session 在
+该次运行进入终态后归档，Claude Code session 不持久化。`series` 只复用该计划自己的 session，
+永远不会复用或阻塞目标 IM 会话的普通 Agent session。
+
+创建、修改、暂停、恢复或删除计划时，如果目标当前可用，IMGent 会主动发送简明状态通知。通知
+不可用或投递失败不会回滚计划操作；跳过的通知会被审计，已入队的通知按常规出站重试/死信策略
+处理。
 
 ### 全局 CLI 参数与输出契约
 
@@ -1057,7 +1066,9 @@ imgent --config /srv/imgent/imgent.json schedule add morning-report \
 ```
 
 上面是完整 schedule 对象形状，后续示例只展示与操作有关的字段。错过多个 cron 时间点时只补跑
-一次；重叠运行会被跳过，而不是无限排队。
+一次；重叠运行会被跳过，而不是无限排队。`fresh` 每次使用隔离 session，并在运行进入终态后
+丢弃或归档；`series` 只保留该计划专用的 session。add、update、pause、resume 和 remove 会在
+目标可用时主动通知，但不会泄露 prompt；通知失败会留下审计记录，且不会回滚已提交的计划变更。
 
 #### `schedule list`：列出 active、paused、completed 或 blocked 计划
 

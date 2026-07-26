@@ -308,6 +308,9 @@ imgent --config /srv/imgent/imgent.json group authorize-code GRP-8F12A4B9C0DE \
 
 The `GRP-...` value identifies the discovered group; it is not an authorization capability by
 itself. The command still requires the resident local control plane and a paired Principal.
+After authorization commits, IMGent proactively notifies the group that Agent turns are enabled.
+If the Adapter is unavailable, the authorization remains valid and the failed notification is
+recorded for operators.
 Operators can also inspect local IDs and use the ConversationSpace form:
 
 ```bash
@@ -345,9 +348,11 @@ Before the raw request reaches Codex or Claude Code, IMGent adds compact host me
 The references remain stable for the same Principal and ConversationSpace without exposing raw QQ
 or WeChat user IDs. The line is metadata, not user-authored instructions.
 
-IMGent control messages—pairing, group authorization, queueing, approvals, questions, errors, and
-command receipts—start with `[IMGent: Status]`. WeChat iLink pairing guidance never mentions
-groups. Normal Agent answers remain unprefixed.
+IMGent control messages—pairing, group authorization, queueing, approvals, questions, errors,
+scheduled task delivery, and command receipts—start with `[IMGent: Status]`. Scheduled answers use
+`[IMGent: Scheduled task]`; an approval, question, or error raised by a scheduled run keeps that
+more specific status while including the schedule name and due time. WeChat iLink pairing guidance
+never mentions groups. Normal interactive Agent answers remain unprefixed.
 
 #### 8. Create an optional scheduled task
 
@@ -364,8 +369,15 @@ imgent --config /srv/imgent/imgent.json schedule add morning-report \
   --context fresh
 ```
 
-`fresh` creates a new ephemeral Agent session on every run. `series` reuses only the schedule's own
-session; it never reuses or blocks the target IM conversation's normal Agent session.
+`fresh` creates an isolated Agent session on every run and leaves no reusable schedule context:
+Codex sessions are archived after the run reaches a terminal state, while Claude Code sessions are
+not persisted. `series` reuses only the schedule's own session; it never reuses or blocks the
+target IM conversation's normal Agent session.
+
+Creating, updating, pausing, resuming, or removing a schedule proactively sends a concise status
+notice to the target when it is available. Notification availability or delivery failure never
+rolls back the schedule operation; IMGent audits skipped notices and applies the normal outbound
+retry/dead-letter policy to queued notices.
 
 ### Global CLI options and output contract
 
@@ -1100,7 +1112,10 @@ imgent --config /srv/imgent/imgent.json schedule add morning-report \
 
 This is the complete schedule object shape. Later examples show only fields relevant to the
 action. Missed cron occurrences coalesce to one catch-up; overlapping runs are skipped rather than
-queued indefinitely.
+queued indefinitely. `fresh` runs use isolated sessions that are discarded or archived after each
+terminal run; `series` retains only the session dedicated to this schedule. Add, update, pause,
+resume, and remove operations proactively notify an available target without exposing the prompt.
+Notification failure is audited and never rolls back the committed schedule change.
 
 #### `schedule list` — list active, paused, completed, or blocked schedules
 

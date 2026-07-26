@@ -144,6 +144,7 @@ function versionAtLeast(actual: readonly number[], required: readonly number[]):
 
 export class CodexDriver implements AgentDriver {
   readonly id = "codex" as const;
+  readonly freshSessionMode = "archive" as const;
   private rpc: JsonRpcProcess | undefined;
   private command: string | undefined;
   private activeByThread = new Map<string, ActiveTurn>();
@@ -386,6 +387,26 @@ export class CodexDriver implements AgentDriver {
         return;
     }
     this.rpc!.respond(pending.rpcId, result);
+  }
+
+  async archiveSession(sessionId: string): Promise<void> {
+    if (!this.rpc) {
+      throw new IMGentError("AGENT_SESSION_ARCHIVE_FAILED", {
+        diagnostic: { driver: "codex", operation: "thread/archive" },
+      });
+    }
+    try {
+      await this.rpc.request<Record<string, never>>(
+        "thread/archive",
+        { threadId: sessionId },
+        15_000,
+      );
+    } catch (error) {
+      throw new IMGentError("AGENT_SESSION_ARCHIVE_FAILED", {
+        cause: error,
+        diagnostic: { driver: "codex", operation: "thread/archive" },
+      });
+    }
   }
 
   async interrupt(turnId: string): Promise<void> {

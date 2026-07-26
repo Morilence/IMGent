@@ -313,7 +313,7 @@ export class ScheduleService {
     return this.require(id);
   }
 
-  remove(id: string): void {
+  remove(id: string): StoredSchedule {
     this.require(id);
     this.store.run(
       `UPDATE schedules SET status = 'paused', next_run_at = NULL,
@@ -322,7 +322,9 @@ export class ScheduleService {
       now(),
       id,
     );
-    this.audit("schedule.removed", { ...this.requireIncludingRemoved(id), status: "paused" });
+    const removed = { ...this.requireIncludingRemoved(id), status: "paused" as const };
+    this.audit("schedule.removed", removed);
+    return removed;
   }
 
   resetContext(id: string): StoredSchedule {

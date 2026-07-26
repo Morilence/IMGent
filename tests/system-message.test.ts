@@ -6,6 +6,7 @@ test("IMGent system statuses use one punctuation format in Chinese and English",
   const labels: Array<[SystemMessageStatus, string, string]> = [
     ["pairing", "配对", "Pairing"],
     ["group-authorization", "群授权", "Group authorization"],
+    ["schedule", "定时任务", "Scheduled task"],
     ["queued", "排队", "Queued"],
     ["approval", "审批", "Approval"],
     ["question", "询问", "Question"],

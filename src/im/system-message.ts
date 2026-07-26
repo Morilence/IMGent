@@ -1,7 +1,14 @@
 import type { SupportedLocale } from "@imgent/contracts";
 
 export type SystemMessageStatus =
-  "pairing" | "group-authorization" | "queued" | "approval" | "question" | "error" | "system";
+  | "pairing"
+  | "group-authorization"
+  | "schedule"
+  | "queued"
+  | "approval"
+  | "question"
+  | "error"
+  | "system";
 
 const STATUS_LABELS: Record<SystemMessageStatus, Record<SupportedLocale, string>> = {
   pairing: {
@@ -11,6 +18,10 @@ const STATUS_LABELS: Record<SystemMessageStatus, Record<SupportedLocale, string>
   "group-authorization": {
     "zh-CN": "群授权",
     "en-US": "Group authorization",
+  },
+  schedule: {
+    "zh-CN": "定时任务",
+    "en-US": "Scheduled task",
   },
   queued: {
     "zh-CN": "排队",

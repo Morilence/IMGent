@@ -40,6 +40,28 @@ export interface SchedulerOptions {
   logger?: Logger;
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function scheduledText(
+  text: string,
+  name: string,
+  scheduledFor: string,
+  locale: SupportedLocale,
+  preserveSystemStatus: boolean,
+): string {
+  const metadata =
+    locale === "zh-CN"
+      ? `任务：${name}\n计划时间：${scheduledFor}`
+      : `Task: ${name}\nScheduled for: ${scheduledFor}`;
+  const existingPrefix = preserveSystemStatus ? /^\[IMGent: [^\]\n]+\]\n/u.exec(text) : undefined;
+  if (existingPrefix) {
+    return `${existingPrefix[0]}${metadata}\n\n${text.slice(existingPrefix[0].length)}`;
+  }
+  return formatSystemMessage("schedule", `${metadata}\n\n${text}`, locale);
+}
+
 export class ConversationScheduler {
   private readonly maxConcurrency: number;
   private readonly logger: Logger;
@@ -152,6 +174,7 @@ export class ConversationScheduler {
     let streamed = "";
     let finalText = "";
     let completed = false;
+    let freshSessionId: string | undefined;
     try {
       for await (const event of driver.runTurn({
         turnId: task.id,
@@ -172,11 +195,14 @@ export class ConversationScheduler {
           this.options.skills.developerInstructions(profile.skills, profile.memory.enabled),
           ...(task.scheduleRunId ? [this.scheduleInstructions(task)] : []),
         ].join("\n\n"),
-        ...(task.scheduleRunId && !task.sessionKey ? { ephemeral: true } : {}),
+        ...(task.scheduleRunId && !task.sessionKey
+          ? { ephemeral: (driver.freshSessionMode ?? "ephemeral") !== "archive" }
+          : {}),
         hostTools: allowedHostTools,
       })) {
         switch (event.type) {
           case "session":
+            freshSessionId = event.sessionId;
             if (task.sessionKey) {
               this.options.store.saveSession(
                 task.sessionKey,
@@ -278,6 +304,8 @@ export class ConversationScheduler {
         taskId: task.id,
         agentProfileId: task.agentProfileId,
       });
+    } finally {
+      await this.archiveFreshScheduleSession(task, driver, freshSessionId);
     }
   }
 
@@ -395,7 +423,13 @@ export class ConversationScheduler {
         {
           type: "text",
           text: scheduled
-            ? `[定时任务：${scheduled.name}]\n计划时间：${scheduled.scheduled_for}\n\n${text}`
+            ? scheduledText(
+                text,
+                scheduled.name,
+                scheduled.scheduled_for,
+                this.locale(task),
+                suffix !== "final",
+              )
             : text,
         },
       ],
@@ -432,6 +466,53 @@ export class ConversationScheduler {
 
   private locale(task: StoredTask): SupportedLocale {
     return this.options.localeFor?.(task.principalId, task.message.botInstanceId) ?? "zh-CN";
+  }
+
+  private async archiveFreshScheduleSession(
+    task: StoredTask,
+    driver: AgentDriver,
+    sessionId: string | undefined,
+  ): Promise<void> {
+    if (
+      !task.scheduleRunId ||
+      task.sessionKey ||
+      !sessionId ||
+      driver.freshSessionMode !== "archive" ||
+      !driver.archiveSession
+    ) {
+      return;
+    }
+    let failure: unknown;
+    const delays = [0, 50, 200] as const;
+    for (const delay of delays) {
+      if (delay > 0) await wait(delay);
+      try {
+        await driver.archiveSession(sessionId);
+        return;
+      } catch (error) {
+        failure = error;
+      }
+    }
+    const normalized = normalizeError(failure, "AGENT_SESSION_ARCHIVE_FAILED", {
+      diagnostic: {
+        taskId: task.id,
+        agentProfileId: task.agentProfileId,
+        driver: driver.id,
+        operation: "archive-session",
+      },
+    });
+    this.options.store.addDeadLetter(
+      "agent.session-archive",
+      normalized,
+      { attempts: delays.length, driver: driver.id },
+      task.message.botInstanceId,
+      task.id,
+    );
+    this.logger.errorFrom("agent.session-archive-failed", normalized, {
+      taskId: task.id,
+      agentProfileId: task.agentProfileId,
+      driver: driver.id,
+    });
   }
 
   private async handleDriverError(task: StoredTask, descriptor: ErrorDescriptor): Promise<void> {

@@ -211,6 +211,13 @@ export const ERROR_DEFINITIONS = {
     actionKey: "error.agent_session_mismatch.action",
     retry: { strategy: "after_user_action", replay: "safe" },
   },
+  AGENT_SESSION_ARCHIVE_FAILED: {
+    domain: "driver",
+    kind: "transient",
+    messageKey: "error.agent_session_archive_failed.message",
+    actionKey: "error.agent_session_archive_failed.action",
+    retry: { strategy: "backoff", replay: "safe" },
+  },
   DRIVER_PROTOCOL_INCOMPLETE: {
     domain: "driver",
     kind: "internal",

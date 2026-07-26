@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
-import { IMGentError } from "@imgent/contracts";
+import { IMGentError, type SupportedLocale } from "@imgent/contracts";
 import { createBackup } from "../backup/service.js";
 import {
   getMemoryRecord,
@@ -15,7 +15,66 @@ import { builtInSkillsDirectory } from "../skills/paths.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { conversations, groups, identities, persistentStatus } from "./admin-queries.js";
 import type { IMGentApplication, ReadinessReport } from "./application.js";
-import type { CreateScheduleInput, UpdateScheduleInput } from "../schedule/service.js";
+import type {
+  CreateScheduleInput,
+  StoredSchedule,
+  UpdateScheduleInput,
+} from "../schedule/service.js";
+
+type ScheduleNoticeAction = "created" | "updated" | "paused" | "resumed" | "removed";
+
+function scheduleNotice(
+  action: ScheduleNoticeAction,
+  schedule: StoredSchedule,
+): Record<SupportedLocale, string> {
+  const zhActions: Record<ScheduleNoticeAction, string> = {
+    created: "已创建",
+    updated: "已修改",
+    paused: "已暂停",
+    resumed: "已恢复",
+    removed: "已删除",
+  };
+  const enActions: Record<ScheduleNoticeAction, string> = {
+    created: "Created",
+    updated: "Updated",
+    paused: "Paused",
+    resumed: "Resumed",
+    removed: "Removed",
+  };
+  const zhStatuses: Record<StoredSchedule["status"], string> = {
+    active: "运行中",
+    paused: "已暂停",
+    completed: "已完成",
+    blocked: "已阻塞",
+  };
+  const enStatuses: Record<StoredSchedule["status"], string> = {
+    active: "Active",
+    paused: "Paused",
+    completed: "Completed",
+    blocked: "Blocked",
+  };
+  const zh = [
+    `${zhActions[action]}定时任务`,
+    `任务：${schedule.name}`,
+    `状态：${action === "removed" ? "已删除" : zhStatuses[schedule.status]}`,
+    schedule.scheduleKind === "cron"
+      ? `计划：Cron ${schedule.scheduleExpression}`
+      : `执行时间：${schedule.scheduleExpression}`,
+    ...(schedule.timezone ? [`时区：${schedule.timezone}`] : []),
+    ...(schedule.nextRunAt ? [`下次执行：${schedule.nextRunAt}`] : []),
+  ].join("\n");
+  const en = [
+    `${enActions[action]} scheduled task`,
+    `Task: ${schedule.name}`,
+    `Status: ${action === "removed" ? "Removed" : enStatuses[schedule.status]}`,
+    schedule.scheduleKind === "cron"
+      ? `Schedule: Cron ${schedule.scheduleExpression}`
+      : `Run at: ${schedule.scheduleExpression}`,
+    ...(schedule.timezone ? [`Timezone: ${schedule.timezone}`] : []),
+    ...(schedule.nextRunAt ? [`Next run: ${schedule.nextRunAt}`] : []),
+  ].join("\n");
+  return { "zh-CN": zh, "en-US": en };
+}
 
 function isInside(path: string, root: string): boolean {
   const result = relative(root, path);
@@ -100,24 +159,33 @@ export class AdminService {
     return this.application.schedules.list();
   }
 
-  createSchedule(input: CreateScheduleInput): unknown {
-    return this.application.schedules.create(input);
+  async createSchedule(input: CreateScheduleInput): Promise<StoredSchedule> {
+    const schedule = this.application.schedules.create(input);
+    await this.notifySchedule("created", schedule);
+    return schedule;
   }
 
-  updateSchedule(id: string, input: UpdateScheduleInput): unknown {
-    return this.application.schedules.update(id, input);
+  async updateSchedule(id: string, input: UpdateScheduleInput): Promise<StoredSchedule> {
+    const schedule = this.application.schedules.update(id, input);
+    await this.notifySchedule("updated", schedule);
+    return schedule;
   }
 
-  pauseSchedule(id: string): unknown {
-    return this.application.schedules.setStatus(id, "paused");
+  async pauseSchedule(id: string): Promise<StoredSchedule> {
+    const schedule = this.application.schedules.setStatus(id, "paused");
+    await this.notifySchedule("paused", schedule);
+    return schedule;
   }
 
-  resumeSchedule(id: string): unknown {
-    return this.application.schedules.setStatus(id, "active");
+  async resumeSchedule(id: string): Promise<StoredSchedule> {
+    const schedule = this.application.schedules.setStatus(id, "active");
+    await this.notifySchedule("resumed", schedule);
+    return schedule;
   }
 
-  removeSchedule(id: string): Record<string, unknown> {
-    this.application.schedules.remove(id);
+  async removeSchedule(id: string): Promise<Record<string, unknown>> {
+    const schedule = this.application.schedules.remove(id);
+    await this.notifySchedule("removed", schedule);
     return { result: "schedule-removed", id };
   }
 
@@ -133,13 +201,45 @@ export class AdminService {
     return this.application.schedules.history(id);
   }
 
-  authorizeGroup(conversationSpaceId: string, principalId: string): Record<string, unknown> {
+  async authorizeGroup(
+    conversationSpaceId: string,
+    principalId: string,
+  ): Promise<Record<string, unknown>> {
     this.application.identity.authorizeGroup(conversationSpaceId, principalId);
+    await this.application.notifyConversation({
+      conversationSpaceId,
+      principalId,
+      status: "group-authorization",
+      body: {
+        "zh-CN": "本群授权成功，现在可以 @机器人运行 Agent。",
+        "en-US": "This group is now authorized. Mention the bot to run the Agent.",
+      },
+      idempotencyKey: `group-authorization-notice:${conversationSpaceId}:${randomUUID()}`,
+      category: "group-authorization",
+      action: "authorized",
+      subjectId: conversationSpaceId,
+    });
     return {
       result: "group-authorized",
       conversationSpaceId,
       principalId,
     };
+  }
+
+  private async notifySchedule(
+    action: ScheduleNoticeAction,
+    schedule: StoredSchedule,
+  ): Promise<void> {
+    await this.application.notifyConversation({
+      conversationSpaceId: schedule.conversationSpaceId,
+      principalId: schedule.principalId,
+      status: "schedule",
+      body: scheduleNotice(action, schedule),
+      idempotencyKey: `schedule-notice:${schedule.id}:${action}:${randomUUID()}`,
+      category: "schedule",
+      action,
+      subjectId: schedule.id,
+    });
   }
 
   skills(): unknown[] {
