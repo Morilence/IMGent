@@ -1,5 +1,12 @@
 # imgent
 
+## 0.2.0-alpha.8
+
+### Patch Changes
+
+- 4d5e4f2: Make approval requests readable and collision-safe, and proactively deliver queued QQ group
+  authorization codes after direct-message pairing.
+
 ## 0.2.0-alpha.7
 
 ### Minor Changes

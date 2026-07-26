@@ -13,6 +13,7 @@
     "add-owner-attribution",
     "add-scheduled-agent-tasks",
     "align-npm-latest",
+    "clarify-approvals-and-group-pairing",
     "clean-runtime-boundaries",
     "harden-memory-runtime",
     "improve-im-pairing-workspaces",
