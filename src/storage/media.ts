@@ -1,5 +1,18 @@
 import type { IMGentStore } from "./store.js";
-import type { InboundMessage } from "@imgent/contracts";
+import type { InboundMessage, OutboundMessage } from "@imgent/contracts";
+
+export function referencedOutboundMediaPaths(store: IMGentStore): string[] {
+  return store
+    .all<{ payload_json: string }>(
+      "SELECT payload_json FROM outbound_messages WHERE status != 'sent' AND payload_json LIKE '%\"localPath\"%'",
+    )
+    .flatMap((row) => {
+      const message = JSON.parse(row.payload_json) as OutboundMessage;
+      return message.parts.flatMap((part) =>
+        "attachment" in part && part.attachment.localPath ? [part.attachment.localPath] : [],
+      );
+    });
+}
 
 function localMediaPaths(message: InboundMessage | { expired: true }): string[] {
   if ("expired" in message) return [];

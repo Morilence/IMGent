@@ -281,6 +281,13 @@ export const ERROR_DEFINITIONS = {
     actionKey: "error.outbound_platform_rejected.action",
     retry: { strategy: "none", replay: "safe" },
   },
+  OUTBOUND_MEDIA_INVALID: {
+    domain: "outbound",
+    kind: "validation",
+    messageKey: "error.outbound_media_invalid.message",
+    actionKey: "error.outbound_media_invalid.action",
+    retry: { strategy: "after_user_action", replay: "safe" },
+  },
   OUTBOUND_SEND_FAILED: {
     domain: "outbound",
     kind: "transient",

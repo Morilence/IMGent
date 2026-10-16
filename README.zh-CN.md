@@ -45,6 +45,11 @@ Agent 可以加载哪些本地 skills。QQ 群需要在本机授权。开启全�
 IMGent 会把收到的文本、图片、音频、视频和文件整理成统一消息格式。如果驱动支持对应媒体类型，
 QQ 附件 URL 和安全物化后的微信媒体会直接传给它；其余附件仍会出现在 Agent 上下文中。
 
+微信回复支持原生图片、视频和文件。Agent 将实际文件保存到当前工作区，并在最终回复中用
+`MEDIA: /绝对路径/文件.png` 单独一行交给 IMGent 发送；最多 10 个附件，每个最多 100 MiB。
+IMGent 会保存附件快照供队列重试使用。Markdown 图片语法仅回退为链接，不能替代原生图片发送；
+微信文本保留支持的 Markdown，过滤不兼容的标题层级和中文斜体。详见[微信投递说明](docs/wechat-delivery.md)。
+
 Codex 使用本地 app-server 协议。Claude Code 使用本地 Agent SDK 和 CLI 认证。IMGent 直接使用
 机器上已有的登录状态，不会收集或代理 Agent 厂商的登录 token。
 

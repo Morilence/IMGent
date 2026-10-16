@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { IMGentError } from "@imgent/contracts";
@@ -98,7 +98,10 @@ async function schedulerFixture(
     store: fixture.store,
     profiles: new Map([["main", profile]]),
     drivers: new Map([["main", driver]]),
-    adapters: new Map([["qq-main", fakeAdapter()]]),
+    adapters: new Map([
+      ["qq-main", fakeAdapter()],
+      ["wechat-main", fakeAdapter()],
+    ]),
     approvals: new ApprovalService(fixture.store),
     memory,
     hostTools,
@@ -108,6 +111,68 @@ async function schedulerFixture(
   });
   return { fixture, scheduler };
 }
+
+test("scheduler teaches native WeChat delivery and commits attachments with the completed task", async () => {
+  const driver = fakeDriver(async (input) => {
+    assert.match(input.developerInstructions ?? "", /CAN receive native image/);
+    const path = join(input.profile.workspace, "report.txt");
+    await writeFile(path, "attachment contents");
+    return [
+      { type: "output-final", text: `文件如下\nMEDIA: ${path}` },
+      { type: "completed", result: "success" },
+    ];
+  });
+  const { fixture, scheduler } = await schedulerFixture(driver);
+  try {
+    const ingested = fixture.store.ingest(
+      directMessage({ platform: "wechat-ilink", botInstanceId: "wechat-main" }),
+      "main",
+      "wechat-media",
+    );
+    await scheduler.processOnce();
+    assert.equal(fixture.store.task(ingested.taskId!)?.status, "succeeded");
+    const row = fixture.store.get<{ payload_json: string }>(
+      "SELECT payload_json FROM outbound_messages WHERE task_id=?",
+      ingested.taskId!,
+    );
+    const message = JSON.parse(row!.payload_json) as OutboundMessage;
+    assert.deepEqual(
+      message.parts.map((part) => part.type),
+      ["text", "file"],
+    );
+    assert.equal(message.idempotencyKey, `${ingested.taskId}:final`);
+  } finally {
+    await scheduler.stop();
+    await fixture.cleanup();
+  }
+});
+
+test("scheduler reports an invalid WeChat attachment instead of claiming successful delivery", async () => {
+  const driver = fakeDriver(async () => [
+    { type: "output-final", text: "MEDIA: /outside/workspace/missing.png" },
+    { type: "completed", result: "success" },
+  ]);
+  const { fixture, scheduler } = await schedulerFixture(driver);
+  try {
+    const ingested = fixture.store.ingest(
+      directMessage({ platform: "wechat-ilink", botInstanceId: "wechat-main" }),
+      "main",
+      "wechat-invalid-media",
+    );
+    await scheduler.processOnce();
+    assert.notEqual(fixture.store.task(ingested.taskId!)?.status, "succeeded");
+    assert.equal(fixture.store.task(ingested.taskId!)?.error?.code, "OUTBOUND_MEDIA_INVALID");
+    const row = fixture.store.get<{ payload_json: string }>(
+      "SELECT payload_json FROM outbound_messages WHERE task_id=?",
+      ingested.taskId!,
+    );
+    assert.match(row?.payload_json ?? "", /附件无法读取/);
+    assert.doesNotMatch(row?.payload_json ?? "", /outside\/workspace/);
+  } finally {
+    await scheduler.stop();
+    await fixture.cleanup();
+  }
+});
 
 test("scheduler uses the resolved Principal workspace and leaves Agent replies unprefixed", async () => {
   let observed: AgentTurnInput | undefined;

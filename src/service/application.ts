@@ -28,6 +28,7 @@ import {
   clearLocalMediaPaths,
   referencedMediaPaths,
   releasableMediaEvents,
+  referencedOutboundMediaPaths,
 } from "../storage/media.js";
 import { IMGentStore } from "../storage/store.js";
 import { collectReadiness, type ReadinessReport } from "./readiness.js";
@@ -1030,6 +1031,10 @@ export class IMGentApplication {
       await this.cleanupOrphanedMedia(
         mediaRoot,
         new Set(referencedMediaPaths(this.store).map((path) => resolve(path))),
+      );
+      await this.cleanupOrphanedMedia(
+        resolve(this.config.dataDir, "media", "outbound"),
+        new Set(referencedOutboundMediaPaths(this.store).map((path) => resolve(path))),
       );
     } finally {
       this.mediaCleanupRunning = false;

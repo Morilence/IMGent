@@ -138,15 +138,29 @@ async function fetchMedia(
   url: string,
   maxBytes: number,
 ): Promise<Buffer> {
-  const response = await client.fetch(url);
+  const response = await client.fetch(url, { signal: AbortSignal.timeout(60_000) });
   if (!response.ok) throw new Error(`微信 CDN 下载失败: HTTP ${response.status}`);
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     throw new Error(`微信媒体超过 ${maxBytes} 字节限制`);
   }
-  const data = Buffer.from(await response.arrayBuffer());
-  if (data.byteLength > maxBytes) throw new Error(`微信媒体超过 ${maxBytes} 字节限制`);
-  return data;
+  if (!response.body) throw new Error("微信媒体响应为空");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) throw new Error(`微信媒体超过 ${maxBytes} 字节限制`);
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks);
 }
 
 async function saveInboundMedia(
@@ -265,13 +279,21 @@ export async function attachmentToWechatItem(
   }
   let plaintext: Buffer;
   if (attachment.localPath) {
+    const info = await stat(attachment.localPath);
+    if (!info.isFile() || info.size > DEFAULT_MAX_MEDIA_BYTES)
+      throw new Error("微信媒体文件无效或超过大小限制");
     plaintext = await readFile(attachment.localPath);
   } else {
     if (!attachment.url) throw new Error(`微信 ${type} 发送缺少可访问 URL 或本地文件`);
-    const source = await client.fetch(attachment.url);
-    if (!source.ok) throw new Error(`媒体下载失败: HTTP ${source.status}`);
-    plaintext = Buffer.from(await source.arrayBuffer());
+    plaintext = await fetchMedia(client, attachment.url, DEFAULT_MAX_MEDIA_BYTES);
   }
+  if (!plaintext.length || plaintext.length > DEFAULT_MAX_MEDIA_BYTES)
+    throw new Error("微信媒体文件为空或超过大小限制");
+  if (
+    attachment.checksum?.startsWith("sha256:") &&
+    attachment.checksum !== `sha256:${createHash("sha256").update(plaintext).digest("hex")}`
+  )
+    throw new Error("微信媒体文件校验失败");
   const key = randomBytes(16);
   const ciphertext = encrypt(plaintext, key);
   const filekey = randomBytes(16).toString("hex");
@@ -298,13 +320,15 @@ export async function attachmentToWechatItem(
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: new Uint8Array(ciphertext),
+    signal: AbortSignal.timeout(60_000),
   });
   if (!uploaded.ok) throw new Error(`微信 CDN 上传失败: HTTP ${uploaded.status}`);
   const download = uploaded.headers.get("x-encrypted-param");
   if (!download) throw new Error("微信 CDN 响应缺少 x-encrypted-param");
   const media: CdnMedia = {
     encrypt_query_param: download,
-    aes_key: key.toString("base64"),
+    // Tencent's current sender base64-encodes the 32-character hex key.
+    aes_key: Buffer.from(key.toString("hex"), "ascii").toString("base64"),
     encrypt_type: 1,
   };
   if (type === "image") {

@@ -50,6 +50,12 @@ IMGent normalizes inbound text, images, audio, video, and files into one message
 attachment URLs and safely materialized WeChat media to drivers that support those media types.
 Unsupported attachments still appear in the Agent context.
 
+WeChat replies support native images, videos, and files. The Agent saves the actual file inside
+the current workspace and includes a standalone `MEDIA: /absolute/path/to/file.png` line in its
+final answer. IMGent snapshots and queues up to 10 attachments, each at most 100 MiB, for delivery
+and retries. Markdown images fall back to links; supported Markdown is preserved while unsupported
+heading levels and CJK italics are filtered. See [WeChat delivery](docs/wechat-delivery.md).
+
 Codex uses the local app-server protocol. Claude Code uses the local Agent SDK and CLI
 authentication. Both drivers use the login that is already available on the machine. IMGent does
 not collect or proxy vendor login tokens.

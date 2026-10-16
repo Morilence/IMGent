@@ -1,7 +1,9 @@
+import { dirname, join } from "node:path";
 import { IMGentError, normalizeError, textOf } from "@imgent/contracts";
 import { approvalMessage } from "../approvals/presentation.js";
 import { renderErrorText } from "../i18n/index.js";
 import { agentTurnContext } from "../identity/agent-context.js";
+import { agentReplyInstructions, prepareAgentReply } from "../im/agent-reply.js";
 import { formatSystemMessage } from "../im/system-message.js";
 import {
   MEMORY_HOST_TOOL_IDS,
@@ -193,6 +195,7 @@ export class ConversationScheduler {
             "Use speaker.ref as the stable identity anchor and displayName only as a mutable human-readable label.",
           ].join("\n"),
           this.options.skills.developerInstructions(profile.skills, profile.memory.enabled),
+          agentReplyInstructions(task.message.platform),
           ...(task.scheduleRunId ? [this.scheduleInstructions(task)] : []),
         ].join("\n\n"),
         ...(task.scheduleRunId && !task.sessionKey
@@ -287,6 +290,15 @@ export class ConversationScheduler {
       }
       const answer = finalText || streamed || "任务已完成。";
       const message = this.replyMessage(task, answer, "final");
+      if (task.message.platform === "wechat-ilink") {
+        message.parts = await prepareAgentReply({
+          text: textOf(message.parts),
+          platform: task.message.platform,
+          workspace: taskProfile.workspace,
+          mediaDirectory: join(dirname(this.options.store.path), "media", "outbound"),
+          taskId: task.id,
+        });
+      }
       this.options.store.completeTaskWithOutbound(
         task.id,
         answer,

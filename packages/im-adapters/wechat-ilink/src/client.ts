@@ -1,5 +1,6 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { IMGentError, normalizeError } from "@imgent/contracts";
+import { formatWechatText } from "./format.js";
 import {
   attachmentToWechatItem,
   materializeWechatInboundMedia,
@@ -262,7 +263,8 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
     const items: MessageItem[] = [];
     for (const part of message.parts) {
       if (part.type === "text") {
-        if (part.text) items.push({ type: 1, text_item: { text: part.text } });
+        const text = formatWechatText(part.text);
+        if (text.trim()) items.push({ type: 1, text_item: { text } });
       } else if (
         part.type === "image" ||
         part.type === "video" ||
@@ -295,18 +297,36 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
         diagnostic: { platform: "wechat-ilink", reason: "empty outbound message" },
       });
     }
-    const clientId = `imgent-${randomUUID()}`;
-    const raw: WechatMessage = {
-      from_user_id: "",
-      to_user_id: message.conversation.platformConversationId,
-      client_id: clientId,
-      message_type: MessageType.BOT,
-      message_state: 2,
-      item_list: items,
-      context_token: contextToken,
-    };
-    await this.post("ilink/bot/sendmessage", { msg: raw });
-    const result: SendResult = { platformMessageId: clientId, mode: "reply" };
+    let lastClientId = "";
+    for (const [index, item] of items.entries()) {
+      // One item per request, matching Tencent's current sender. Keep IDs stable
+      // across retries and skip parts already acknowledged in this process.
+      const clientId = `imgent-${createHash("sha256")
+        .update(
+          JSON.stringify([
+            message.botInstanceId,
+            message.conversation,
+            message.idempotencyKey,
+            index,
+          ]),
+        )
+        .digest("hex")
+        .slice(0, 32)}`;
+      lastClientId = clientId;
+      if (this.sentKeys.has(clientId)) continue;
+      const raw: WechatMessage = {
+        from_user_id: "",
+        to_user_id: message.conversation.platformConversationId,
+        client_id: clientId,
+        message_type: MessageType.BOT,
+        message_state: 2,
+        item_list: [item],
+        context_token: contextToken,
+      };
+      await this.post("ilink/bot/sendmessage", { msg: raw });
+      this.sentKeys.set(clientId, { platformMessageId: clientId, mode: "reply" });
+    }
+    const result: SendResult = { platformMessageId: lastClientId, mode: "reply" };
     this.sentKeys.set(message.idempotencyKey, result);
     return result;
   }
@@ -334,6 +354,7 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
             AuthorizationType: "ilink_bot_token",
             Authorization: `Bearer ${this.options.credential.botToken}`,
             "X-WECHAT-UIN": uin(),
+            "iLink-App-Id": "bot",
             "iLink-App-ClientVersion": "65536",
           },
           body: JSON.stringify({

@@ -99,6 +99,9 @@ const zhCN = {
   "error.outbound_platform_rejected.message": "消息平台拒绝发送这条回复。",
   "error.outbound_platform_rejected.action": "请联系部署者检查平台限制和死信记录。",
   "error.outbound_send_failed.message": "回复暂时无法发送。",
+  "error.outbound_media_invalid.message": "回复中的附件无法读取或不符合发送要求。",
+  "error.outbound_media_invalid.action":
+    "请让 Agent 将实际文件保存到当前工作区后重新发送；每个文件最多 100 MiB，每次最多 10 个。",
   "error.outbound_send_failed.action": "IMGent 将自动重试；最终失败会保留在死信中。",
   "error.approval_not_found.message": "审批请求不存在或已经结束。",
   "error.approval_not_found.action": "请使用最新的审批请求。",
@@ -247,6 +250,10 @@ const enUS = {
   "error.outbound_platform_rejected.action":
     "Ask the operator to inspect platform limits and dead letters.",
   "error.outbound_send_failed.message": "The reply could not be sent yet.",
+  "error.outbound_media_invalid.message":
+    "A reply attachment could not be read or is not valid for delivery.",
+  "error.outbound_media_invalid.action":
+    "Ask the Agent to save the actual file inside the current workspace and send it again; at most 10 files, each up to 100 MiB.",
   "error.outbound_send_failed.action":
     "IMGent will retry automatically and retain a dead letter if delivery ultimately fails.",
   "error.approval_not_found.message": "The approval request does not exist or has already ended.",
