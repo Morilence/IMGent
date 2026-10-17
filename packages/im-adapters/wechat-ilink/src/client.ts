@@ -41,6 +41,11 @@ export interface WechatIlinkAdapterOptions {
     error: WechatCompatibilityError,
     checkpoint?: { key: string; value: string },
   ) => Promise<void>;
+  onMediaError?: (
+    message: InboundMessage,
+    error: WechatCompatibilityError,
+    checkpoint?: { key: string; value: string },
+  ) => Promise<void>;
   onSessionInvalid?: (message: string) => Promise<void>;
   onCheckpoint?: (checkpoint: { key: string; value: string }) => Promise<void>;
 }
@@ -186,10 +191,14 @@ export class WechatIlinkAdapter implements ImAdapter, WechatHttpClient {
                   this.options.cdnBaseUrl,
                 );
               } catch (error) {
-                throw new WechatCompatibilityError("微信媒体下载、解密或校验失败", {
+                const failure = new WechatCompatibilityError("微信媒体下载、解密或校验失败", {
                   messageId: normalized.messageId,
                   reason: error instanceof Error ? error.message : String(error),
                 });
+                if (!this.options.onMediaError) throw failure;
+                await this.options.onMediaError(normalized, failure, checkpoint);
+                if (checkpoint) this.cursor = checkpoint.value;
+                continue;
               }
             }
             if (message) await onMessage(message, checkpoint);

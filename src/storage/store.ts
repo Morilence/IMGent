@@ -580,6 +580,7 @@ export class IMGentStore {
   completeTask(taskId: string, finalText: string, curate: boolean): boolean {
     return this.transaction(() => {
       const changed = this.transitionTask(taskId, ["active"], "succeeded", { finalText });
+      if (changed) this.settleSteeredInputs(taskId);
       if (changed && curate) this.enqueueMemoryOutbox(taskId);
       return changed;
     });
@@ -620,6 +621,7 @@ export class IMGentStore {
     return this.transaction(() => {
       const changed = this.transitionTask(taskId, ["active"], "succeeded", { finalText });
       if (!changed) return false;
+      this.settleSteeredInputs(taskId);
       this.enqueueOutbound(message, taskId);
       if (curate) this.enqueueMemoryOutbox(taskId);
       return true;
@@ -794,6 +796,108 @@ export class IMGentStore {
     );
   }
 
+  nextQueuedFollowUp(target: StoredTask): StoredTask | undefined {
+    const row = this.get<{ id: string }>(
+      `SELECT id FROM tasks WHERE execution_key = ? AND status IN ('queued', 'retry_wait')
+       ORDER BY created_at, rowid LIMIT 1`,
+      target.executionKey,
+    );
+    return row ? this.task(row.id) : undefined;
+  }
+
+  latestSteeredInput(targetTaskId: string): StoredTask | undefined {
+    const row = this.get<{ input_task_id: string }>(
+      `SELECT input_task_id FROM task_steers WHERE target_task_id = ? AND state = 'accepted'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      targetTaskId,
+    );
+    return row ? this.task(row.input_task_id) : undefined;
+  }
+
+  steeredInputs(targetTaskId: string): StoredTask[] {
+    return this.all<{ input_task_id: string }>(
+      `SELECT input_task_id FROM task_steers WHERE target_task_id = ? AND state = 'accepted'
+       ORDER BY created_at, rowid`,
+      targetTaskId,
+    ).flatMap(({ input_task_id }) => {
+      const task = this.task(input_task_id);
+      return task ? [task] : [];
+    });
+  }
+
+  beginSteer(inputTaskId: string, targetTaskId: string): boolean {
+    return this.transaction(() => {
+      const input = this.task(inputTaskId);
+      const target = this.task(targetTaskId);
+      if (
+        !input ||
+        !target ||
+        input.status !== "queued" ||
+        !["active", "waiting_approval"].includes(target.status) ||
+        input.executionKey !== target.executionKey ||
+        input.principalId !== target.principalId ||
+        input.scheduleRunId ||
+        target.scheduleRunId
+      )
+        return false;
+      if (!this.transitionTask(inputTaskId, ["queued"], "active")) return false;
+      this.run("UPDATE tasks SET attempt = attempt + 1 WHERE id = ?", inputTaskId);
+      this.run(
+        `INSERT INTO task_steers(input_task_id, target_task_id, state, created_at, updated_at)
+        VALUES (?, ?, 'submitting', ?, ?)
+        ON CONFLICT(input_task_id) DO UPDATE SET target_task_id = excluded.target_task_id,
+          state = 'submitting', updated_at = excluded.updated_at`,
+        inputTaskId,
+        targetTaskId,
+        now(),
+        now(),
+      );
+      // Persist before the RPC: after a crash, acceptance may be unknowable.
+      this.markDangerousSideEffect(inputTaskId);
+      this.markDangerousSideEffect(targetTaskId);
+      return true;
+    });
+  }
+
+  resolveSteer(inputTaskId: string, state: "accepted" | "rejected" | "uncertain"): void {
+    this.transaction(() => {
+      this.run(
+        "UPDATE task_steers SET state = ?, updated_at = ? WHERE input_task_id = ?",
+        state,
+        now(),
+        inputTaskId,
+      );
+      if (state === "rejected") {
+        if (this.transitionTask(inputTaskId, ["active"], "queued")) {
+          this.run(
+            "UPDATE tasks SET dangerous_side_effect_started = 0, attempt = attempt - 1 WHERE id = ?",
+            inputTaskId,
+          );
+        }
+      } else if (state === "uncertain") {
+        this.transitionTask(inputTaskId, ["active"], "dead_letter", {
+          error: new IMGentError("TASK_UNSAFE_REPLAY").descriptor,
+        });
+      }
+    });
+  }
+
+  settleSteeredInputs(targetTaskId: string): void {
+    const target = this.task(targetTaskId);
+    if (!target || ["queued", "active", "waiting_approval", "retry_wait"].includes(target.status))
+      return;
+    this.run(
+      `UPDATE tasks SET status = ?, error_json = ?, updated_at = ?
+      WHERE status = 'active' AND id IN (
+        SELECT input_task_id FROM task_steers WHERE target_task_id = ? AND state = 'accepted'
+      )`,
+      target.status,
+      target.error ? JSON.stringify(target.error) : null,
+      now(),
+      targetTaskId,
+    );
+  }
+
   markDangerousSideEffect(taskId: string): void {
     this.run(
       "UPDATE tasks SET dangerous_side_effect_started = 1, updated_at = ? WHERE id = ?",
@@ -811,6 +915,10 @@ export class IMGentStore {
            AND task_id IN (
              SELECT id FROM tasks WHERE status = 'waiting_approval'
            )`,
+        timestamp,
+      );
+      this.run(
+        "UPDATE task_steers SET state = 'uncertain', updated_at = ? WHERE state = 'submitting'",
         timestamp,
       );
       const recoveryError = new IMGentError("PROCESS_RESTART_RECOVERY").descriptor;

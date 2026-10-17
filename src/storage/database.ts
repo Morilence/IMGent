@@ -2,7 +2,7 @@ import { chmod, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { IMGentError } from "@imgent/contracts";
-import { SCHEMA, SCHEMA_VERSION } from "./migrations.js";
+import { SCHEMA, SCHEMA_VERSION, STEERING_SCHEMA } from "./migrations.js";
 
 export async function openDatabase(path: string): Promise<DatabaseSync> {
   let database: DatabaseSync | undefined;
@@ -43,7 +43,7 @@ export async function openDatabase(path: string): Promise<DatabaseSync> {
   } else {
     const version = database.prepare("SELECT version FROM schema_meta").get() as
       { version: number } | undefined;
-    if (version?.version !== SCHEMA_VERSION) {
+    if (version?.version !== SCHEMA_VERSION && version?.version !== 7) {
       database.close();
       throw new IMGentError("STORAGE_SCHEMA_UNSUPPORTED", {
         diagnostic: {
@@ -53,6 +53,21 @@ export async function openDatabase(path: string): Promise<DatabaseSync> {
       });
     }
     await configureDatabase(database, path);
+    if (version?.version === 7) {
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        database.exec(STEERING_SCHEMA);
+        database.prepare("UPDATE schema_meta SET version = ?").run(SCHEMA_VERSION);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        database.close();
+        throw new IMGentError("STORAGE_UNAVAILABLE", {
+          cause: error,
+          diagnostic: { operation: "migrate schema 7 to 8" },
+        });
+      }
+    }
   }
 
   const fts = database

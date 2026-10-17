@@ -454,8 +454,8 @@ SQLite 保存运行事实：
 复制并原子落到目标路径。
 
 `restore` 始终要求目标实例停止，并验证目标目录、控制 endpoint、manifest、
-schema version、权限和 SQLite integrity。当前 schema v7 只允许空数据目录初始化；
-其他版本保持不变并返回 `STORAGE_SCHEMA_UNSUPPORTED`。`--force` 不能绕过活动实例检查。
+schema version、权限和 SQLite integrity。当前 schema v8 支持空目录初始化及 v7 的事务性增量升级，
+保留历史、会话和记忆；更早版本保持不变并返回 `STORAGE_SCHEMA_UNSUPPORTED`。`--force` 不能绕过活动实例检查。
 
 ## 9. 安全边界
 

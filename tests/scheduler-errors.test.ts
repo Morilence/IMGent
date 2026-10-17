@@ -20,6 +20,7 @@ import type {
   AgentProfile,
   AgentRequestAnswer,
   AgentTurnInput,
+  AgentSteerInput,
   DriverReadiness,
   ImAdapter,
   InboundMessage,
@@ -72,6 +73,7 @@ async function schedulerFixture(
   driver: AgentDriver,
   workspaceFor?: (principalId: string, conversationSpaceId: string) => string | undefined,
   memoryEnabled = false,
+  followUpMode?: "steer" | "queue",
 ): Promise<{
   fixture: Awaited<ReturnType<typeof testStore>>;
   scheduler: ConversationScheduler;
@@ -92,6 +94,7 @@ async function schedulerFixture(
     skills: ["*"],
     permissions: { maxMode: "ask" },
     memory: { enabled: memoryEnabled },
+    ...(followUpMode ? { followUpMode } : {}),
   };
   const outbound = new OutboundDispatcher(fixture.store);
   const scheduler = new ConversationScheduler({
@@ -522,6 +525,243 @@ test("missing driver terminal becomes a retryable protocol error and retry_wait 
     assert.deepEqual(cancelled, { active: 0, queued: 1 });
     assert.equal(fixture.store.task(ingested.taskId!)?.status, "cancelled");
   } finally {
+    await scheduler.stop();
+    await fixture.cleanup();
+  }
+});
+
+function steeredDriver(result: "accepted" | "not-active" | "uncertain" = "accepted") {
+  const start = Promise.withResolvers<void>();
+  const finish = Promise.withResolvers<void>();
+  const received = Promise.withResolvers<void>();
+  const releaseSteer = Promise.withResolvers<void>();
+  const inputs: Array<{ turnId: string; input: AgentSteerInput }> = [];
+  const driver: AgentDriver = {
+    ...fakeDriver(async () => []),
+    async *runTurn() {
+      await start.promise;
+      yield { type: "session", sessionId: "same-thread" };
+      yield { type: "turn-started" };
+      await finish.promise;
+      yield { type: "output-final", text: "combined answer" };
+      yield { type: "completed", result: "success" };
+    },
+    async steerTurn(turnId, input) {
+      inputs.push({ turnId, input });
+      received.resolve();
+      await releaseSteer.promise;
+      if (result === "uncertain") throw new Error("transport failed after write");
+      return result;
+    },
+  };
+  return { driver, start, finish, received, releaseSteer, inputs };
+}
+
+test("follow-ups during startup steer the same turn, preserve image input and finish atomically with the latest reply context", async () => {
+  const fake = steeredDriver();
+  const { fixture, scheduler } = await schedulerFixture(fake.driver, undefined, true);
+  const first = fixture.store.ingest(directMessage(), "main", "steering");
+  const running = scheduler.processOnce();
+  try {
+    const second = fixture.store.ingest(
+      directMessage({
+        messageId: "second",
+        parts: [
+          { type: "text", text: "use this image instead" },
+          { type: "image", attachment: { localPath: "/tmp/input.png" } },
+        ],
+        replyContext: { opaque: { contextToken: "new-token" } },
+      }),
+      "main",
+      "steering",
+    );
+    assert.equal(scheduler.onTaskQueued(second.taskId!), true);
+    assert.equal(fake.inputs.length, 0);
+    fake.start.resolve();
+    await fake.received.promise;
+    assert.equal(fake.inputs[0]?.turnId, first.taskId);
+    assert.equal(fake.inputs[0]?.input.messageId, second.taskId);
+    assert.equal(fake.inputs[0]?.input.parts[1]?.type, "image");
+    assert.equal(fixture.store.task(second.taskId!)?.status, "active");
+    // turn/completed may arrive before the steer response. Do not commit early.
+    fake.finish.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fixture.store.task(first.taskId!)?.status, "active");
+    fake.releaseSteer.resolve();
+    await running;
+    for (const id of [first.taskId, second.taskId])
+      assert.equal(fixture.store.task(id!)?.status, "succeeded");
+    assert.equal(fixture.store.steeredInputs(first.taskId!)[0]?.id, second.taskId);
+    const outputs = fixture.store.all<{ payload_json: string; reply_context_cipher: Uint8Array }>(
+      "SELECT payload_json, reply_context_cipher FROM outbound_messages",
+    );
+    assert.equal(outputs.length, 1);
+    assert.equal(JSON.parse(outputs[0]!.payload_json).replyTo.messageId, "second");
+    assert.equal(
+      fixture.store.decryptReplyContext(outputs[0]!.reply_context_cipher)?.opaque.contextToken,
+      "new-token",
+    );
+    assert.equal(fixture.store.all("SELECT * FROM memory_outbox").length, 1);
+    assert.equal(fixture.store.session("steering")?.sessionId, "same-thread");
+    assert.equal(
+      fixture.store.ingest(directMessage({ messageId: "second" }), "main", "steering").duplicate,
+      true,
+    );
+  } finally {
+    fake.start.resolve();
+    fake.finish.resolve();
+    fake.releaseSteer.resolve();
+    await running;
+    await scheduler.stop();
+    await fixture.cleanup();
+  }
+});
+
+for (const result of ["not-active", "uncertain"] as const) {
+  test(`steering ${result} uses a safe, durable fallback`, async () => {
+    const fake = steeredDriver(result);
+    const { fixture, scheduler } = await schedulerFixture(fake.driver);
+    const first = fixture.store.ingest(directMessage(), "main", "steering");
+    const running = scheduler.processOnce();
+    try {
+      const second = fixture.store.ingest(
+        directMessage({ messageId: "followup" }),
+        "main",
+        "steering",
+      );
+      assert.equal(scheduler.onTaskQueued(second.taskId!), true);
+      fake.start.resolve();
+      await fake.received.promise;
+      fake.releaseSteer.resolve();
+      fake.finish.resolve();
+      await running;
+      assert.equal(fixture.store.task(first.taskId!)?.status, "succeeded");
+      assert.equal(
+        fixture.store.task(second.taskId!)?.status,
+        result === "not-active" ? "queued" : "dead_letter",
+      );
+      assert.equal(
+        fixture.store.get<{ state: string }>(
+          "SELECT state FROM task_steers WHERE input_task_id = ?",
+          second.taskId!,
+        )?.state,
+        result === "not-active" ? "rejected" : "uncertain",
+      );
+      assert.equal(
+        fixture.store.task(second.taskId!)?.dangerousSideEffectStarted,
+        result === "uncertain",
+      );
+      assert.equal(
+        fixture.store.all("SELECT * FROM outbound_messages").length,
+        result === "uncertain" ? 2 : 1,
+      );
+    } finally {
+      fake.start.resolve();
+      fake.finish.resolve();
+      fake.releaseSteer.resolve();
+      await running;
+      await scheduler.stop();
+      await fixture.cleanup();
+    }
+  });
+}
+
+for (const mode of ["queue", "different-speaker", "unsupported"] as const) {
+  test(`follow-up ${mode} preserves FIFO without steering`, async () => {
+    const fake = steeredDriver();
+    if (mode === "unsupported") delete fake.driver.steerTurn;
+    const { fixture, scheduler } = await schedulerFixture(
+      fake.driver,
+      undefined,
+      false,
+      mode === "queue" ? "queue" : undefined,
+    );
+    fixture.store.ingest(directMessage(), "main", "steering");
+    const running = scheduler.processOnce();
+    try {
+      const second = fixture.store.ingest(
+        directMessage({
+          messageId: "followup",
+          ...(mode === "different-speaker" ? { actor: { platformUserId: "someone-else" } } : {}),
+        }),
+        "main",
+        "steering",
+      );
+      assert.equal(scheduler.onTaskQueued(second.taskId!), false);
+      fake.start.resolve();
+      fake.finish.resolve();
+      await running;
+      assert.equal(fake.inputs.length, 0);
+      assert.equal(fixture.store.task(second.taskId!)?.status, "queued");
+    } finally {
+      fake.start.resolve();
+      fake.finish.resolve();
+      fake.releaseSteer.resolve();
+      await running;
+      await scheduler.stop();
+      await fixture.cleanup();
+    }
+  });
+}
+
+test("an interrupted process does not replay a steer with unknown acceptance", async () => {
+  const fixture = await testStore();
+  try {
+    const first = fixture.store.ingest(directMessage(), "main", "steering");
+    fixture.store.claimNextTask();
+    const second = fixture.store.ingest(
+      directMessage({ messageId: "followup" }),
+      "main",
+      "steering",
+    );
+    assert.equal(fixture.store.beginSteer(second.taskId!, first.taskId!), true);
+    assert.deepEqual(fixture.store.recoverAfterRestart(), { requeued: 0, deadLettered: 2 });
+    assert.equal(
+      fixture.store.get<{ state: string }>("SELECT state FROM task_steers")?.state,
+      "uncertain",
+    );
+    assert.equal(fixture.store.claimNextTask(), undefined);
+    assert.equal(fixture.store.all("SELECT * FROM inbound_events").length, 2);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("cancelling a steered turn settles all inputs without a spurious failure reply", async () => {
+  const fake = steeredDriver();
+  const originalRun = fake.driver.runTurn;
+  fake.driver.runTurn = async function* (input) {
+    for await (const event of originalRun(input)) {
+      yield event.type === "completed" ? { type: "completed", result: "cancelled" } : event;
+    }
+  };
+  fake.driver.interrupt = async () => {
+    fake.finish.resolve();
+  };
+  const { fixture, scheduler } = await schedulerFixture(fake.driver);
+  const first = fixture.store.ingest(directMessage(), "main", "steering");
+  const running = scheduler.processOnce();
+  try {
+    const second = fixture.store.ingest(
+      directMessage({ messageId: "followup" }),
+      "main",
+      "steering",
+    );
+    scheduler.onTaskQueued(second.taskId!);
+    fake.start.resolve();
+    await fake.received.promise;
+    fake.releaseSteer.resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    await scheduler.cancelConversation("steering", fixture.store.task(first.taskId!)!.principalId);
+    await running;
+    for (const id of [first.taskId, second.taskId])
+      assert.equal(fixture.store.task(id!)?.status, "cancelled");
+    assert.deepEqual(fixture.store.all("SELECT * FROM outbound_messages"), []);
+  } finally {
+    fake.start.resolve();
+    fake.finish.resolve();
+    fake.releaseSteer.resolve();
+    await running;
     await scheduler.stop();
     await fixture.cleanup();
   }

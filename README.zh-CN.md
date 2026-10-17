@@ -91,8 +91,10 @@ flowchart LR
     I --> DB
 ```
 
-同一会话一次只运行一个 Agent turn，后续消息按 FIFO 排队；不同会话可以同时工作。IMGent
-单独确认平台事件，不让耗时的 Agent 工作阻塞确认流程。重复事件会在创建第二个任务前被过滤。
+同一会话一次只运行一个 Agent turn。默认将同一发言者的连续消息（包括图片）引导到正在运行的
+Codex turn；配置 `agentProfiles[].followUpMode: "queue"` 可改回 FIFO 排队。不支持原生引导的
+驱动（目前为 Claude Code）、不同发言者、定时任务和已结束的回合使用 FIFO。不同会话可以
+同时工作。IMGent 单独确认平台事件，不让耗时的 Agent 工作阻塞确认流程；重复事件不会创建第二个任务。
 
 IMGent 会在每个 Agent turn 开头加入一行宿主生成的 `[IMGent Context]` JSON，其中包含稳定、
 匿名化的会话和发言者引用。群成员可以共享 Agent session，每条消息仍能对应到具体发言者。
@@ -491,7 +493,8 @@ curl -H 'Accept-Language: zh-CN' http://127.0.0.1:8787/readyz
 
 ### 数据与恢复
 
-- SQLite schema **v7** 只会在空数据目录创建，其他版本会保持原样并被拒绝。
+- SQLite schema **v8** 支持空目录初始化和 **v7** 无损升级，只新增引导记录，保留历史、
+  会话、记忆和凭据；更早的 schema 保持原样并被拒绝。支持恢复 schema v7 的 backup v2。
 - 备份格式 **`imgent-backup/v2`** 会在恢复前校验 manifest、checksum 和 schema 版本。
 - 服务或 offline CLI lease 会独占数据目录。所有者运行时不要直接打开或修改
   `imgent.sqlite`。

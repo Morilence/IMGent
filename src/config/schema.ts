@@ -25,6 +25,7 @@ export const agentProfileSchema = z
     agentUserHome: z.string().min(1),
     workspace: z.string().min(1),
     prompt: z.string().max(20_000).optional(),
+    followUpMode: z.enum(["steer", "queue"]).default("steer"),
     skills: z.array(skillName).default(["*"]),
     permissions: z
       .object({

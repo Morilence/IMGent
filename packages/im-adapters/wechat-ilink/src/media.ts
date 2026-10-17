@@ -91,7 +91,6 @@ function nativeMedia(native: NativeWechatAttachment): {
   media: CdnMedia;
   key?: string;
   expectedPlainSize?: number;
-  expectedCipherSize?: number;
   expectedMd5?: string;
   name?: string;
 } {
@@ -103,7 +102,6 @@ function nativeMedia(native: NativeWechatAttachment): {
         : native.image.media.aes_key
           ? { key: native.image.media.aes_key }
           : {}),
-      ...(native.image.mid_size ? { expectedCipherSize: native.image.mid_size } : {}),
     };
   }
   if (native.itemType === "voice" && native.voice?.media) {
@@ -126,7 +124,6 @@ function nativeMedia(native: NativeWechatAttachment): {
     return {
       media: native.video.media,
       ...(native.video.media.aes_key ? { key: native.video.media.aes_key } : {}),
-      ...(native.video.video_size ? { expectedCipherSize: native.video.video_size } : {}),
       ...(native.video.video_md5 ? { expectedMd5: native.video.video_md5 } : {}),
     };
   }
@@ -138,10 +135,28 @@ async function fetchMedia(
   url: string,
   maxBytes: number,
 ): Promise<Buffer> {
-  const response = await client.fetch(url, { signal: AbortSignal.timeout(60_000) });
-  if (!response.ok) throw new Error(`微信 CDN 下载失败: HTTP ${response.status}`);
+  const signal = AbortSignal.timeout(60_000);
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    response = undefined;
+    try {
+      response = await client.fetch(url, { signal });
+    } catch (error) {
+      if (attempt === 2 || signal.aborted) throw error;
+    }
+    if (response && (response.ok || (response.status !== 429 && response.status < 500))) break;
+    if (attempt === 2) break;
+    await response?.body?.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+  }
+  if (!response) throw new Error("微信 CDN 下载失败");
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`微信 CDN 下载失败: HTTP ${response.status}`);
+  }
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel();
     throw new Error(`微信媒体超过 ${maxBytes} 字节限制`);
   }
   if (!response.body) throw new Error("微信媒体响应为空");
@@ -196,12 +211,8 @@ export async function materializeWechatInboundMedia(
     if (!native?.itemType) continue;
     const details = nativeMedia(native);
     const encrypted = await fetchMedia(client, mediaUrl(details.media, cdnBaseUrl), maxBytes);
-    if (
-      details.expectedCipherSize !== undefined &&
-      details.expectedCipherSize !== encrypted.byteLength
-    ) {
-      throw new Error("微信媒体密文长度与消息元数据不一致");
-    }
+    // Incoming image/video sizes describe a media variant, not necessarily this
+    // CDN ciphertext. Validate the bounded download and AES padding instead.
     if (!details.key && details.media.encrypt_type === 1) {
       throw new Error("微信加密媒体缺少 AES key");
     }

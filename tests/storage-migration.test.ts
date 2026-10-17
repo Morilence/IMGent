@@ -10,7 +10,7 @@ import { SecretBox } from "../src/security/secret-box.js";
 import { SCHEMA_VERSION } from "../src/storage/migrations.js";
 import { IMGentStore } from "../src/storage/store.js";
 
-test("fresh storage creates schema 7 with Principal workspaces and query indexes", async () => {
+test("fresh storage creates schema 8 with Principal workspaces and query indexes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "imgent-schema-"));
   const path = join(directory, "state.sqlite");
   try {
@@ -159,6 +159,49 @@ test("legacy schemas are rejected without mutation", async () => {
     assert.deepEqual(await readFile(path), bytesBefore);
     assert.equal((await stat(path)).mode, modeBefore);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("schema 7 upgrades additively without changing history, sessions, credentials or checkpoints", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-upgrade-"));
+  const path = join(directory, "state.sqlite");
+  const key = new SecretBox(randomBytes(32));
+  let store: IMGentStore | undefined;
+  try {
+    store = await IMGentStore.open(path, key);
+    const { directMessage } = await import("./helpers.js");
+    const input = directMessage();
+    const result = store.ingest(input, "main", "existing-session");
+    store.saveSession("existing-session", "codex", "preserved-codex-thread", directory);
+    store.setCheckpoint("qq-main", { key: "cursor", value: "preserved-cursor" });
+    const before = Object.fromEntries(
+      [
+        "tasks",
+        "inbound_events",
+        "principals",
+        "platform_identities",
+        "agent_sessions",
+        "transport_checkpoints",
+      ].map((table) => [table, store!.all(`SELECT * FROM ${table}`)]),
+    );
+    // Recreate the exact previous schema: no steering table, version 7.
+    store.database.exec("DROP TABLE task_steers; UPDATE schema_meta SET version = 7");
+    store.close();
+    store = undefined;
+    store = await IMGentStore.open(path, key);
+    assert.equal(store.get<{ version: number }>("SELECT version FROM schema_meta")?.version, 8);
+    for (const [table, rows] of Object.entries(before))
+      assert.deepEqual(store.all(`SELECT * FROM ${table}`), rows, table);
+    assert.equal(store.session("existing-session")?.sessionId, "preserved-codex-thread");
+    assert.deepEqual(store.task(result.taskId!)?.message.replyContext, input.replyContext);
+    assert.deepEqual(store.all("PRAGMA foreign_key_check"), []);
+    assert.equal(
+      store.get<{ integrity_check: string }>("PRAGMA integrity_check")?.integrity_check,
+      "ok",
+    );
+  } finally {
+    store?.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

@@ -292,6 +292,54 @@ export class IMGentApplication {
                 if (checkpoint) this.store.setCheckpoint(bot.id, checkpoint);
               });
             },
+            onMediaError: async (message, error, checkpoint) => {
+              const profileId = this.routes.get(bot.id);
+              const identity = this.store.get<{ paired: number; principal_id: string }>(
+                `SELECT paired, principal_id FROM platform_identities
+                 WHERE agent_profile_id = ? AND platform = 'wechat-ilink'
+                   AND bot_instance_id = ? AND platform_user_id = ?`,
+                profileId ?? "",
+                bot.id,
+                message.actor.platformUserId,
+              );
+              const locale = identity ? this.localeFor(identity.principal_id, bot.id) : "zh-CN";
+              this.store.transaction(() => {
+                this.store.addDeadLetter(
+                  "wechat-ilink.media",
+                  new IMGentError("ADAPTER_COMPATIBILITY_ERROR"),
+                  { diagnostic: error.diagnostic },
+                  bot.id,
+                  message.messageId,
+                );
+                if (identity?.paired === 1) {
+                  this.store.enqueueOutbound({
+                    botInstanceId: bot.id,
+                    conversation: message.conversation,
+                    parts: [
+                      {
+                        type: "text",
+                        text: formatSystemMessage(
+                          "error",
+                          locale === "zh-CN"
+                            ? "这条图片或附件下载失败，尚未交给 Agent。请重新发送；若仍失败，请以文件形式发送原图。"
+                            : "This image or attachment could not be downloaded and was not sent to the Agent. Please resend it, or send the original as a file.",
+                          locale,
+                        ),
+                      },
+                    ],
+                    ...(message.replyContext ? { replyContext: message.replyContext } : {}),
+                    replyTo: { messageId: message.messageId },
+                    idempotencyKey: `wechat-media-error:${bot.id}:${message.dedupeKey}`,
+                  });
+                }
+                if (checkpoint) this.store.setCheckpoint(bot.id, checkpoint);
+              });
+              this.logger.warn("wechat.media-failed", {
+                botInstanceId: bot.id,
+                messageId: message.messageId,
+              });
+              void this.outbound.drain(this.adapters);
+            },
             onSessionInvalid: async (message) => {
               const error = new IMGentError("ADAPTER_SESSION_INVALID", {
                 diagnostic: { platform: "wechat-ilink", vendorMessage: message },
@@ -600,6 +648,7 @@ export class IMGentApplication {
     }
     const taskId = ingested.taskId;
     if (!taskId) return;
+    if (this.scheduler.onTaskQueued(taskId)) return;
     const waiting =
       this.store.get<{ count: number }>(
         `SELECT count(*) AS count FROM tasks

@@ -68,10 +68,11 @@ Shutdown remains idempotent, and endpoint cleanup happens on partial startup fai
 
 ## Persistence and compatibility
 
-The current SQLite schema version is 7.
+The current SQLite schema version is 8.
 
-- An empty data directory creates schema v7.
-- Any existing non-v7 database fails with `STORAGE_SCHEMA_UNSUPPORTED` and remains unchanged.
+- An empty data directory creates schema v8.
+- Existing v7 databases upgrade transactionally by adding `task_steers`; all prior records survive.
+- Earlier databases fail with `STORAGE_SCHEMA_UNSUPPORTED` and remain unchanged.
 - Redundant `agent_profile_id` columns were removed where the profile follows from a referenced
   principal, task, or conversation space.
 - Duplicate unique indexes were removed. Due-work indexes match task, outbound, and memory outbox
@@ -141,7 +142,7 @@ parity and rejects template braces.
 The automated suite currently contains 92 passing tests and covers:
 
 - strict configuration and capability routing;
-- schema v7 creation, legacy-schema rejection without mutation, foreign keys, FTS5, and query
+- schema v8 creation, preservation during v7 migration, legacy-schema rejection without mutation, foreign keys, FTS5, and query
   plans;
 - schedule timing, proactive capability rejection, fresh/series session isolation, run history,
   and proactive outbound envelopes;

@@ -507,3 +507,121 @@ test("WeChat invalid sessions stop polling and transient disconnects recover", a
   assert.ok(calls >= 2);
   await recovering.stop();
 });
+
+test("WeChat accepts image/video size hints that differ from ciphertext and still rejects corrupt media", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-wechat-sizes-"));
+  try {
+    const plaintext = Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+      Buffer.from("image content"),
+    ]);
+    const key = randomBytes(16);
+    const cipher = createCipheriv("aes-128-ecb", key, null);
+    const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    for (const type of [2, 5]) {
+      const media = {
+        full_url: "https://cdn.example.test/image",
+        aes_key: Buffer.from(key.toString("hex")).toString("base64"),
+        encrypt_type: 1,
+      };
+      const message = normalizeWechatMessage(
+        {
+          message_id: `image-${type}`,
+          from_user_id: "contact",
+          message_type: 1,
+          item_list: [
+            type === 2
+              ? { type, image_item: { media, mid_size: plaintext.length } }
+              : { type, video_item: { media, video_size: plaintext.length } },
+          ],
+        },
+        "wechat-main",
+      )!;
+      const client = { fetch: async () => new Response(encrypted), post: async <T>() => ({}) as T };
+      const result = await materializeWechatInboundMedia(client, message, directory);
+      const attachment = result.parts[0];
+      assert.ok(attachment && "attachment" in attachment);
+      assert.deepEqual(await readFile(attachment.attachment.localPath!), plaintext);
+      await assert.rejects(
+        materializeWechatInboundMedia(
+          {
+            ...client,
+            fetch: async () => new Response(encrypted.subarray(0, encrypted.length - 1)),
+          },
+          message,
+          directory,
+        ),
+      );
+      await assert.rejects(
+        materializeWechatInboundMedia(client, message, directory, undefined, 4),
+        /超过/,
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("WeChat retries a transient CDN response and surfaces failed media before advancing its cursor", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-wechat-failure-"));
+  let downloads = 0;
+  const failed = Promise.withResolvers<void>();
+  const calls: string[] = [];
+  const adapter = new WechatIlinkAdapter({
+    botInstanceId: "wechat-main",
+    platformBotId: "bot",
+    credential: { botToken: "test" },
+    baseUrl: "https://api.example.test",
+    mediaDirectory: directory,
+    fetch: async (url, init) => {
+      if (String(url).includes("cdn.example")) {
+        downloads++;
+        if (downloads === 1) return new Response("temporary", { status: 503 });
+        return new Response("missing", { status: 404 });
+      }
+      const cursor = JSON.parse(String(init?.body)).get_updates_buf;
+      if (cursor === "after-image") {
+        calls.push("next-poll");
+        failed.resolve();
+        return new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener("abort", () => reject(new Error("stopped")), {
+            once: true,
+          }),
+        );
+      }
+      return Response.json({
+        get_updates_buf: "after-image",
+        msgs: [
+          {
+            message_id: "broken-image",
+            from_user_id: "contact",
+            message_type: 1,
+            context_token: "reply-token",
+            item_list: [
+              { type: 2, image_item: { media: { full_url: "https://cdn.example.test/image" } } },
+            ],
+          },
+        ],
+      });
+    },
+    onMediaError: async (message, error, checkpoint) => {
+      assert.equal(message.messageId, "broken-image");
+      assert.equal(message.replyContext?.opaque.contextToken, "reply-token");
+      assert.match(String(error.diagnostic.reason), /HTTP 404/);
+      assert.equal(checkpoint?.value, "after-image");
+      calls.push("persist-failure-and-reply");
+    },
+  });
+  try {
+    await adapter.start(async () => assert.fail("failed media must not reach the model"));
+    await Promise.race([
+      failed.promise,
+      new Promise((_r, reject) => setTimeout(() => reject(new Error("timeout")), 2000).unref()),
+    ]);
+    assert.equal(downloads, 2);
+    assert.deepEqual(calls, ["persist-failure-and-reply", "next-poll"]);
+  } finally {
+    await adapter.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

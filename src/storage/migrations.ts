@@ -1,10 +1,21 @@
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
+
+export const STEERING_SCHEMA = `
+CREATE TABLE task_steers (
+  input_task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+  target_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  state TEXT NOT NULL CHECK(state IN ('submitting', 'accepted', 'rejected', 'uncertain')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX task_steers_target_idx ON task_steers(target_task_id, state, created_at);
+`;
 
 export const SCHEMA = `
 CREATE TABLE schema_meta (
   version INTEGER NOT NULL
 ) STRICT;
-INSERT INTO schema_meta(version) VALUES (7);
+INSERT INTO schema_meta(version) VALUES (8);
 
 CREATE TABLE principals (
   id TEXT PRIMARY KEY,
@@ -333,4 +344,5 @@ CREATE TABLE audit_events (
 ) STRICT;
 
 CREATE INDEX audit_created_idx ON audit_events(created_at);
+${STEERING_SCHEMA}
 `;

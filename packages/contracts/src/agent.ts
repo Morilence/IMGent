@@ -9,6 +9,7 @@ export type AgentEvent =
   | { type: "approval-request"; request: ApprovalRequest }
   | { type: "question"; request: UserQuestion }
   | { type: "session"; sessionId: string }
+  | { type: "turn-started" }
   | { type: "completed"; result: "success" | "cancelled" }
   | { type: "error"; error: ErrorDescriptor };
 
@@ -46,6 +47,14 @@ export interface AgentTurnInput {
   signal?: AbortSignal;
 }
 
+/** One additional user message, attributed to the same speaker and live turn. */
+export interface AgentSteerInput {
+  messageId: string;
+  context: AgentTurnContext;
+  prompt: string;
+  parts: MessagePart[];
+}
+
 export interface DriverReadiness {
   ready: boolean;
   version?: string;
@@ -57,6 +66,8 @@ export interface AgentDriver {
   readonly freshSessionMode?: "ephemeral" | "archive";
   checkReady(profile: AgentProfile, depth?: "runtime" | "diagnostic"): Promise<DriverReadiness>;
   runTurn(input: AgentTurnInput): AsyncIterable<AgentEvent>;
+  /** Only return not-active when the input was definitely not accepted. */
+  steerTurn?(turnId: string, input: AgentSteerInput): Promise<"accepted" | "not-active">;
   answerRequest(requestId: string, answer: AgentRequestAnswer): Promise<void>;
   interrupt(turnId: string): Promise<void>;
   archiveSession?(sessionId: string): Promise<void>;

@@ -450,3 +450,64 @@ test("runtime readiness never invokes a Claude model probe", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("Codex steers text and images into the expected live turn and distinguishes rejection from uncertain delivery", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-codex-steer-"));
+  const executable = join(directory, "fake-codex-steer.mjs");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { createInterface } from 'node:readline';
+const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+createInterface({ input: process.stdin }).on('line', line => {
+ const r = JSON.parse(line);
+ if(r.method === 'initialize') send({id:r.id,result:{}});
+ else if(r.method === 'thread/start') send({id:r.id,result:{thread:{id:'thread'}}});
+ else if(r.method === 'turn/start') send({id:r.id,result:{turn:{id:'live-turn'}}});
+ else if(r.method === 'turn/steer') {
+   if(r.params.threadId !== 'thread' || r.params.expectedTurnId !== 'live-turn') process.exit(10);
+   const id = r.params.clientUserMessageId;
+   if(id === 'rejected') send({id:r.id,error:{code:-32600,message:'no active turn to steer'}});
+   else if(id === 'uncertain') send({id:r.id,error:{code:-32603,message:'internal failure'}});
+   else {
+     if(!r.params.input.some(p => p.type === 'localImage' && p.path === '/tmp/steer.png')) process.exit(11);
+     if(!r.params.input[0].text.startsWith('[IMGent Context]') || !r.params.input[0].text.includes('follow-up')) process.exit(12);
+     send({id:r.id,result:{turnId:'live-turn'}});
+     send({method:'item/completed',params:{threadId:'thread',item:{type:'agentMessage',text:'steered'}}});
+     send({method:'turn/completed',params:{threadId:'thread',turn:{id:'live-turn',status:'completed'}}});
+   }
+ }
+});`,
+    { mode: 0o700 },
+  );
+  const driver = new CodexDriver();
+  const input = turn(profile("codex", executable, directory));
+  const followUp = {
+    messageId: "accepted",
+    context: input.context,
+    prompt: "follow-up",
+    parts: [{ type: "image" as const, attachment: { localPath: "/tmp/steer.png" } }],
+  };
+  try {
+    const events: AgentEvent[] = [];
+    for await (const event of driver.runTurn(input)) {
+      events.push(event);
+      if (event.type === "turn-started") {
+        assert.equal(
+          await driver.steerTurn(input.turnId, { ...followUp, messageId: "rejected" }),
+          "not-active",
+        );
+        await assert.rejects(
+          driver.steerTurn(input.turnId, { ...followUp, messageId: "uncertain" }),
+          /internal failure/,
+        );
+        assert.equal(await driver.steerTurn(input.turnId, followUp), "accepted");
+      }
+    }
+    assert.ok(events.some((event) => event.type === "output-final" && event.text === "steered"));
+    assert.equal(await driver.steerTurn(input.turnId, followUp), "not-active");
+  } finally {
+    await driver.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

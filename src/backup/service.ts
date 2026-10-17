@@ -143,7 +143,7 @@ export async function restoreBackup(
   if (archive.format !== "imgent-backup/v2" || !archive.manifest || !Array.isArray(archive.files)) {
     throw new Error("备份 manifest 或格式无效");
   }
-  if (archive.manifest.schemaVersion !== SCHEMA_VERSION) {
+  if (![7, SCHEMA_VERSION].includes(archive.manifest.schemaVersion)) {
     throw new Error(
       `备份 schema version ${archive.manifest.schemaVersion} 与当前 ${SCHEMA_VERSION} 不兼容`,
     );

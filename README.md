@@ -99,8 +99,11 @@ flowchart LR
     I --> DB
 ```
 
-Within a conversation, IMGent runs one Agent turn at a time and queues later messages in FIFO order.
-Other conversations can run at the same time. It acknowledges platform events separately from long
+Within a conversation, IMGent runs one Agent turn at a time. By default, follow-ups from the same
+speaker steer the active Codex turn, including image inputs, without starting another turn. Set
+`agentProfiles[].followUpMode` to `"queue"` to opt into FIFO. Drivers without native steering
+(currently Claude Code), different speakers, schedules and completed turns use FIFO. Other
+conversations can run at the same time. It acknowledges platform events separately from long
 Agent work and removes duplicate events before they create another task.
 
 IMGent starts every Agent turn with a host-generated `[IMGent Context]` JSON line. The line contains
@@ -517,8 +520,9 @@ JSON Lines logs and repair the environment.
 
 ### Data and recovery
 
-- SQLite schema **v7** is created only in an empty data directory. Other schema versions are
-  rejected without mutation.
+- SQLite schema **v8** initializes empty directories and upgrades **v7** by adding steering
+  bookkeeping. Existing history, sessions, memory and credentials are preserved; older schemas
+  are rejected without mutation. Schema-v7 `imgent-backup/v2` archives can also be restored.
 - Backup format **`imgent-backup/v2`** validates its manifest, checksums, and schema version before
   restore.
 - The service or an offline CLI lease owns the data directory exclusively. Avoid opening or

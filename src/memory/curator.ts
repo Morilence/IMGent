@@ -124,18 +124,22 @@ export class MemoryCurator {
     const taskProfile = workspace === profile.workspace ? profile : { ...profile, workspace };
     const driver = this.options.drivers.get(task.agentProfileId);
     if (!driver) throw new Error("策展任务缺少 AgentDriver");
+    const inputs = [task, ...this.options.store.steeredInputs(task.id)];
     const context: MemoryContext = {
       agentProfileId: task.agentProfileId,
       principalId: task.principalId,
       conversationSpaceId: task.conversationSpaceId,
       conversationKey: task.conversationKey,
       conversationKind: task.message.conversation.kind,
-      sourceMessageIds: [task.message.messageId],
+      sourceMessageIds: inputs.map((input) => input.message.messageId),
       sourceTaskId: task.id,
       origin: "curated",
       actorIsGroupAdmin: task.message.actor.role === "owner" || task.message.actor.role === "admin",
     };
-    const message = textOf(task.message.parts);
+    const message = inputs
+      .map((input) => textOf(input.message.parts))
+      .filter(Boolean)
+      .join("\n\n");
     const relevant = message
       ? this.options.memory.renderContext(this.options.memory.recall(context, message))
       : [];

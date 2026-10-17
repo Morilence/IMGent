@@ -19,6 +19,16 @@ interface Pending {
   reject: (error: unknown) => void;
 }
 
+export class JsonRpcError extends Error {
+  constructor(
+    readonly code: number | undefined,
+    message: string,
+  ) {
+    super(`Codex RPC ${code ?? ""}: ${message}`);
+    this.name = "JsonRpcError";
+  }
+}
+
 export class JsonRpcProcess {
   private process: ChildProcessWithoutNullStreams | undefined;
   private nextId = 1;
@@ -122,9 +132,7 @@ export class JsonRpcProcess {
       this.pending.delete(id);
       if (message.error) {
         const error = message.error as { code?: number; message?: string };
-        pending.reject(
-          new Error(`Codex RPC ${error.code ?? ""}: ${error.message ?? "unknown error"}`),
-        );
+        pending.reject(new JsonRpcError(error.code, error.message ?? "unknown error"));
       } else {
         pending.resolve(message.result);
       }

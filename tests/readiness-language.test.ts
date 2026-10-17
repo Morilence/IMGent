@@ -464,3 +464,113 @@ test("unpaired users can set a Principal language and receive localized command 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("WeChat media failures persist a single reply for paired users and advance the checkpoint without running the Agent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-wechat-media-error-"));
+  let application: IMGentApplication | undefined;
+  const polled = Promise.withResolvers<void>();
+  try {
+    const configPath = join(directory, "imgent.json");
+    const dataDir = join(directory, "data");
+    await writeConfig(configPath, {
+      ...defaultConfig(directory),
+      dataDir,
+      agentProfiles: [
+        {
+          id: "main",
+          driver: "codex",
+          command: "fake",
+          agentUserHome: directory,
+          workspace: directory,
+          skills: [],
+          permissions: { maxMode: "ask" },
+          memory: { enabled: false },
+        },
+      ],
+      bots: [
+        {
+          id: "wechat-main",
+          adapter: "wechat-ilink",
+          platformBotId: "bot",
+          authorizingPlatformUserId: "user-1",
+          credentialRef: "wechat-main",
+          enabled: true,
+        },
+      ],
+      routes: [{ botInstanceId: "wechat-main", agentProfileId: "main" }],
+    });
+    await new CredentialStore(dataDir).set("wechat-main", { botToken: "test-token" });
+    application = await IMGentApplication.create(configPath);
+    const identity = application.store.ingest(
+      directMessage({
+        messageId: "pairing-seed",
+        platform: "wechat-ilink",
+        botInstanceId: "wechat-main",
+      }),
+      "main",
+      "conversation",
+      undefined,
+      false,
+    );
+    application.store.run(
+      "UPDATE platform_identities SET paired = 1 WHERE id = ?",
+      identity.platformIdentityId,
+    );
+    const adapter = application.adapters.get("wechat-main")!;
+    const sent: string[] = [];
+    Object.assign(adapter, {
+      fetch: async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).includes("cdn.example")) return new Response("missing", { status: 404 });
+        if (String(url).includes("sendmessage")) {
+          sent.push(String(init?.body));
+          return Response.json({ ret: 0 });
+        }
+        const cursor = JSON.parse(String(init?.body)).get_updates_buf;
+        if (cursor === "after-media") {
+          polled.resolve();
+          return new Promise((_resolve, reject) =>
+            init?.signal?.addEventListener("abort", () => reject(new Error("stopped")), {
+              once: true,
+            }),
+          );
+        }
+        const message = {
+          message_id: "broken",
+          from_user_id: "user-1",
+          message_type: 1,
+          context_token: "reply-token",
+          item_list: [
+            { type: 2, image_item: { media: { full_url: "https://cdn.example/image" } } },
+          ],
+        };
+        return Response.json({ get_updates_buf: "after-media", msgs: [message, message] });
+      },
+    });
+    await adapter.start(async () =>
+      assert.fail("failed media must not be ingested as an Agent task"),
+    );
+    await Promise.race([
+      polled.promise,
+      new Promise((_resolve, reject) =>
+        setTimeout(() => reject(new Error("timeout")), 2000).unref(),
+      ),
+    ]);
+    await application.outbound.drain(application.adapters);
+    assert.equal(application.store.all("SELECT * FROM tasks").length, 0);
+    const rows = application.store.all<{ payload_json: string }>(
+      "SELECT payload_json FROM outbound_messages",
+    );
+    assert.equal(rows.length, 1);
+    assert.match(rows[0]!.payload_json, /尚未交给 Agent/);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]!, /reply-token/);
+    assert.ok(
+      application.store.get(
+        "SELECT * FROM transport_checkpoints WHERE bot_instance_id = 'wechat-main'",
+      ),
+    );
+  } finally {
+    await application?.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

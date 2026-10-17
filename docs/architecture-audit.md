@@ -15,7 +15,7 @@ Ranked findings use Ponytail's deletion-first labels:
 
 1. `delete:` Health and status requests synchronously triggered platform, account, and model probes; they now return a cached runtime-readiness snapshot, while `doctor` alone invokes `/v3/diagnostics`.
 2. `delete:` Legacy migration code preserved pre-release layouts and error translation; current
-   schema v7 initializes only an empty data directory and rejects any other version unchanged.
+   schema v8 initializes empty directories and migrates v7 additively, preserving existing records; older versions are rejected unchanged.
 3. `native:` Fastify served two loopback GET endpoints; `node:http` now provides the complete health surface without a framework dependency.
 4. `delete:` ICU formatting and message/action parameter types had no current dynamic messages; catalogs are static, brace-free, and no longer depend on `intl-messageformat`.
 5. `shrink:` Online and offline administration duplicated identities, groups, status, and database-count SQL; both now call the same read-only query functions.

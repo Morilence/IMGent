@@ -35,7 +35,7 @@ left literal. A Markdown-aware tokenizer handles reference images and parenthese
 图片 Markdown 回退为普通链接。真正的图片须走上述附件通道。
 
 The iLink adapter is implemented in IMGent, not through an installed OpenClaw SDK. The protocol
-was checked against Tencent's repository on 2026-10-16, commit
+was checked against Tencent's repository on 2026-10-17, commit
 [`874637a0dbc24050f72d1385add4fc6170a2d726`](https://github.com/Tencent/openclaw-weixin/tree/874637a0dbc24050f72d1385add4fc6170a2d726)
 (package version 2.4.10):
 
@@ -54,3 +54,32 @@ successful API responses alone do not prove rendering in a particular WeChat cli
 
 重试使用稳定的逐条 client ID，并在进程内跳过已确认发送的条目；进程崩溃或响应不确定时，不能
 承诺严格只发送一次。发送仍受微信回复上下文有效期约束，客户端显示效果需实机验收。
+
+## Incoming media / 接收图片
+
+Tencent's [current downloader](https://github.com/Tencent/openclaw-weixin/blob/874637a0dbc24050f72d1385add4fc6170a2d726/src/media/media-download.ts)
+does not compare incoming `mid_size` / `video_size` with downloaded ciphertext length. IMGent
+therefore treats these fields as variant metadata, retaining the 100 MiB streaming limit, AES
+block/padding validation, and file plaintext length/MD5 validation. Transient connection failures,
+HTTP 429 and 5xx responses get at most three attempts within one 60-second download deadline.
+A failed download is recorded with its message ID; a paired sender receives a durable error reply
+before the polling checkpoint advances. Failed attachments are never passed to the Agent.
+
+微信入站的 `mid_size` / `video_size` 不能用于严格校验 CDN 密文长度。保留下载上限、AES 解密
+以及文件明文校验，避免正常图片被错误拒收。下载失败会向已配对用户明确提示重发，不再静默丢弃。
+
+## Follow-up steering / 连续消息引导
+
+The default profile policy is `followUpMode: "steer"`. For a running Codex turn, same-speaker
+follow-ups use `turn/steer` with `expectedTurnId`, attributed text and native image inputs.
+An event-driven, serialized dispatcher preserves input order without blocking platform polling.
+Startup messages wait for the turn's ready event. Completion waits for in-flight steer acknowledgments,
+uses the newest accepted reply context, and commits one outbound answer with all accepted task states.
+Curated memory includes every accepted input. No existing session is reset.
+
+The durable `task_steers` table records submitting, accepted, rejected and uncertain outcomes.
+A definite no-active-turn rejection returns the input to FIFO. Ambiguous delivery is never
+replayed automatically; it produces a visible diagnostic and stays available for inspection.
+Crash recovery marks ambiguous active work for inspection rather than repeating it. Other speakers,
+workspace/role changes, schedules and drivers without native steering remain in FIFO; setting
+`followUpMode: "queue"` preserves the previous policy explicitly.

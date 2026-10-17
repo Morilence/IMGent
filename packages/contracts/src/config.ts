@@ -10,6 +10,7 @@ export interface AgentProfile {
   agentUserHome: string;
   workspace: string;
   prompt?: string;
+  followUpMode?: "steer" | "queue";
   skills: string[];
   permissions: {
     maxMode: PermissionMode;

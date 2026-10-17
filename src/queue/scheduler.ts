@@ -64,11 +64,22 @@ function scheduledText(
   return formatSystemMessage("schedule", `${metadata}\n\n${text}`, locale);
 }
 
+interface SteeringTurn {
+  task: StoredTask;
+  driver: AgentDriver;
+  workspace: string;
+  ready: boolean;
+  closing: boolean;
+  pending: Promise<void>;
+  memoryContext: MemoryContext;
+}
+
 export class ConversationScheduler {
   private readonly maxConcurrency: number;
   private readonly logger: Logger;
   private running = new Map<string, Promise<void>>();
   private taskDrivers = new Map<string, AgentDriver>();
+  private steeringTurns = new Map<string, SteeringTurn>();
   private answeringRequests = new Map<string, Promise<ApprovalDecision>>();
   private timer: NodeJS.Timeout | undefined;
   private stopped = true;
@@ -97,6 +108,97 @@ export class ConversationScheduler {
     }
   }
 
+  /** Called after durable ingestion; never waits for a model or blocks IM polling. */
+  onTaskQueued(taskId: string): boolean {
+    const input = this.options.store.task(taskId);
+    const active = input ? this.steeringTurns.get(input.executionKey) : undefined;
+    const next = active ? this.options.store.nextQueuedFollowUp(active.task) : undefined;
+    if (input && active && next && this.canSteer(active, input) && this.canSteer(active, next)) {
+      this.flushSteers(active);
+      return true;
+    }
+    queueMicrotask(() => this.pump());
+    return false;
+  }
+
+  private canSteer(active: SteeringTurn, input: StoredTask): boolean {
+    const profile = this.options.profiles.get(input.agentProfileId);
+    const workspace =
+      this.options.workspaceFor?.(input.principalId, input.conversationSpaceId) ??
+      profile?.workspace;
+    return (
+      !active.closing &&
+      Boolean(active.driver.steerTurn) &&
+      profile?.followUpMode !== "queue" &&
+      input.status === "queued" &&
+      !input.scheduleRunId &&
+      !active.task.scheduleRunId &&
+      input.agentProfileId === active.task.agentProfileId &&
+      input.principalId === active.task.principalId &&
+      input.executionKey === active.task.executionKey &&
+      input.sessionKey === active.task.sessionKey &&
+      workspace === active.workspace &&
+      input.message.actor.role === active.task.message.actor.role
+    );
+  }
+
+  private flushSteers(active: SteeringTurn): void {
+    if (!active.ready || active.closing) return;
+    active.pending = active.pending
+      .then(async () => {
+        while (!active.closing) {
+          // Preserve FIFO across speakers, schedules and retries in shared sessions.
+          const input = this.options.store.nextQueuedFollowUp(active.task);
+          if (!input || !this.canSteer(active, input)) return;
+          if (!this.options.store.beginSteer(input.id, active.task.id)) return;
+          try {
+            const result = await active.driver.steerTurn!(active.task.id, {
+              messageId: input.id,
+              context: agentTurnContext(input, "im"),
+              prompt: textOf(input.message.parts),
+              parts: input.message.parts,
+            });
+            this.options.store.resolveSteer(
+              input.id,
+              result === "accepted" ? "accepted" : "rejected",
+            );
+            if (result !== "accepted") {
+              active.closing = true;
+              return;
+            }
+            active.memoryContext.sourceMessageIds.push(input.message.messageId);
+            this.logger.info("task.steered", { taskId: active.task.id, inputTaskId: input.id });
+          } catch (error) {
+            this.options.store.resolveSteer(input.id, "uncertain");
+            this.options.store.addDeadLetter(
+              "task.steer-uncertain",
+              error,
+              { targetTaskId: active.task.id },
+              input.message.botInstanceId,
+              input.id,
+            );
+            active.closing = true;
+            await this.reply(
+              input,
+              formatSystemMessage(
+                "error",
+                this.locale(input) === "zh-CN"
+                  ? "无法确认这条补充消息是否已交给当前任务，因此不会自动重复提交。请查看当前任务的最终回复后再决定是否重发。"
+                  : "Delivery of this follow-up to the active turn could not be confirmed. It will not be replayed automatically; check the final reply before resending.",
+                this.locale(input),
+              ),
+              "steer-uncertain",
+            );
+            return;
+          }
+        }
+      })
+      .catch((error: unknown) => {
+        active.closing = true;
+        this.logger.errorFrom("task.steer-failed", error, { taskId: active.task.id });
+      });
+  }
+
   async processOnce(): Promise<boolean> {
     const task = this.options.store.claimNextTask();
     if (!task) return false;
@@ -110,6 +212,13 @@ export class ConversationScheduler {
     } catch (error) {
       this.logger.errorFrom("task.unhandled", error, { taskId: task.id });
     } finally {
+      const steering = this.steeringTurns.get(task.executionKey);
+      if (steering?.task.id === task.id) {
+        steering.closing = true;
+        await steering.pending;
+        this.options.store.settleSteeredInputs(task.id);
+        this.steeringTurns.delete(task.executionKey);
+      }
       this.running.delete(task.id);
       this.taskDrivers.delete(task.id);
       try {
@@ -139,6 +248,16 @@ export class ConversationScheduler {
     const taskProfile = workspace === profile.workspace ? profile : { ...profile, workspace };
     this.taskDrivers.set(task.id, driver);
     const memoryContext = this.memoryContext(task);
+    const steering: SteeringTurn = {
+      task,
+      driver,
+      workspace,
+      ready: false,
+      closing: false,
+      pending: Promise.resolve(),
+      memoryContext,
+    };
+    this.steeringTurns.set(task.executionKey, steering);
     const allowedHostTools = [
       ...SKILL_HOST_TOOL_IDS,
       ...(profile.memory.enabled ? MEMORY_HOST_TOOL_IDS : []),
@@ -176,6 +295,7 @@ export class ConversationScheduler {
     let streamed = "";
     let finalText = "";
     let completed = false;
+    let cancelled = false;
     let freshSessionId: string | undefined;
     try {
       for await (const event of driver.runTurn({
@@ -204,6 +324,10 @@ export class ConversationScheduler {
         hostTools: allowedHostTools,
       })) {
         switch (event.type) {
+          case "turn-started":
+            steering.ready = true;
+            this.flushSteers(steering);
+            break;
           case "session":
             freshSessionId = event.sessionId;
             if (task.sessionKey) {
@@ -267,8 +391,11 @@ export class ConversationScheduler {
             break;
           }
           case "completed":
+            steering.closing = true;
+            await steering.pending;
             completed = event.result === "success";
             if (event.result === "cancelled") {
+              cancelled = true;
               this.options.store.transitionTask(
                 task.id,
                 ["active", "waiting_approval"],
@@ -277,10 +404,15 @@ export class ConversationScheduler {
             }
             break;
           case "error":
+            steering.closing = true;
+            await steering.pending;
             await this.handleDriverError(task, event.error);
             return;
         }
       }
+      steering.closing = true;
+      await steering.pending;
+      if (cancelled) return;
       if (!completed) {
         await this.handleDriverError(
           task,
@@ -307,6 +439,8 @@ export class ConversationScheduler {
       );
       void this.options.outbound.drain(this.options.adapters);
     } catch (error) {
+      steering.closing = true;
+      await steering.pending;
       await driver.interrupt(task.id).catch(() => undefined);
       const normalized = normalizeError(error, "TASK_EXECUTION_FAILED", {
         diagnostic: { taskId: task.id, agentProfileId: task.agentProfileId },
@@ -420,6 +554,7 @@ export class ConversationScheduler {
   }
 
   private replyMessage(task: StoredTask, text: string, suffix: string): OutboundMessage {
+    const replyInput = this.options.store.latestSteeredInput(task.id) ?? task;
     const scheduled = task.scheduleRunId
       ? this.options.store.get<{ name: string; scheduled_for: string }>(
           `SELECT s.name, sr.scheduled_for
@@ -448,8 +583,10 @@ export class ConversationScheduler {
       ...(scheduled
         ? {}
         : {
-            replyTo: { messageId: task.message.messageId },
-            ...(task.message.replyContext ? { replyContext: task.message.replyContext } : {}),
+            replyTo: { messageId: replyInput.message.messageId },
+            ...(replyInput.message.replyContext
+              ? { replyContext: replyInput.message.replyContext }
+              : {}),
           }),
       idempotencyKey: `${task.id}:${suffix}`,
     };

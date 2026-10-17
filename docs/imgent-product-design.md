@@ -1519,7 +1519,7 @@ Claude Code `< 2.1.89` 必须 not ready。Codex app-server 必须完成 initiali
   在用户表面、持久化错误或默认日志。
 - health server 默认只绑定 loopback；control server 只绑定当前部署用户可访问的
   Unix socket/Named Pipe。
-- schema v7 只接受空目录初始化；其他 schema 和 backup v1 均被明确拒绝。
+- schema v8 支持空目录初始化及 v7 无损增量升级；更早 schema 和 backup v1 均被明确拒绝。
 - FTS5 不可用时启动失败，不静默退化。
 - 备份可恢复到新的空数据目录并通过完整性检查。
 
