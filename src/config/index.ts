@@ -81,6 +81,7 @@ export async function loadConfig(path: string): Promise<IMGentConfig> {
         agentUserHome,
         workspace,
         ...(profile.prompt ? { prompt: profile.prompt } : {}),
+        followUpMode: profile.followUpMode,
         skills: profile.skills,
         permissions: profile.permissions,
         memory: profile.memory,

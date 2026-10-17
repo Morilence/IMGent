@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createBackup, restoreBackup } from "../src/backup/service.js";
-import { defaultConfig } from "../src/config/index.js";
+import { configHash } from "../src/config/hash.js";
+import { defaultConfig, loadConfig } from "../src/config/index.js";
 import { configSchema } from "../src/config/schema.js";
 import { writeConfig } from "../src/config/write.js";
 import { CredentialStore } from "../src/security/credential-store.js";
@@ -161,4 +162,33 @@ test("backup and restore verify checksums and preserve encrypted local credentia
     /格式无效/u,
   );
   await rm(directory, { recursive: true, force: true });
+});
+
+test("loading configuration retains the default steering policy and explicit FIFO override", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "imgent-followup-config-"));
+  try {
+    const path = join(directory, "imgent.json");
+    const profile = {
+      id: "main",
+      driver: "codex" as const,
+      command: "codex",
+      agentUserHome: directory,
+      workspace: directory,
+      skills: [],
+      permissions: { maxMode: "ask" as const },
+      memory: { enabled: false },
+    };
+    const config = { ...defaultConfig(directory), agentProfiles: [profile] };
+    await writeConfig(path, config);
+    const implicit = await loadConfig(path);
+    assert.equal(implicit.agentProfiles[0]?.followUpMode, "steer");
+    await writeConfig(path, { ...config, agentProfiles: [{ ...profile, followUpMode: "queue" }] });
+    const queued = await loadConfig(path);
+    assert.equal(queued.agentProfiles[0]?.followUpMode, "queue");
+    assert.notEqual(configHash(queued), configHash(implicit));
+    await writeConfig(path, { ...config, agentProfiles: [{ ...profile, followUpMode: "steer" }] });
+    assert.equal(configHash(await loadConfig(path)), configHash(implicit));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
